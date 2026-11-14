@@ -1,0 +1,73 @@
+# People of TIU (prototype)
+
+A walkable 3D version of the streets around Techno India University (EM-4, Sector V, Salt Lake) in the browser. People near you can chat by text and talk by voice.
+
+## Run it
+
+```bash
+npm install
+```
+
+```bash
+npm start
+```
+
+Open http://localhost:3000 in two browser tabs (or two devices), enter a name in each and walk toward each other.
+
+## Controls
+
+| Action | Keyboard and mouse | Phone |
+|---|---|---|
+| Walk | W A S D or arrow keys | On-screen stick |
+| Run | Hold Shift | Push the stick fully |
+| Jump | Space | Jump button |
+| Look around | Drag with the mouse | Drag with a finger |
+| Zoom | Mouse wheel | |
+| Chat | Enter, type, Enter | Tap the chat box |
+| Talk | Hold V (after "Join voice") | Hold the talk button |
+
+## What is in it
+
+- **The neighbourhood.** Building outlines, roads, sports pitches and green areas come from OpenStreetMap (`public/campus.json`, made by `tools/build-campus.py` from `tools/osm-extract.json`). Building heights are estimates, because the map has none.
+- **The university building.** White tower with strips of blue-green glass, the curved glass corner, roof planting, and the covered main entrance with the name band, dimpled wall tiles, slatted ceiling, reception desk and stone floor. These follow reference photos; the exact proportions are approximate.
+- **The street.** Blue and white railing, three-globe street lamps, planting beds, trees and palms, parked cars and a yellow taxi, a building under construction.
+- **The main character.** A detailed rigged human with motion-captured idle, walk and run. The stride is matched to ground speed, the feet are placed on steps with leg IK (knees bend as hinges), the head and eyes turn toward people nearby, and the face smiles and moves its mouth when you talk. It wears a navy and white diagonal top with a red chest badge. Other players are shown as simple figures.
+- **Physics.** Rapier handles gravity, jumping, solid walls, steps, and loose objects you can push (footballs, crates).
+- **Chat and voice.** Text reaches people within 15 m. Voice is push-to-talk, heard within about 20 m, and placed in 3D so it fades with distance.
+
+## How it works
+
+- `server.js` serves the site and runs one WebSocket at `/ws` for positions (10 a second), nearby chat, and voice call setup.
+- `public/main.js` is the game loop: controls, physics stepping, networking, chat and voice.
+- `public/world.js` builds the scene and its collision shapes from the map data. All textures are drawn in code.
+- `public/character.js` loads the main character, converts the animations to its skeleton, and runs foot placement, head look and face.
+- Voice is a direct browser-to-browser audio link (WebRTC) to each nearby player, opened under 20 m and closed past 26 m.
+- Three.js 0.158, its GLTF loader and Rapier 0.12 are bundled in `public/vendor/`.
+
+## Limits of the prototype
+
+- No accounts. Anyone can enter with any name, and nothing is saved.
+- The character's top keeps the base model's long-sleeved cut; only its colours and badge are changed. The model has two face controls (smile, mouth open) and no blink.
+- Loose objects are simulated on each player's own device, so two players do not see a football in the same place.
+- Voice links are direct, capped at 8 per person, and use only a public STUN server. On strict networks (some campus Wi-Fi and mobile data) links will fail without a TURN server.
+- Microphones need HTTPS on anything other than `localhost`.
+- The server keeps everything in memory in one process and sends every position to everyone.
+- Mute hides a person's voice and chat for you only. There is no report button or admin tool yet.
+
+## Credits and licences
+
+- Map data © OpenStreetMap contributors, under the Open Database Licence. Keep the on-screen credit.
+- `public/models/avatar.glb` is the Ready Player Me sample avatar and `public/models/anims.glb` holds Mixamo animations, both taken from the three.js examples. They are stand-ins: check their terms, or replace them with your own character and animations, before a public launch.
+- Get the university's approval before using its name and logo publicly.
+
+## Hosting
+
+The server needs long-lived WebSocket connections, so host it on a service that runs a Node process (Render, Railway, Fly.io or a VPS). Vercel's serverless functions cannot hold WebSockets.
+
+## Next steps
+
+1. Sign-in with a verified college email, and saved profiles.
+2. A hosted voice server (LiveKit) in place of direct links, for crowds and strict networks.
+3. Report and block, plus an admin page.
+4. A custom character with a real short-sleeved polo, more face controls and a choice of looks.
+5. Zones, so each player only receives positions from nearby areas.
