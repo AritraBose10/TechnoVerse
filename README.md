@@ -25,6 +25,8 @@ Open http://localhost:3000 in two browser tabs (or two devices), enter a name in
 | Zoom | Mouse wheel | |
 | Chat | Enter, type, Enter | Tap the chat box |
 | Talk | Hold V (after "Join voice") | Hold the talk button |
+| Get on / off a bicycle | E, next to a bike (off only below walking pace) | Ride / Get off button |
+| Ride | W pedal, S brake, A D steer, Shift sprint | Stick: up pedals, down brakes, sideways steers |
 
 ## What is in it
 
@@ -33,6 +35,7 @@ Open http://localhost:3000 in two browser tabs (or two devices), enter a name in
 - **The street.** Blue and white railing, three-globe street lamps, planting beds, trees and palms, parked cars and a yellow taxi, a building under construction.
 - **The main character.** A detailed rigged human with motion-captured idle, walk and run. The stride is matched to ground speed, the feet are placed on steps with leg IK (knees bend as hinges), the head and eyes turn toward people nearby, and the face smiles and moves its mouth when you talk. It wears a navy and white diagonal top with a red chest badge. Other players are shown as simple figures.
 - **Jumping.** Real gravity (9.81 m/s²). A standing jump clears about 45 cm, a running one about 55 cm. The body dips and swings the arms back, drives up onto the toes, keeps its momentum in the air (feet together from standing, a held stride off a run, knees drawing up near the top), and on landing the knees and hips give in proportion to the impact before it stands back up. One jump per press.
+- **Bicycles.** Three city bikes stand on the forecourt beside the entrance. Riding uses real numbers: about 150 W of pedalling cruises at 26 km/h on the flat (420 W sprinting, about 38 km/h), held back by rolling resistance, air drag and the slope under the wheels (gravity along the road: a 5% climb drops cruising speed to about 11 km/h). Brakes stop you from 26 km/h in under 6 m. Steering follows the bicycle's geometry (turn radius = wheelbase / tan of the steering angle), the available steering shrinks with speed, and the bike leans into turns by the balance angle atan(v²/gR), with a rider's lag. Coasting, the cranks stop (freewheel). Below walking pace the rider puts a foot down. The rider sits on the saddle with hands on the grips and feet following the pedals. Other people see you on a bike leaning through turns.
 - **Physics.** Rapier handles gravity, jumping, solid walls, steps, and loose objects you can push (footballs, crates).
 - **Chat and voice.** Text reaches people within 15 m. Voice is push-to-talk, heard within about 20 m, and placed in 3D so it fades with distance.
 

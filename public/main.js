@@ -2,6 +2,7 @@ import * as THREE from "three";
 import RAPIER from "/vendor/rapier.es.js";
 import { buildWorld } from "/world.js";
 import { loadHero } from "/character.js";
+import { buildBicycle, newRide, stepBike, BIKE } from "/bicycle.js";
 
 await RAPIER.init(); // loads the physics engine (WebAssembly)
 
@@ -168,6 +169,8 @@ function makeAvatar(info) {
     ty: info.y || 0,
     tz: info.z,
     try: info.ry,
+    bikeOn: Boolean(info.bike),
+    tlean: info.lean || 0,
     bubble: null,
     bubbleUntil: 0,
     speaking: false,
@@ -180,6 +183,30 @@ const heroLoading = loadHero(renderer).catch((err) => {
   console.warn("Could not load the detailed character; using the simple figure.", err);
   return null;
 });
+// Someone else on a bike: a lighter copy of the bike under their figure, leaning as they lean.
+function showRemoteBike(a, dt, roll) {
+  if (a.bikeOn && !a.bikeModel) {
+    a.bikeModel = buildBicycle({ color: a.color || "#8f1d22", detail: false });
+    a.bikeRig = new THREE.Group();
+    a.bikeRig.add(a.bikeModel.group);
+    a.group.add(a.bikeRig);
+    for (const part of a.simple) {
+      part.userData.baseY = part.position.y;
+      a.bikeRig.attach(part);
+    }
+    a.lean = 0;
+    a.crank = 0;
+  }
+  if (!a.bikeModel) return;
+  a.bikeModel.group.visible = a.bikeOn;
+  for (const part of a.simple) part.position.y = part.userData.baseY + (a.bikeOn ? 0.45 : 0); // seated on the saddle
+  a.lean += ((a.bikeOn ? a.tlean : 0) - a.lean) * (1 - Math.exp(-dt * 8));
+  a.bikeRig.rotation.z = -a.lean;
+  if (a.bikeOn) {
+    a.crank += roll / BIKE.wheelRadius / BIKE.gear;
+    a.bikeModel.pose({ roll, crankAngle: a.crank });
+  }
+}
 async function attachHero(a) {
   const loaded = await heroLoading;
   if (!loaded) return;
@@ -256,9 +283,9 @@ function connect(profile) {
         break;
       }
       case "snap":
-        for (const [id, x, y, z, ry] of msg.p) {
+        for (const [id, x, y, z, ry, bk, lean] of msg.p) {
           const a = players.get(id);
-          if (a) Object.assign(a, { tx: x, ty: y, tz: z, try: ry });
+          if (a) Object.assign(a, { tx: x, ty: y, tz: z, try: ry, bikeOn: Boolean(bk), tlean: lean || 0 });
         }
         break;
       case "chat": {
@@ -377,6 +404,7 @@ function setTalking(on) {
   $("#talk").classList.toggle("live", on);
   $("#talk").textContent = on ? "Talking…" : "Hold to talk (V)";
 }
+$("#ride").addEventListener("click", () => toggleRide());
 $("#voiceJoin").addEventListener("click", () => (voice.on ? leaveVoice() : joinVoice()));
 const talkBtn = $("#talk");
 talkBtn.addEventListener("pointerdown", (e) => {
@@ -567,6 +595,7 @@ addEventListener("keydown", (e) => {
   keys.add(e.code);
   if (e.code === "Space") e.preventDefault();
   if (e.code === "KeyV") setTalking(true);
+  if (e.code === "KeyE" && !e.repeat) toggleRide();
 });
 addEventListener("keyup", (e) => {
   keys.delete(e.code);
@@ -734,6 +763,163 @@ function updateJump(dt, wantJump, speedNow) {
 const lookTarget = new THREE.Vector3();
 const DOWN = { x: 0, y: -1, z: 0 };
 // Height of the solid ground under a point, ignoring my own body and loose objects.
+// ---------- Bicycles ----------
+// A rack of three bikes on the forecourt beside the main entrance. Each visitor's bikes are their
+// own (like the footballs); other people see you on a bike when you ride one.
+const bikes = [];
+const bikeColors = ["#8f1d22", "#1f4f7a", "#2d5a3a"];
+function parkBike(b, x, y, z, heading) {
+  Object.assign(b, { x, y, z, heading });
+  scene.add(b.stand);
+  b.stand.add(b.model.group);
+  b.model.group.position.set(0, 0, 0);
+  b.model.group.rotation.set(0, 0, 0.14); // resting on its kickstand, leaning left
+  b.stand.position.set(x, y, z);
+  b.stand.rotation.set(0, heading, 0);
+  b.model.pose({ steerAngle: -0.3, kickstand: true });
+  b.collider = world.createCollider(RAPIER.ColliderDesc.cuboid(0.22, 0.55, 0.85).setTranslation(x, y + 0.55, z).setRotation({ x: 0, y: Math.sin(heading / 2), z: 0, w: Math.cos(heading / 2) }));
+}
+{
+  const cosP = Math.cos(entranceYaw);
+  const sinP = Math.sin(entranceYaw);
+  const local = (x, z) => [focus.x + x * cosP + z * sinP, focus.z - x * sinP + z * cosP];
+  // On the forecourt between the raised entrance floor (ends 3 m out) and the railing (6.3 m out),
+  // side by side, front wheels toward the gate.
+  [3.8, 4.8, 5.8].forEach((out, i) => {
+    const b = { model: buildBicycle({ color: bikeColors[i] }), stand: new THREE.Group() };
+    const [x, z] = local(11.6, out);
+    parkBike(b, x, 0, z, entranceYaw + Math.PI / 2);
+    bikes.push(b);
+  });
+}
+let riding = null; // { bike, r }
+const rideRig = new THREE.Group(); // leans the bike and rider together about the tyre contact line
+let rideGrade = 0;
+let landBob = 0;
+function nearestBike() {
+  if (!me) return null;
+  const p = me.group.position;
+  let best = null;
+  for (const b of bikes) {
+    if (riding?.bike === b) continue;
+    const d = Math.hypot(b.x - p.x, b.z - p.z);
+    if (d < 1.8 && Math.abs(b.y - p.y) < 1 && (!best || d < best.d)) best = { b, d };
+  }
+  return best?.b || null;
+}
+function toggleRide() {
+  if (!me || !hero) return;
+  if (riding) {
+    const { bike, r } = riding;
+    if (Math.abs(r.v) > 1.5) {
+      logLine("Slow down to get off.", true);
+      return;
+    }
+    if (!body.grounded) return;
+    const p = me.group.position;
+    rideRig.remove(bike.model.group);
+    parkBike(bike, p.x, p.y, p.z, r.heading);
+    me.group.add(hero.model);
+    me.group.remove(rideRig);
+    // step off to the left of the bike
+    placeBody(p.x - Math.cos(r.heading) * 0.75, p.y, p.z + Math.sin(r.heading) * 0.75);
+    vel.x = vel.z = 0;
+    riding = null;
+    return;
+  }
+  const b = nearestBike();
+  if (!b) return;
+  world.removeCollider(b.collider, true);
+  scene.remove(b.stand);
+  b.stand.remove(b.model.group);
+  b.model.group.rotation.set(0, 0, 0);
+  me.group.add(rideRig);
+  rideRig.add(b.model.group, hero.model);
+  placeBody(b.x, b.y, b.z);
+  me.group.position.set(b.x, b.y, b.z);
+  me.group.rotation.y = b.heading;
+  vel.x = vel.z = 0;
+  riding = { bike: b, r: newRide(b.heading) };
+  jumpState.phase = null;
+  camYaw = b.heading;
+}
+const _w = { saddle: new THREE.Vector3(), gripL: new THREE.Vector3(), gripR: new THREE.Vector3(), pedalL: new THREE.Vector3(), pedalR: new THREE.Vector3(), groundL: new THREE.Vector3(), right: new THREE.Vector3(), up: new THREE.Vector3(), back: new THREE.Vector3() };
+function rideFrame(dt) {
+  const { bike, r } = riding;
+  let pedal = keys.has("KeyW") || keys.has("ArrowUp") ? 1 : 0;
+  let brake = keys.has("KeyS") || keys.has("ArrowDown") ? 1 : 0;
+  let steer = (keys.has("KeyD") || keys.has("ArrowRight") ? 1 : 0) - (keys.has("KeyA") || keys.has("ArrowLeft") ? 1 : 0);
+  if (stickVec.y < -0.2) pedal = Math.max(pedal, Math.min(1, -stickVec.y * 1.25));
+  if (stickVec.y > 0.2) brake = Math.max(brake, Math.min(1, stickVec.y * 1.25));
+  steer = Math.max(-1, Math.min(1, steer + stickVec.x));
+  const sprint = keys.has("ShiftLeft") || keys.has("ShiftRight") || Math.hypot(stickVec.x, stickVec.y) > 0.95;
+  const before = body.rigid.translation();
+  const { vx, vz } = stepBike(r, { pedal, brake, steer, sprint }, { grounded: body.grounded, grade: rideGrade }, dt);
+  // Nothing passes through a wall: look ahead of the front wheel (or behind the back one)
+  const dir = Math.sign(r.v);
+  if (dir) {
+    const f = { x: (-Math.sin(r.heading) * dir), y: 0, z: (-Math.cos(r.heading) * dir) };
+    const hit = world.castRay(new RAPIER.Ray({ x: before.x, y: before.y - BODY_CENTRE + 0.5, z: before.z }, f), 1.2, true, undefined, undefined, undefined, body.rigid, (c) => !c.parent()?.isDynamic());
+    if (hit && hit.toi < 0.92 + Math.abs(r.v) * dt) {
+      if (Math.abs(r.v) > 3) logLine("Bump! Mind the walls.", true);
+      r.v = 0;
+    }
+  }
+  physicsTime += dt;
+  const moveX = r.v ? vx : 0;
+  const moveZ = r.v ? vz : 0;
+  let steps = 0;
+  for (; physicsTime >= STEP && steps < 6; steps++) {
+    physicsTime -= STEP;
+    stepPhysics(moveX, moveZ, 0);
+  }
+  if (physicsTime > STEP) physicsTime = 0;
+  const after = body.rigid.translation();
+  const flat = Math.hypot(after.x - before.x, after.z - before.z);
+  if (body.grounded && flat > 0.02) {
+    // the road's slope under the wheels, from how far the body rose per metre travelled
+    const g = Math.max(-0.25, Math.min(0.25, ((after.y - before.y) / flat) * Math.sign(r.v || 1)));
+    rideGrade += (g - rideGrade) * (1 - Math.exp(-dt * 6));
+  } else if (body.grounded) rideGrade *= 1 - Math.min(1, dt * 3);
+  // blocked by something the look-ahead missed (a corner, a kerb too tall to climb)
+  const expected = Math.abs(r.v) * steps * STEP; // physics may take 0, 1 or 2 steps in a frame
+  if (body.grounded && expected > 0.03 && flat < expected * 0.3) r.v *= 0.3;
+  if (body.impact > 0.5 && body.grounded) {
+    landBob = Math.min(0.09, body.impact * 0.025); // tyres and saddle give a little on landing
+    body.impact = 0;
+  }
+  landBob *= Math.exp(-dt * 9);
+  me.group.position.set(after.x, after.y - BODY_CENTRE, after.z);
+  me.group.rotation.y = r.heading;
+  rideRig.rotation.z = -r.lean;
+  rideRig.position.y = -landBob;
+  bike.model.pose({ steerAngle: r.steer, roll: r.roll, crankAngle: r.crank, kickstand: false });
+  me.group.updateMatrixWorld(true);
+  const m = bike.model;
+  m.saddle.getWorldPosition(_w.saddle);
+  m.grips[0].getWorldPosition(_w.gripL);
+  m.grips[1].getWorldPosition(_w.gripR);
+  m.pedals[1].getWorldPosition(_w.pedalL);
+  m.pedals[0].getWorldPosition(_w.pedalR);
+  const q = rideRig.getWorldQuaternion(new THREE.Quaternion());
+  _w.right.set(1, 0, 0).applyQuaternion(q);
+  _w.up.set(0, 1, 0).applyQuaternion(q);
+  _w.back.set(0, 0, 1).applyQuaternion(q);
+  me.group.localToWorld(_w.groundL.set(-0.36, 0.1, 0.12));
+  hero.update(dt, {
+    speed: 0,
+    grounded: true,
+    turnRate: 0,
+    facing: r.heading,
+    lookAt: null,
+    talk: 0,
+    ride: { ...(_w), crank: r.crank, effort: r.effort, footDown: r.footDown },
+  });
+  // camera swings round behind the rider while moving, unless you are looking around
+  if (!drag && Math.abs(r.v) > 1) camYaw = lerpAngle(camYaw, r.heading, 1 - Math.exp(-dt * 1.6));
+  airTime = body.grounded ? 0 : airTime + dt;
+}
+
 function groundAt(x, z, fromY) {
   const hit = world.castRay(new RAPIER.Ray({ x, y: fromY, z }, DOWN), 1.5, true, undefined, undefined, undefined, body.rigid, (c) => !c.parent()?.isDynamic());
   return hit ? fromY - hit.toi : null;
@@ -758,6 +944,27 @@ function frame() {
     return;
   }
 
+  const pos = me.group.position;
+  if (riding && hero) rideFrame(dt);
+  else walkFrame(dt, now);
+  updateRideHint();
+  sun.position.copy(pos).add(SUN_OFFSET);
+  sun.target.position.copy(pos);
+  afterMove(dt, now, pos);
+}
+function updateRideHint() {
+  const hint = $("#rideHint");
+  const btn = $("#ride");
+  let text = "";
+  if (riding) text = Math.abs(riding.r.v) > 1.5 ? "W pedal · S brake · A D steer · Shift sprint" : "E to get off";
+  else if (nearestBike()) text = "E to ride the bike";
+  hint.textContent = text;
+  hint.hidden = !text;
+  btn.hidden = !(riding || nearestBike());
+  btn.textContent = riding ? "Get off" : "Ride";
+}
+function walkFrame(dt, now) {
+  const pos = me.group.position;
   // My movement, relative to where the camera looks
   let mx = stickVec.x;
   let mz = stickVec.y;
@@ -766,7 +973,6 @@ function frame() {
   if (keys.has("KeyA") || keys.has("ArrowLeft")) mx -= 1;
   if (keys.has("KeyD") || keys.has("ArrowRight")) mx += 1;
   const len = Math.hypot(mx, mz);
-  const pos = me.group.position;
   let wantX = 0;
   let wantZ = 0;
   if (len > 0.05) {
@@ -825,8 +1031,8 @@ function frame() {
       groundAt,
     });
   }
-  sun.position.copy(pos).add(SUN_OFFSET);
-  sun.target.position.copy(pos);
+}
+function afterMove(dt, now, pos) {
   for (const p of props) {
     const pt = p.body.translation();
     if (pt.y < -20) {
@@ -844,8 +1050,10 @@ function frame() {
     p.x += (a.tx - p.x) * k;
     p.y += (a.ty - p.y) * k;
     p.z += (a.tz - p.z) * k;
+    const moved = Math.hypot(a.tx - p.x, a.tz - p.z);
     a.group.rotation.y = lerpAngle(a.group.rotation.y, a.try, k);
     a.dist = Math.hypot(p.x - pos.x, p.z - pos.z);
+    showRemoteBike(a, dt, moved * k);
   }
   for (const a of [me, ...players.values()]) {
     if (a.bubble && now > a.bubbleUntil) {
@@ -860,10 +1068,11 @@ function frame() {
   sendTimer += dt;
   if (sendTimer >= 0.1) {
     sendTimer = 0;
-    const state = `${pos.x.toFixed(2)},${pos.y.toFixed(2)},${pos.z.toFixed(2)},${me.group.rotation.y.toFixed(2)}`;
+    const lean = riding ? riding.r.lean : 0;
+    const state = `${pos.x.toFixed(2)},${pos.y.toFixed(2)},${pos.z.toFixed(2)},${me.group.rotation.y.toFixed(2)},${riding ? 1 : 0},${lean.toFixed(2)}`;
     if (state !== lastSent) {
       lastSent = state;
-      sendMsg({ t: "pos", x: pos.x, y: pos.y, z: pos.z, ry: me.group.rotation.y });
+      sendMsg({ t: "pos", x: pos.x, y: pos.y, z: pos.z, ry: me.group.rotation.y, b: riding ? 1 : 0, l: lean });
     }
   }
   slowTimer += dt;
@@ -875,7 +1084,7 @@ function frame() {
   updateAudioPositions(camYaw);
 
   // Camera follows behind and above, and moves in closer rather than passing through a wall
-  const eye = { x: pos.x, y: pos.y + 1.55, z: pos.z };
+  const eye = { x: pos.x, y: pos.y + (riding ? 1.75 : 1.55), z: pos.z };
   const dir = { x: Math.sin(camYaw) * Math.cos(camPitch), y: Math.sin(camPitch), z: Math.cos(camYaw) * Math.cos(camPitch) };
   const hit = world.castRay(new RAPIER.Ray(eye, dir), camDist + 0.4, true, undefined, undefined, undefined, body.rigid, (c) => !c.parent()?.isDynamic());
   const reach = Math.max(0.6, (hit ? Math.min(camDist, hit.toi - 0.3) : camDist));
@@ -894,6 +1103,8 @@ frame();
 // Small handle for automated tests and debugging in the console.
 window.__tiu = {
   // free camera for screenshots: __tiu.cam(x, y, z, lookX, lookY, lookZ); __tiu.cam() to go back
+  bikes: () => bikes.map((b) => ({ x: b.x, y: b.y, z: b.z, heading: b.heading })),
+  ride: () => riding && { v: +riding.r.v.toFixed(2), kmh: +(riding.r.v * 3.6).toFixed(1), heading: riding.r.heading, steer: +riding.r.steer.toFixed(3), lean: +riding.r.lean.toFixed(3), footDown: +riding.r.footDown.toFixed(2), grade: +rideGrade.toFixed(3) },
   slow(k = 1) {
     timeScale = k;
   },

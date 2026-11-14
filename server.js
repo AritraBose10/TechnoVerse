@@ -211,6 +211,8 @@ const publicView = (p) => ({
   z: p.z,
   ry: p.ry,
   voice: p.voice,
+  bike: p.bike,
+  lean: p.lean,
 });
 
 wss.on("connection", (ws) => {
@@ -242,6 +244,8 @@ wss.on("connection", (ws) => {
         color: /^#[0-9a-fA-F]{6}$/.test(msg.color) ? msg.color : "#4f7cff",
         ...spawnPoint(),
         voice: false,
+        bike: 0,
+        lean: 0,
         lastChat: 0,
       };
       players.set(me.id, me);
@@ -263,6 +267,8 @@ wss.on("connection", (ws) => {
       me.y = clamp(num(msg.y), -5, 60);
       me.z = clamp(num(msg.z), -WORLD_LIMIT, WORLD_LIMIT);
       me.ry = num(msg.ry);
+      me.bike = msg.b ? 1 : 0; // riding a bicycle
+      me.lean = clamp(num(msg.l), -0.8, 0.8); // its lean, so others see it bank into turns
     } else if (msg.t === "chat") {
       const text = clean(msg.text, 240);
       const now = Date.now();
@@ -311,7 +317,7 @@ setInterval(() => {
   if (players.size < 2) return;
   const snapshot = JSON.stringify({
     t: "snap",
-    p: [...players.values()].map((p) => [p.id, +p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2), +p.ry.toFixed(2)]),
+    p: [...players.values()].map((p) => [p.id, +p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2), +p.ry.toFixed(2), p.bike, +p.lean.toFixed(2)]),
   });
   for (const p of players.values()) if (p.ws.readyState === 1) p.ws.send(snapshot);
 }, TICK_MS);

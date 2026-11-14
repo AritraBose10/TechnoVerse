@@ -67,6 +67,10 @@
   #stick i { position:absolute; left:50%; top:50%; width:46px; height:46px; margin:-23px; border-radius:50%; background:rgba(255,255,255,.55); }
   #jump { position:absolute; left:150px; bottom:240px; width:64px; height:64px; border-radius:50%; display:none;
     border:1px solid var(--line); background:rgba(255,255,255,.2); color:var(--text); touch-action:none; }
+  #rideHint { position:absolute; left:50%; bottom:96px; transform:translateX(-50%); padding:8px 14px; font-size:14px; white-space:nowrap; }
+  #ride { position:absolute; left:50%; bottom:40px; transform:translateX(-50%); padding:10px 22px; border-radius:22px; border:0;
+          background:#ffb53d; color:#1b1f27; font-weight:700; font-size:15px; cursor:pointer; }
+  #ride[hidden], #rideHint[hidden] { display:none; }
   @media (pointer:coarse) { #stick, #jump { display:block; } #nearby { width:170px; max-height:30vh; } #voice { width:170px; bottom:210px; } }
 </style>
 <script type="importmap">
@@ -102,6 +106,8 @@
   <div id="credit">Map data © OpenStreetMap contributors</div>
   <div id="stick"><i></i></div>
   <button id="jump" type="button">Jump</button>
+  <div id="rideHint" class="panel" hidden></div>
+  <button id="ride" type="button" hidden>Ride</button>
 
   <div id="chat" class="panel">
     <div id="chatLog" aria-live="polite"></div>

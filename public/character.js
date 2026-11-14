@@ -224,6 +224,7 @@ export async function loadHero(renderer) {
   const chest = bone("Spine1");
   const arms = [bone("LeftArm"), bone("RightArm")];
   const forearms = [bone("LeftForeArm"), bone("RightForeArm")];
+  const hands = [bone("LeftHand"), bone("RightHand")];
   const neck = bone("Neck");
   const head = bone("Head");
   const eyes = [bone("LeftEye"), bone("RightEye")].filter(Boolean);
@@ -296,6 +297,11 @@ export async function loadHero(renderer) {
   // Two-bone leg solver: moves the ankle to `target` by rotating the hip and bending the knee in the
   // plane it already bends in. The knee works as a hinge and the leg never stretches past its length.
   function solveLeg(leg, target) {
+    solveChain(leg.up, leg.knee, leg.foot, target);
+  }
+  // The same two-bone solver for any limb: root (hip/shoulder), hinge (knee/elbow), end (ankle/wrist).
+  function solveChain(upBone, midBone, endBone, target) {
+    const leg = { up: upBone, knee: midBone, foot: endBone };
     const a = leg.up.getWorldPosition(new THREE.Vector3());
     const b = leg.knee.getWorldPosition(new THREE.Vector3());
     const c = leg.foot.getWorldPosition(new THREE.Vector3());
@@ -328,6 +334,64 @@ export async function loadHero(renderer) {
     leg.foot.updateMatrixWorld(true);
   }
 
+  // ---------- riding a bicycle ----------
+  // Seated on the saddle, hands on the grips, feet on the pedals following the cranks, trunk
+  // inclined forward (more when sprinting), head up to see the road. At a stop the left foot comes
+  // down to the ground.
+  let riding = false;
+  const footFlat = legs.map(() => new THREE.Quaternion());
+  function ride(dt, s) {
+    const r = s.ride;
+    riding = true;
+    actions.idle.setEffectiveWeight(1);
+    actions.walk.setEffectiveWeight(0);
+    actions.run.setEffectiveWeight(0);
+    mixer.update(dt);
+    holder.rotation.set(0, Math.PI, 0);
+    holder.position.set(0, 0, 0);
+    holder.parent.updateMatrixWorld(true);
+    // standing pose's feet: flat, pointing forward; kept to give the feet their angle on the pedals
+    legs.forEach((leg, i) => leg.foot.getWorldQuaternion(footFlat[i]));
+    // sit: move the whole figure so the pelvis rests on the saddle
+    hips.getWorldPosition(v1);
+    const seat = v2.copy(r.saddle).addScaledVector(r.up, 0.085).addScaledVector(r.back, 0.03);
+    const parent = holder.parent;
+    holder.position.add(parent.worldToLocal(seat.clone()).sub(parent.worldToLocal(v1.clone())));
+    holder.updateMatrixWorld(true);
+    const turn = (b, angle, axis = r.right) => {
+      if (Math.abs(angle) > 1e-4) turnInWorld(b, qc.setFromAxisAngle(axis, angle));
+    };
+    // trunk forward over the bars; a sprinting rider gets lower
+    const bend = 0.42 + 0.2 * r.effort;
+    turn(spine, -bend * 0.55);
+    turn(chest, -bend * 0.45);
+    turn(neck, bend * 0.5);
+    turn(head, bend * 0.35 + 0.05);
+    // arms: reach forward with a soft elbow, then the wrists go to the grips
+    arms.forEach((arm, i) => {
+      turn(arm, 1.05);
+      turn(forearms[i], 0.45);
+      const grip = i === 0 ? r.gripL : r.gripR;
+      solveChain(arm, forearms[i], hands[i], v3.copy(grip).addScaledVector(r.back, 0.05).addScaledVector(r.up, 0.02));
+    });
+    // legs: knees forward, ankles over the pedals (ball of the foot on the pedal)
+    legs.forEach((leg, i) => {
+      turn(leg.up, 1.25);
+      turn(leg.knee, -1.5);
+      const pedal = i === 0 ? r.pedalL : r.pedalR;
+      const onPedal = v3.copy(pedal).addScaledVector(r.up, 0.075).addScaledVector(r.back, 0.07);
+      if (i === 0 && r.footDown > 0.01) onPedal.lerp(r.groundL, r.footDown);
+      solveChain(leg.up, leg.knee, leg.foot, onPedal);
+      // foot angle: flat, with the toes dipping a little through the down-stroke (ankling)
+      leg.foot.quaternion.copy(leg.knee.getWorldQuaternion(qa).invert()).multiply(footFlat[i]);
+      leg.foot.updateMatrixWorld(true);
+      turn(leg.foot, -0.12 - 0.12 * Math.sin(r.crank + (i === 0 ? Math.PI : 0)));
+    });
+    // face: concentrating a little when sprinting
+    smile += (0.15 - 0.1 * r.effort - smile) * ease(dt, 3);
+    for (const f of faces) f.morphTargetInfluences[f.morphTargetDictionary.mouthSmile] = clamp(smile, 0, 1);
+  }
+
   return {
     model: holder,
     stride: { walkSpeed, runSpeed },
@@ -339,6 +403,14 @@ export async function loadHero(renderer) {
      */
     update(dt, s) {
       clock += dt;
+      if (s.ride) {
+        ride(dt, s);
+        return;
+      }
+      if (riding) {
+        riding = false;
+        holder.position.set(0, 0, 0);
+      }
       const jump = s.jump || {};
       // ---- walking and running, blended by speed ----
       const moving = smoothstep(0.1, 0.9, s.speed);
