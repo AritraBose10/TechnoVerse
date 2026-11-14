@@ -19,7 +19,8 @@ const STEP = 1 / 60; // physics runs at a fixed 60 steps a second
 const BODY_HALF = 0.5; // capsule: half height of the straight part
 const BODY_RADIUS = 0.4;
 const BODY_CENTRE = BODY_HALF + BODY_RADIUS; // centre of the capsule above the feet
-const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+// Replaced by the server's list (which adds a TURN relay when one is configured) on joining voice.
+let iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
 const COLORS = ["#4f7cff", "#ff6b6b", "#2ec4a6", "#ffb53d", "#b072ff", "#ff7ab8"];
 
 const $ = (sel) => document.querySelector(sel);
@@ -331,6 +332,13 @@ async function joinVoice() {
     $("#voiceHint").textContent = "Microphone was blocked. Allow it in your browser and try again.";
     return;
   }
+  try {
+    const res = await fetch("/ice", { cache: "no-store" });
+    const list = (await res.json()).iceServers;
+    if (Array.isArray(list) && list.length) iceServers = list;
+  } catch {
+    // Keep the STUN-only default; voice still works on open networks.
+  }
   voice.ctx = voice.ctx || new (window.AudioContext || window.webkitAudioContext)();
   await voice.ctx.resume();
   voice.track = voice.stream.getAudioTracks()[0];
@@ -373,7 +381,7 @@ talkBtn.addEventListener("pointerdown", (e) => {
 for (const ev of ["pointerup", "pointercancel"]) talkBtn.addEventListener(ev, () => setTalking(false));
 
 function createPeer(id) {
-  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const pc = new RTCPeerConnection({ iceServers });
   const peer = { pc, panner: null, gain: null, analyser: null, audioEl: null, pending: [], hasRemote: false };
   peers.set(id, peer);
   pc.addTrack(voice.track, voice.stream);

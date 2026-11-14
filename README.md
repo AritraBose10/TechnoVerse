@@ -49,7 +49,7 @@ Open http://localhost:3000 in two browser tabs (or two devices), enter a name in
 - No accounts. Anyone can enter with any name, and nothing is saved.
 - The character's top keeps the base model's long-sleeved cut; only its colours and badge are changed. The model has two face controls (smile, mouth open) and no blink.
 - Loose objects are simulated on each player's own device, so two players do not see a football in the same place.
-- Voice links are direct, capped at 8 per person, and use only a public STUN server. On strict networks (some campus Wi-Fi and mobile data) links will fail without a TURN server.
+- Voice links are direct and capped at 8 per person. On strict networks (some campus Wi-Fi and mobile data) they need a TURN relay; see "Voice relay" below.
 - Microphones need HTTPS on anything other than `localhost`.
 - The server keeps everything in memory in one process and sends every position to everyone.
 - Mute hides a person's voice and chat for you only. There is no report button or admin tool yet.
@@ -63,6 +63,23 @@ Open http://localhost:3000 in two browser tabs (or two devices), enter a name in
 ## Hosting
 
 The server needs long-lived WebSocket connections, so host it on a service that runs a Node process (Render, Railway, Fly.io or a VPS). Vercel's serverless functions cannot hold WebSockets.
+
+## Voice relay (TURN)
+
+Without a relay, voice only works when two devices can reach each other directly. Set one of these on the host and the server hands the relay to browsers at `/ice` (credentials are refreshed automatically):
+
+| Provider | Environment variables |
+|---|---|
+| Cloudflare (free tier) | `CF_TURN_KEY_ID`, `CF_TURN_API_TOKEN` |
+| Metered.ca (free tier) | `METERED_DOMAIN` (e.g. `yourapp.metered.live`), `METERED_API_KEY` |
+| Any TURN server | `TURN_URLS` (comma-separated), `TURN_USERNAME`, `TURN_CREDENTIAL` |
+
+On start the server logs either "Voice relay (TURN) configured." or "No TURN server set".
+
+## Caching and disconnects
+
+- Static files are served gzipped with ETags. Models and `vendor/` are cached by the browser for a week, so rename a file (or bump its name) when you replace it. Everything else is revalidated on each load and costs a 304 when unchanged.
+- The server pings every client every 15 s and drops any that do not answer, so a phone that loses signal disappears for others within 30 s.
 
 ## Next steps
 
