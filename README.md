@@ -28,10 +28,11 @@ Open http://localhost:3000 in two browser tabs (or two devices), enter a name in
 
 ## What is in it
 
-- **The neighbourhood.** Building outlines, roads, sports pitches and green areas come from OpenStreetMap (`public/campus.json`, made by `tools/build-campus.py` from `tools/osm-extract.json`). Building heights are estimates, because the map has none.
+- **The neighbourhood.** Building outlines, roads, pitches and green areas come from OpenStreetMap, with the many buildings OpenStreetMap lacks here filled in from Overture Maps (Google Open Buildings and Microsoft footprints). Positions were checked against satellite imagery; a few outlines missing from both, and outdated ones (the classroom sheds and Phase 3 building, the pool), are corrected in `tools/survey.json`. Buildings carry their names from map labels, OpenStreetMap and Overture places, shown on a board on the wall facing the road (and on the roof for towers). Heights of nearby buildings are estimates from street-level imagery; elsewhere they are guessed from footprint size, so the shapes are placeholders for now.
 - **The university building.** White tower with strips of blue-green glass, the curved glass corner, roof planting, and the covered main entrance with the name band, dimpled wall tiles, slatted ceiling, reception desk and stone floor. These follow reference photos; the exact proportions are approximate.
 - **The street.** Blue and white railing, three-globe street lamps, planting beds, trees and palms, parked cars and a yellow taxi, a building under construction.
 - **The main character.** A detailed rigged human with motion-captured idle, walk and run. The stride is matched to ground speed, the feet are placed on steps with leg IK (knees bend as hinges), the head and eyes turn toward people nearby, and the face smiles and moves its mouth when you talk. It wears a navy and white diagonal top with a red chest badge. Other players are shown as simple figures.
+- **Jumping.** Real gravity (9.81 m/s²). A standing jump clears about 45 cm, a running one about 55 cm. The body dips and swings the arms back, drives up onto the toes, keeps its momentum in the air (feet together from standing, a held stride off a run, knees drawing up near the top), and on landing the knees and hips give in proportion to the impact before it stands back up. One jump per press.
 - **Physics.** Rapier handles gravity, jumping, solid walls, steps, and loose objects you can push (footballs, crates).
 - **Chat and voice.** Text reaches people within 15 m. Voice is push-to-talk, heard within about 20 m, and placed in 3D so it fades with distance.
 
@@ -63,6 +64,10 @@ Open http://localhost:3000 in two browser tabs (or two devices), enter a name in
 ## Hosting
 
 The server needs long-lived WebSocket connections, so host it on a service that runs a Node process (Render, Railway, Fly.io or a VPS). Vercel's serverless functions cannot hold WebSockets.
+
+## Map data
+
+`public/campus.json` is generated: `python3 tools/build-campus.py`. Inputs in `tools/`: `osm-extract.json` (Overpass; the command is at the top of the script), `overture-buildings.json` and `overture-places.json` (`tools/fetch-overture.py`, needs `pip install duckdb`), and `survey.json` (hand corrections, each with a note on its source). Credit: map data © OpenStreetMap contributors (ODbL); Overture Maps (ODbL, includes Google Open Buildings CC BY 4.0).
 
 ## Voice relay (TURN)
 

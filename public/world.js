@@ -167,6 +167,22 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
       g.fillRect(0, 0, 26, 12);
     }),
   };
+  tex.water = texture(256, 256, (g, w, h) => {
+    g.fillStyle = "#2f8fa8";
+    g.fillRect(0, 0, w, h);
+    g.strokeStyle = "rgba(220,245,250,0.35)";
+    g.lineWidth = 2;
+    for (let i = 0; i < 40; i++) {
+      const x = Math.random() * w;
+      const y = Math.random() * h;
+      g.beginPath();
+      g.moveTo(x, y);
+      g.quadraticCurveTo(x + 10, y - 5, x + 22, y);
+      g.stroke();
+    }
+    g.fillStyle = "rgba(10,60,80,0.35)"; // lane lines on the pool floor
+    for (let x = 30; x < w; x += 64) g.fillRect(x, 0, 4, h);
+  });
   tex.mainRoad.repeat.set(1, 1);
 
   // Building fronts. Each texture is one bay wide and one storey tall.
@@ -239,6 +255,39 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
       g.fillStyle = "#e3e5e3";
       g.fillRect(132, 150, 40, 26); // an air conditioner
     }),
+    // terracotta piers with tall blue glass panels (the EcoCentre tower on Street No. 13)
+    terracotta: facade((g, w, h) => {
+      g.fillStyle = "#b8664a";
+      g.fillRect(0, 0, w, h);
+      g.fillStyle = "#a95a40";
+      for (let x = 0; x < w; x += 128) g.fillRect(x, 0, 18, h);
+      for (let i = 0; i < 2; i++) glassGradient(g, 26 + i * 128, 0, 94, h - 26, "#4d79a6", "#7ea6c6");
+      g.fillStyle = "#c98a6c";
+      g.fillRect(0, h - 26, w, 26);
+    }),
+    // plain painted plaster with a small window: low blocks, sheds and shops
+    plaster: facade((g, w, h) => {
+      g.fillStyle = "#e4dccb";
+      g.fillRect(0, 0, w, h);
+      speckle(g, w, h, 900, ["#cfc6b3", "#efe8d8", "#bdb4a2"], 4);
+      g.fillStyle = "#c8bea9";
+      g.fillRect(0, h - 12, w, 12);
+      g.fillStyle = "#56656b";
+      g.fillRect(88, 78, 80, 84);
+      g.fillStyle = "#3b4447";
+      g.fillRect(84, 74, 88, 4);
+    }),
+    // corrugated sheet wall with a door: the single-storey classroom sheds
+    shed: facade((g, w, h) => {
+      g.fillStyle = "#e6e2d6";
+      g.fillRect(0, 0, w, h);
+      g.fillStyle = "#cfc9ba";
+      for (let x = 0; x < w; x += 12) g.fillRect(x, 0, 4, h);
+      g.fillStyle = "#4a5a66";
+      g.fillRect(40, 70, 70, 60);
+      g.fillStyle = "#6b4a33";
+      g.fillRect(150, 60, 56, h - 60);
+    }),
     ochre: facade((g, w, h) => {
       g.fillStyle = "#d9b982";
       g.fillRect(0, 0, w, h);
@@ -259,6 +308,9 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     ribbon: wallMat(facades.ribbon, false),
     punched: wallMat(facades.punched, false),
     ochre: wallMat(facades.ochre, false),
+    terracotta: wallMat(facades.terracotta, true),
+    plaster: wallMat(facades.plaster, false),
+    shed: wallMat(facades.shed, false),
     white: new THREE.MeshStandardMaterial({ color: "#f2f0ea", roughness: 0.85 }),
     beige: new THREE.MeshStandardMaterial({ color: "#d9d2c2", roughness: 0.9 }),
     roof: new THREE.MeshStandardMaterial({ color: "#77736c", roughness: 1 }),
@@ -624,40 +676,189 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
   for (const [x0, x1] of beds) pbox(x1 - x0, 0.4, 4, (x0 + x1) / 2, 0.2, 3.2, mats.brick, { solid: true });
 
   // ---------- other buildings ----------
-  const styles = [
-    { mat: mats.glassTower, bay: 3.6, floors: [8, 14] },
-    { mat: mats.ribbon, bay: 4, floors: [4, 8] },
-    { mat: mats.punched, bay: 4, floors: [4, 9] },
-    { mat: mats.ochre, bay: 4, floors: [3, 6] },
-  ];
-  const known = { 362948118: [5, 2], 134101285: [6, 1], 362948196: [5, 3] }; // floors and style for the neighbours we know
+  // Floors, facade and roof colour come from the map data where they are known (OpenStreetMap
+  // tags or the street-level survey in tools/survey.json). Otherwise they are guessed from the
+  // size of the footprint: in this part of Salt Lake small outlines are sheds, stalls and houses,
+  // and only the large office plots carry glass towers.
+  const styles = {
+    glassTower: { mat: mats.glassTower, bay: 3.6 },
+    ribbon: { mat: mats.ribbon, bay: 4 },
+    punched: { mat: mats.punched, bay: 4 },
+    ochre: { mat: mats.ochre, bay: 4 },
+    terracotta: { mat: mats.terracotta, bay: 3.6 },
+    plaster: { mat: mats.plaster, bay: 4 },
+    sheds: { mat: mats.shed, bay: 4 },
+  };
+  const roofMats = new Map();
+  const roofMat = (color) => {
+    if (!color) return mats.roof;
+    if (!roofMats.has(color)) roofMats.set(color, new THREE.MeshStandardMaterial({ color, roughness: 0.9 }));
+    return roofMats.get(color);
+  };
+  function guess(b) {
+    const a = b.area || Math.abs(signedArea(b.pts));
+    if (/office|pwc|ibm|tcs|wipro|tower|tech park|it park|millen/i.test(b.name || "")) return { floors: Math.round(range(9, 14)), style: "glassTower" };
+    if (a < 60) return { floors: 1, style: "plaster" };
+    if (a < 180) return { floors: Math.round(range(1, 2)), style: "plaster" };
+    if (a < 500) return { floors: Math.round(range(2, 4)), style: pick(["plaster", "ochre", "punched"]) };
+    if (a < 1500) return { floors: Math.round(range(3, 6)), style: pick(["punched", "ochre", "ribbon"]) };
+    return { floors: Math.round(range(5, 9)), style: pick(["ribbon", "punched", "glassTower"]) };
+  }
+  // A row of single-storey classrooms with red pitched roofs, filling the outline.
+  function shedRow(pts, roofColor) {
+    const e = edgesOf(pts).sort((p, q) => q.len - p.len)[0];
+    const ux = (e.b[0] - e.a[0]) / e.len;
+    const uz = (e.b[1] - e.a[1]) / e.len;
+    const along = pts.map((p) => p[0] * ux + p[1] * uz);
+    const across = pts.map((p) => -p[0] * uz + p[1] * ux);
+    const [a0, a1, c0, c1] = [Math.min(...along), Math.max(...along), Math.min(...across), Math.max(...across)];
+    const at = (s, t) => [s * ux - t * uz, s * uz + t * ux];
+    const yaw = Math.atan2(-uz, ux);
+    const red = roofMat(roofColor || "#a63a2a");
+    const cols = Math.max(1, Math.round((a1 - a0) / 11));
+    const rows = Math.max(1, Math.round((c1 - c0) / 9));
+    const cw = (a1 - a0) / cols;
+    const rw = (c1 - c0) / rows;
+    for (let i = 0; i < cols; i++)
+      for (let j = 0; j < rows; j++) {
+        const [x, z] = at(a0 + (i + 0.5) * cw, c0 + (j + 0.5) * rw);
+        if (!inPoly(x, z, pts)) continue;
+        const w = cw - 1.2;
+        const d = rw - 1.6;
+        const body = new THREE.Mesh(new THREE.BoxGeometry(w, 3.4, d), mats.shed);
+        body.position.set(x, 1.7, z);
+        body.rotation.y = yaw;
+        add(body);
+        // gable roof: a prism along the shed's length
+        const roofShape = new THREE.Shape([new THREE.Vector2(-d / 2 - 0.4, 0), new THREE.Vector2(d / 2 + 0.4, 0), new THREE.Vector2(0, 1.5)]);
+        const roofGeo = new THREE.ExtrudeGeometry(roofShape, { depth: w + 0.6, bevelEnabled: false });
+        roofGeo.translate(0, 0, -(w + 0.6) / 2);
+        roofGeo.rotateY(Math.PI / 2);
+        const roof = new THREE.Mesh(roofGeo, red);
+        roof.position.set(x, 3.4, z);
+        roof.rotation.y = yaw;
+        add(roof);
+        solidBox(w, 4.9, d, x, 2.45, z, yaw);
+      }
+  }
+  // A name board fixed to the wall that faces the nearest road, as the real signs are.
+  function nameSign(name, pts, h) {
+    const edges = edgesOf(pts).filter((e) => e.len >= 4);
+    if (!edges.length) return;
+    const roadDist = (e) => {
+      const x = (e.a[0] + e.b[0]) / 2 + e.nx * 3;
+      const z = (e.a[1] + e.b[1]) / 2 + e.nz * 3;
+      return Math.min(...campus.roads.filter((r) => r.pts.length > 1).map((r) => distToPath(x, z, r.pts)));
+    };
+    const e = edges.reduce((best, f) => (roadDist(f) < roadDist(best) ? f : best));
+    const size = 56;
+    const c = document.createElement("canvas");
+    const g = c.getContext("2d");
+    const font = `700 ${size}px system-ui, sans-serif`;
+    g.font = font;
+    c.width = Math.ceil(g.measureText(name).width) + size * 1.2;
+    c.height = Math.ceil(size * 1.7);
+    g.font = font;
+    g.fillStyle = "#13233f";
+    g.fillRect(0, 0, c.width, c.height);
+    g.strokeStyle = "#d8b45a";
+    g.lineWidth = 6;
+    g.strokeRect(3, 3, c.width - 6, c.height - 6);
+    g.fillStyle = "#f6f1e3";
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.fillText(name, c.width / 2, c.height / 2 + 2);
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = maxAniso;
+    const boardH = 1.1;
+    let boardW = (boardH * c.width) / c.height;
+    const scale = Math.min(1, (e.len * 0.9) / boardW);
+    boardW *= scale;
+    const sign = new THREE.Mesh(new THREE.PlaneGeometry(boardW, boardH * scale), new THREE.MeshStandardMaterial({ map: t, roughness: 0.6 }));
+    sign.position.set((e.a[0] + e.b[0]) / 2 + e.nx * 0.08, Math.min(h - 0.8, 6.5), (e.a[1] + e.b[1]) / 2 + e.nz * 0.08);
+    sign.rotation.y = Math.atan2(e.nx, e.nz);
+    add(sign, { cast: false });
+  }
   const footprints = [tiuPts];
   for (const b of campus.buildings) {
     if (b.id === TIU_ID) continue;
     const pts = outward(b.pts);
     footprints.push(pts);
-    const style = known[b.id] ? styles[known[b.id][1]] : /office|pwc|ibm|tcs/i.test(b.name) ? styles[0] : pick(styles);
-    const floors = known[b.id] ? known[b.id][0] : Math.round(range(style.floors[0], style.floors[1]));
-    const h = floors * FLOOR;
+    if (b.style === "sheds") {
+      shedRow(pts, b.roof);
+      if (b.name) {
+        nameSign(b.name, pts, 3.6);
+        const c = centroid(pts);
+        places.push({ name: b.name, x: c[0], z: c[1] });
+      }
+      continue;
+    }
+    const g = guess(b);
+    const style = styles[b.style] || styles[g.style];
+    const floors = b.floors || g.floors;
+    const storey = floors === 1 ? 3.4 : FLOOR;
+    const h = floors * storey;
+    const parapet = floors <= 2 ? 0.6 : 1;
     for (const e of edgesOf(pts)) {
       if (e.len < 0.5) continue;
-      wall(e.a, e.b, 0, h, style.mat, style.bay, FLOOR, e.nx, e.nz);
-      wall(e.a, e.b, h, h + 1, mats.beige, 4, 1, e.nx, e.nz);
-      edgeCollider(e, h);
+      wall(e.a, e.b, 0, h, style.mat, style.bay, storey, e.nx, e.nz);
+      wall(e.a, e.b, h, h + parapet, floors <= 2 ? mats.white : mats.beige, 4, parapet, e.nx, e.nz);
+      edgeCollider(e, h, Math.min(0.4, Math.sqrt(b.area || 100) / 10));
     }
-    flat(pts, h + 0.1, mats.roof, 4);
+    flat(pts, h + 0.1, roofMat(b.roof), 4);
     const c = centroid(pts);
-    for (let i = 0; i < 2; i++) {
-      // black rooftop water tanks
+    // black rooftop water tanks, as on nearly every roof here
+    const tanks = floors >= 2 ? Math.min(3, Math.ceil((b.area || 200) / 600)) : 0;
+    for (let i = 0; i < tanks; i++) {
+      const spread = Math.min(4, Math.sqrt(b.area || 100) / 5);
+      const tx = c[0] + range(-spread, spread);
+      const tz = c[1] + range(-spread, spread);
+      if (!inPoly(tx, tz, pts)) continue;
       const tank = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.1, 1.8, 12), mats.tank);
-      tank.position.set(c[0] + range(-4, 4), h + 1.9, c[1] + range(-4, 4));
+      tank.position.set(tx, h + 1, tz);
       add(tank);
     }
     if (b.name) {
-      const label = makeLabel(b.name, { height: 2.4 });
-      label.position.set(c[0], h + 6, c[1]);
-      scene.add(label);
+      nameSign(b.name, pts, h);
+      if (floors >= 8) {
+        // landmark towers also carry their name on the roof, readable from a distance
+        const label = makeLabel(b.name, { height: 2.4 });
+        label.position.set(c[0], h + 5, c[1]);
+        scene.add(label);
+      }
+      places.push({ name: b.name, x: c[0], z: c[1] });
     }
+  }
+
+  // ---------- swimming pool ----------
+  for (const w of campus.water || []) {
+    const pts = outward(w.pts);
+    // stone deck a little wider than the water, the water just below it, and a railing round it
+    const deck = pts.map(([x, z]) => {
+      const c = centroid(pts);
+      const d = Math.hypot(x - c[0], z - c[1]) || 1;
+      return [x + ((x - c[0]) / d) * 1.6, z + ((z - c[1]) / d) * 1.6];
+    });
+    flat(deck, 0.12, layer(tex.tile, 3, { color: "#e8e3d8" }), 2);
+    flat(pts, 0.14, layer(tex.water, 4, { roughness: 0.15, metalness: 0.1, envMapIntensity: 1.2 }), 6);
+    for (const e of edgesOf(deck)) {
+      const geo = new THREE.BoxGeometry(e.len, 0.06, 0.06);
+      for (const y of [0.55, 1.05]) {
+        const rail = new THREE.Mesh(geo, mats.white);
+        rail.position.set((e.a[0] + e.b[0]) / 2, y, (e.a[1] + e.b[1]) / 2);
+        rail.rotation.y = Math.atan2(-(e.b[1] - e.a[1]), e.b[0] - e.a[0]);
+        add(rail);
+      }
+      for (let t = 0; t <= e.len; t += 2) {
+        const post = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.1, 0.06), mats.white);
+        post.position.set(e.a[0] + (e.b[0] - e.a[0]) * (t / e.len), 0.55, e.a[1] + (e.b[1] - e.a[1]) * (t / e.len));
+        add(post);
+      }
+      edgeCollider(e, 1.1, 0.05);
+    }
+    footprints.push(deck);
+    if (w.name) places.push({ name: w.name, x: centroid(pts)[0], z: centroid(pts)[1] });
   }
   for (const l of campus.labels) if (!/^techno india university$/i.test(l.name)) places.push({ name: l.name, x: l.x, z: l.z });
 
@@ -670,7 +871,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     const h = Math.round(range(4, 16)) * FLOOR;
     const x = Math.sin(a) * r;
     const z = Math.cos(a) * r;
-    const style = pick(styles);
+    const style = pick([styles.glassTower, styles.ribbon, styles.punched, styles.ochre, styles.terracotta]);
     const corners = [[x - w / 2, z - d / 2], [x + w / 2, z - d / 2], [x + w / 2, z + d / 2], [x - w / 2, z + d / 2]];
     for (const e of edgesOf(outward(corners))) wall(e.a, e.b, 0, h, style.mat, style.bay, FLOOR, e.nx, e.nz);
     flat(corners, h, mats.roof, 4);

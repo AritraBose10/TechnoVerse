@@ -1,0 +1,285 @@
+{
+  "_about": [
+    "Corrections checked against street-level imagery (Jan 2026 captures on Street Number 2 and Street No. 13) and satellite views.",
+    "Points and outlines are in metres from the university's map pin: [east, north].",
+    "buildings: settings for the building whose outline contains `at`.",
+    "split: replace an outdated OpenStreetMap outline with parts along its long side (t = 0 at the west end, 1 at the east end).",
+    "add: outlines missing from both OpenStreetMap and Overture, traced by eye from satellite imagery. Approximate to a few metres.",
+    "Floor counts are estimates from street-level imagery or roof views; styles name the facade materials in public/world.js.",
+    "Names: map labels cross-checked with OpenStreetMap and Overture places. Unnamed buildings take the name of the one confident Overture place inside them, when there is exactly one.",
+    "drop: OpenStreetMap ways to leave out. construction: replaces OpenStreetMap's construction areas (empty: the old one now holds the EcoCentre, and the corner lot is open ground with trees)."
+  ],
+  "buildings": [
+    {
+      "at": [
+        -49,
+        94
+      ],
+      "name": "Ambuja Neotia EcoCentre",
+      "floors": 17,
+      "style": "terracotta",
+      "roof": "#8d8a84",
+      "note": "Terracotta piers with blue glass; seen from Street No. 13 and Street Number 2."
+    },
+    {
+      "at": [
+        -45,
+        50
+      ],
+      "name": "Techno India Polytechnic",
+      "floors": 14,
+      "style": "terracotta",
+      "roof": "#3f63a8",
+      "note": "Tower: leans far in oblique aerial imagery and shows from Street Number 2 behind the trees; terracotta piers with blue glass."
+    },
+    {
+      "at": [
+        -53,
+        54
+      ],
+      "floors": 14,
+      "style": "terracotta",
+      "roof": "#3f63a8"
+    },
+    {
+      "at": [
+        -33,
+        9
+      ],
+      "floors": 5,
+      "style": "punched",
+      "roof": "#3b5fa6",
+      "note": "Blue sheet roof. Name from map labels.",
+      "name": "Techno India Group"
+    },
+    {
+      "at": [
+        -122,
+        38
+      ],
+      "floors": 5,
+      "style": "ribbon",
+      "name": "Techno Main Salt Lake",
+      "note": "OSM node 'Techno Main Salt Lake' falls inside; 5 levels in OSM."
+    },
+    {
+      "at": [
+        137,
+        -15
+      ],
+      "name": "CSTARI",
+      "floors": 3,
+      "style": "punched",
+      "roof": "#8f9396"
+    },
+    {
+      "at": [
+        21,
+        80
+      ],
+      "floors": 1,
+      "style": "plaster",
+      "roof": "#e9e7e1"
+    },
+    {
+      "at": [
+        -140,
+        -55
+      ],
+      "name": "Bengal Eco Intelligent Park",
+      "note": "IT park block; Haldia Petrochemicals, The Almond and Webskitters are tenants."
+    },
+    {
+      "at": [
+        -5,
+        193
+      ],
+      "name": "IIHM Global Campus"
+    }
+  ],
+  "split": [
+    {
+      "osm": 362948196,
+      "parts": [
+        {
+          "t": [
+            0.0,
+            0.62
+          ],
+          "name": "Techno India University Class Room",
+          "floors": 1,
+          "style": "sheds",
+          "roof": "#a63a2a"
+        },
+        {
+          "t": [
+            0.66,
+            1.0
+          ],
+          "name": "Techno India Phase 3 Building",
+          "floors": 10,
+          "style": "punched",
+          "roof": "#9ea3a6",
+          "note": "Tall: leans far in oblique aerial imagery."
+        }
+      ]
+    }
+  ],
+  "add": [
+    {
+      "name": "",
+      "floors": 4,
+      "style": "ochre",
+      "roof": "#d98a72",
+      "pts": [
+        [
+          -106,
+          46
+        ],
+        [
+          -73,
+          33
+        ],
+        [
+          -78,
+          22
+        ],
+        [
+          -111,
+          35
+        ]
+      ],
+      "note": "Salmon-roofed block west of the polytechnic."
+    },
+    {
+      "name": "",
+      "floors": 2,
+      "style": "plaster",
+      "roof": "#7a4a32",
+      "pts": [
+        [
+          -53,
+          -9
+        ],
+        [
+          -45,
+          -12
+        ],
+        [
+          -53,
+          -38
+        ],
+        [
+          -61,
+          -35
+        ]
+      ],
+      "note": "Brown-roofed block beside the pool."
+    },
+    {
+      "name": "",
+      "floors": 6,
+      "style": "punched",
+      "roof": "#a9a6a0",
+      "pts": [
+        [
+          -157,
+          -22
+        ],
+        [
+          -113,
+          -42
+        ],
+        [
+          -129,
+          -90
+        ],
+        [
+          -173,
+          -73
+        ]
+      ],
+      "note": "Large block with a central courtyard (drawn solid) south-west of the campus."
+    },
+    {
+      "name": "",
+      "floors": 2,
+      "style": "plaster",
+      "roof": "#d9d4c8",
+      "pts": [
+        [
+          -161,
+          -89
+        ],
+        [
+          -134,
+          -93
+        ],
+        [
+          -137,
+          -108
+        ],
+        [
+          -164,
+          -101
+        ]
+      ],
+      "note": "Low annex south of the courtyard block."
+    },
+    {
+      "name": "",
+      "floors": 7,
+      "style": "ribbon",
+      "roof": "#a39d93",
+      "pts": [
+        [
+          -17,
+          210
+        ],
+        [
+          10,
+          193
+        ],
+        [
+          3,
+          177
+        ],
+        [
+          -24,
+          192
+        ]
+      ],
+      "note": "Hotel block north of Street No. 13."
+    }
+  ],
+  "water": [
+    {
+      "name": "Techno India Swimming Pool",
+      "pts": [
+        [
+          -63,
+          -12
+        ],
+        [
+          -54,
+          -14
+        ],
+        [
+          -60,
+          -34
+        ],
+        [
+          -69,
+          -32
+        ]
+      ]
+    }
+  ],
+  "drop": {
+    "_why": "OpenStreetMap features that no longer match the ground.",
+    "osm": [
+      815050440
+    ]
+  },
+  "construction": []
+}

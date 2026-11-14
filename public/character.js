@@ -16,6 +16,7 @@ const smoothstep = (a, b, v) => {
   return t * t * (3 - 2 * t);
 };
 const ease = (dt, rate) => 1 - Math.exp(-dt * rate);
+const lerpN = (a, b, t) => a + (b - a) * t;
 const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 const cleanName = (n) => n.replace(/^mixamorig:?/, "");
 
@@ -219,6 +220,10 @@ export async function loadHero(renderer) {
     { up: bone("LeftUpLeg"), knee: bone("LeftLeg"), foot: bone("LeftFoot"), lift: 0 },
     { up: bone("RightUpLeg"), knee: bone("RightLeg"), foot: bone("RightFoot"), lift: 0 },
   ];
+  const spine = bone("Spine");
+  const chest = bone("Spine1");
+  const arms = [bone("LeftArm"), bone("RightArm")];
+  const forearms = [bone("LeftForeArm"), bone("RightForeArm")];
   const neck = bone("Neck");
   const head = bone("Head");
   const eyes = [bone("LeftEye"), bone("RightEye")].filter(Boolean);
@@ -269,6 +274,9 @@ export async function loadHero(renderer) {
   let mouth = 0;
   let glance = { yaw: 0, pitch: 0, until: 0 };
   let clock = 0;
+  // jump pose, eased toward its targets each frame (radians, except crouch)
+  const jp = { spine: 0, arms: 0, elbows: 0, thigh: 0, knee: 0, toes: 0 };
+  let leapPhase = null; // stride position frozen at take-off for running leaps
 
   const v1 = new THREE.Vector3();
   const v2 = new THREE.Vector3();
@@ -331,14 +339,25 @@ export async function loadHero(renderer) {
      */
     update(dt, s) {
       clock += dt;
+      const jump = s.jump || {};
       // ---- walking and running, blended by speed ----
       const moving = smoothstep(0.1, 0.9, s.speed);
       const running = smoothstep(walkSpeed * 1.6, runSpeed * 0.85, s.speed);
-      actions.idle.setEffectiveWeight(1 - moving);
-      actions.walk.setEffectiveWeight(moving * (1 - running));
-      actions.run.setEffectiveWeight(moving * running);
+      // A standing jump is two-footed: the legs come together (idle stance) rather than mid-stride.
+      const together = jump.phase && jump.phase !== "land" ? 1 - (jump.run || 0) : 0;
+      const stride = moving * (1 - together);
+      actions.idle.setEffectiveWeight(1 - stride);
+      actions.walk.setEffectiveWeight(stride * (1 - running));
+      actions.run.setEffectiveWeight(stride * running);
       const metresPerStride = THREE.MathUtils.lerp(walkSpeed * clips.walk.duration, runSpeed * clips.run.duration, running);
-      const pace = s.grounded ? clamp(s.speed / metresPerStride, 0.45 / clips.walk.duration, 1.5 / clips.run.duration) : 0.25;
+      const airborne = jump.phase === "air" && !s.grounded;
+      let pace = s.grounded ? clamp(s.speed / metresPerStride, 0.45 / clips.walk.duration, 1.5 / clips.run.duration) : 0.25;
+      if (airborne) {
+        // In flight the legs hold the shape they left the ground in: a split stride off a run,
+        // feet together from standing. The stride clock does not run.
+        if (leapPhase === null) leapPhase = phase;
+        pace = 0;
+      } else leapPhase = null;
       phase = (phase + dt * pace) % 1;
       actions.walk.time = phase * clips.walk.duration;
       actions.run.time = phase * clips.run.duration;
@@ -349,6 +368,60 @@ export async function loadHero(renderer) {
       holder.rotation.z = lean;
       holder.rotation.x = -0.04 * running;
       holder.parent?.updateMatrixWorld(true);
+
+      // ---- jumping, as a person does it ----
+      // Rotations are about the body's left-right axis. Positive swings a hanging arm or thigh
+      // forward; negative leans the trunk forward and points the toes.
+      {
+        const standing = 1 - (jump.run || 0);
+        const want = { spine: 0, arms: 0, elbows: 0, thigh: 0, knee: 0, toes: 0 };
+        const depth = Math.max(0.05, jump.crouch || 0);
+        if (jump.phase === "prep") {
+          const down = jump.t < 0.68;
+          const k = clamp((jump.crouch || 0) / 0.17, 0, 1);
+          want.spine = -0.5 * k * (0.4 + 0.6 * standing); // trunk folds forward over the knees
+          // arms swing back on the way down, then drive forward and up with the push
+          want.arms = down ? -0.85 * k * (0.3 + 0.7 * standing) : lerpN(-0.85, 1.6, smoothstep(0.68, 1, jump.t)) * (0.3 + 0.7 * standing);
+          want.elbows = 0.35;
+          want.toes = down ? 0 : -0.45 * smoothstep(0.75, 1, jump.t); // up onto the toes
+        } else if (airborne) {
+          const v0 = Math.max(0.5, jump.launchV || 3);
+          const rise = clamp((s.jump.vy || 0) / v0, -1.4, 1); // 1 at take-off, 0 at the top, < 0 falling
+          const nearTop = 1 - Math.min(1, Math.abs(rise));
+          want.spine = -0.12;
+          // arms lead the take-off forward and up, then settle lower to balance for the landing
+          want.arms = (rise > 0 ? 1.2 * rise + 0.8 * nearTop : 0.8 + 0.4 * rise) * (0.35 + 0.65 * standing);
+          want.elbows = 0.4;
+          // knees draw up a little around the top, then the legs reach for the ground
+          want.thigh = (0.55 * nearTop + (rise < 0 ? 0.25 : 0)) * standing + 0.15 * nearTop;
+          want.knee = (0.95 * nearTop + (rise < 0 ? 0.35 : 0)) * standing + 0.3 * nearTop;
+          want.toes = rise > 0.3 ? -0.5 * rise : 0.12; // pointed after push-off, flexed to land
+        } else if (jump.phase === "land") {
+          const k = clamp((jump.crouch || 0) / 0.2, 0, 1.6);
+          want.spine = -0.42 * k;
+          want.arms = 0.55 * k; // arms forward for balance
+          want.elbows = 0.5 * k;
+        }
+        const rate = jump.phase === "prep" || jump.phase === "land" ? 30 : 12;
+        for (const key in jp) jp[key] += (want[key] - jp[key]) * ease(dt, rate);
+        const right = v1.set(1, 0, 0).applyAxisAngle(UP, s.facing).clone();
+        const turn = (b, angle) => {
+          if (Math.abs(angle) > 1e-3) turnInWorld(b, qc.setFromAxisAngle(right, angle));
+        };
+        turn(spine, jp.spine * 0.6);
+        turn(chest, jp.spine * 0.4);
+        arms.forEach((a, i) => {
+          turn(a, jp.arms);
+          turn(forearms[i], jp.elbows);
+        });
+        if (airborne) {
+          legs.forEach((leg) => {
+            turn(leg.up, jp.thigh);
+            turn(leg.knee, -jp.knee);
+            turn(leg.foot, jp.toes + jp.knee * 0.5);
+          });
+        } else if (Math.abs(jp.toes) > 0.01) legs.forEach((leg) => turn(leg.foot, jp.toes));
+      }
 
       // ---- head and eyes look at people nearby ----
       let wantYaw = 0;
@@ -406,10 +479,14 @@ export async function loadHero(renderer) {
       });
       const drop = clamp(Math.min(offsets[0], offsets[1], 0), -0.3, 0);
       pelvisDrop += (drop - pelvisDrop) * ease(dt, 12);
-      hips.position.y += pelvisDrop;
+      // The jump's dip and landing give lower the hips; the feet stay where they stand, so the
+      // knees and hips bend (solved below) instead of the whole body sinking into the ground.
+      const crouch = jump.crouch || 0;
+      hips.position.y += pelvisDrop - crouch;
       hips.updateMatrixWorld(true);
       legs.forEach((leg, i) => {
-        leg.lift += (Math.max(0, offsets[i] - pelvisDrop) - leg.lift) * ease(dt, 16);
+        const want = Math.max(0, offsets[i] - pelvisDrop + crouch);
+        leg.lift += (want - leg.lift) * (crouch > 0.005 ? 1 : ease(dt, 16));
         if (leg.lift < 0.004) return;
         leg.foot.getWorldPosition(v2);
         solveLeg(leg, new THREE.Vector3(v2.x, v2.y + leg.lift, v2.z));

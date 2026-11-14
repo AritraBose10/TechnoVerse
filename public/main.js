@@ -13,8 +13,9 @@ const NEARBY_RANGE = 20; // metres: who shows in the "Nearby" list
 const MAX_VOICE_PEERS = 8; // direct browser-to-browser links; keep small
 const WALK_SPEED = 1.9; // a relaxed human walk, metres a second
 const RUN_SPEED = 4.8; // a steady run
-const GRAVITY = 22;
-const JUMP_SPEED = 5.6;
+const GRAVITY = 9.81; // real gravity: jumps and falls take the time they take in life
+// A person standing still clears about 45 cm with a two-footed jump; off a run, a little more.
+const JUMP_HEIGHT = { stand: 0.45, run: 0.55 };
 const STEP = 1 / 60; // physics runs at a fixed 60 steps a second
 const BODY_HALF = 0.5; // capsule: half height of the straight part
 const BODY_RADIUS = 0.4;
@@ -102,7 +103,7 @@ controller.setMaxSlopeClimbAngle((50 * Math.PI) / 180);
 controller.setMinSlopeSlideAngle((35 * Math.PI) / 180);
 controller.setApplyImpulsesToDynamicBodies(true);
 controller.setCharacterMass(60);
-const body = { rigid: null, collider: null, vy: 0, grounded: false };
+const body = { rigid: null, collider: null, vy: 0, grounded: false, impact: 0 };
 
 function spawnBody(x, y, z) {
   body.rigid = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(x, y + BODY_CENTRE, z));
@@ -113,11 +114,15 @@ function placeBody(x, y, z) {
   body.vy = 0;
 }
 // One fixed physics step. vx and vz are the walking speed in metres a second.
-function stepPhysics(vx, vz, jump) {
-  if (jump && body.grounded) body.vy = JUMP_SPEED;
+// `launch` is the take-off speed (m/s) on the step the feet leave the ground, otherwise 0.
+function stepPhysics(vx, vz, launch) {
+  if (launch && body.grounded) body.vy = launch;
   body.vy -= GRAVITY * STEP;
+  const wasGrounded = body.grounded;
+  const vyBefore = body.vy;
   controller.computeColliderMovement(body.collider, { x: vx * STEP, y: body.vy * STEP, z: vz * STEP });
-  body.grounded = controller.computedGrounded();
+  body.grounded = controller.computedGrounded() && !(launch && body.vy > 0);
+  if (body.grounded && !wasGrounded) body.impact = Math.max(0, -vyBefore); // speed at touchdown
   if (body.grounded && body.vy < 0) body.vy = 0;
   const move = controller.computedMovement();
   const t = body.rigid.translation();
@@ -572,6 +577,8 @@ addEventListener("blur", () => {
   setTalking(false);
 });
 
+let timeScale = 1; // slow motion for checking animation: __tiu.slow(0.2)
+let debugCam = null; // set from the console with __tiu.cam(), for screenshots
 let camYaw = 0; // 0 = camera looks toward -z (into the campus from the gate)
 let camPitch = 0.3;
 let camDist = 5.5;
@@ -658,6 +665,72 @@ const clock = new THREE.Clock();
 let physicsTime = 0;
 let airTime = 0;
 const vel = { x: 0, z: 0 };
+// The jump, in the phases a person goes through:
+//   prep  dip at the knees and hips, arms swing back, then drive up (the push-off)
+//   air   ballistic flight: momentum kept, almost no steering
+//   land  feet touch, knees and hips give to soak up the impact, then stand back up
+// Falls that were not jumps (off a step or a wall) use the same air and land phases.
+let pendingLaunch = 0;
+const jumpState = { phase: null, t: 0, dur: 0, depth: 0, crouch: 0, run: 0, launchV: 0, held: false };
+const lerp = (a, b, t) => a + (b - a) * t;
+const easeOut = (t) => 1 - (1 - t) * (1 - t);
+const easeInOut = (t) => t * t * (3 - 2 * t);
+function updateJump(dt, wantJump, speedNow) {
+  const j = jumpState;
+  const pressed = wantJump && !j.held; // one jump per press, as with a real body
+  j.held = wantJump;
+  let launch = 0;
+  if (!j.phase) {
+    if (pressed && body.grounded) {
+      j.run = Math.min(1, speedNow / RUN_SPEED);
+      j.phase = "prep";
+      j.t = 0;
+      j.dur = lerp(0.26, 0.09, j.run); // a deep dip from standing, a quick one in stride
+      j.depth = lerp(0.17, 0.06, j.run);
+    } else if (!body.grounded && airTime > 0.12) {
+      j.phase = "air"; // stepped off something
+      j.launchV = 0;
+    }
+  }
+  if (j.phase === "prep") {
+    j.t += dt / j.dur;
+    if (!body.grounded) {
+      j.phase = "air";
+      j.launchV = 0;
+    } else if (j.t < 0.68) {
+      j.crouch = j.depth * Math.sin((j.t / 0.68) * (Math.PI / 2)); // going down
+    } else if (j.t < 1) {
+      const k = (j.t - 0.68) / 0.32;
+      j.crouch = j.depth * (1 - easeInOut(k)) - 0.03 * k; // driving up onto the toes
+    } else {
+      const h = lerp(JUMP_HEIGHT.stand, JUMP_HEIGHT.run, j.run);
+      launch = j.launchV = Math.sqrt(2 * GRAVITY * h);
+      j.phase = "air";
+      j.t = 0;
+      j.crouch = 0;
+    }
+  } else if (j.phase === "air") {
+    j.t += dt;
+    j.crouch = 0;
+    if (body.grounded && !pendingLaunch && j.t > 0.05) {
+      const v = body.impact;
+      j.phase = "land";
+      j.t = 0;
+      j.depth = Math.min(0.4, Math.max(0.05, 0.03 + 0.055 * v)); // harder landings bend further
+      j.dur = Math.min(0.6, Math.max(0.18, 0.14 + 0.07 * v));
+    }
+  } else if (j.phase === "land") {
+    j.t += dt / j.dur;
+    if (j.t < 0.3) j.crouch = j.depth * easeOut(j.t / 0.3);
+    else j.crouch = j.depth * (1 - easeInOut((j.t - 0.3) / 0.7));
+    if (j.t >= 1) {
+      j.phase = null;
+      j.crouch = 0;
+    }
+    if (!body.grounded && airTime > 0.12) j.phase = "air";
+  }
+  return launch;
+}
 const lookTarget = new THREE.Vector3();
 const DOWN = { x: 0, y: -1, z: 0 };
 // Height of the solid ground under a point, ignoring my own body and loose objects.
@@ -673,7 +746,7 @@ const lerpAngle = (a, b, t) => a + Math.atan2(Math.sin(b - a), Math.cos(b - a)) 
 
 function frame() {
   requestAnimationFrame(frame);
-  const dt = Math.min(clock.getDelta(), 0.1);
+  const dt = Math.min(clock.getDelta(), 0.1) * timeScale;
   const now = performance.now();
 
   if (!me) {
@@ -703,21 +776,30 @@ function frame() {
     wantX = ((mx * cos + mz * sin) / len) * speed;
     wantZ = ((-mx * sin + mz * cos) / len) * speed;
   }
-  // Speed up and slow down over a moment, and turn the body toward the way it is going
-  const accel = 1 - Math.exp(-dt * (len > 0.05 ? 6 : 9));
+  // Speed up and slow down over a moment, and turn the body toward the way it is going.
+  // In the air there is nothing to push against, so the body keeps the speed it left the ground with.
+  const inAir = jumpState.phase === "air" && !body.grounded;
+  if (jumpState.phase === "land") {
+    const give = Math.sin(Math.PI * Math.min(1, jumpState.t)) * Math.min(1, jumpState.depth / 0.2);
+    wantX *= 1 - 0.6 * give;
+    wantZ *= 1 - 0.6 * give;
+  }
+  const accel = 1 - Math.exp(-dt * (inAir ? 0.4 : len > 0.05 ? 6 : 9));
   vel.x += (wantX - vel.x) * accel;
   vel.z += (wantZ - vel.z) * accel;
   const vx = vel.x;
   const vz = vel.z;
   const speedNow = Math.hypot(vx, vz);
   const facingBefore = me.group.rotation.y;
-  if (speedNow > 0.25) me.group.rotation.y = lerpAngle(facingBefore, Math.atan2(-vx, -vz), 1 - Math.exp(-dt * 9));
+  if (speedNow > 0.25 && !inAir) me.group.rotation.y = lerpAngle(facingBefore, Math.atan2(-vx, -vz), 1 - Math.exp(-dt * 9));
   const turnRate = Math.atan2(Math.sin(me.group.rotation.y - facingBefore), Math.cos(me.group.rotation.y - facingBefore)) / Math.max(dt, 1e-3);
-  const jump = keys.has("Space") || jumpHeld;
+  const launchNow = updateJump(dt, keys.has("Space") || jumpHeld, speedNow);
+  if (launchNow) pendingLaunch = launchNow; // used by the next physics step, which may come a frame later
   physicsTime += dt;
   for (let i = 0; physicsTime >= STEP && i < 6; i++) {
     physicsTime -= STEP;
-    stepPhysics(vx, vz, jump);
+    stepPhysics(vx, vz, pendingLaunch);
+    pendingLaunch = 0;
   }
   if (physicsTime > STEP) physicsTime = 0; // fell too far behind (tab was in the background)
   const t = body.rigid.translation();
@@ -733,7 +815,8 @@ function frame() {
     else if (me.bubble && now - (me.bubbleUntil - CHAT_BUBBLE_MS) < 1600) talk = 0.25 + 0.25 * Math.sin(now / 55) * Math.sin(now / 23);
     hero.update(dt, {
       speed: speedNow,
-      grounded: airTime < 0.15,
+      grounded: jumpState.phase === "air" ? false : airTime < 0.15,
+      jump: { phase: jumpState.phase, t: jumpState.t, crouch: jumpState.crouch, run: jumpState.run, vy: body.vy, launchV: jumpState.launchV || Math.sqrt(2 * GRAVITY * JUMP_HEIGHT.stand) },
       turnRate,
       facing: me.group.rotation.y,
       lookAt: nearest ? lookTarget.set(nearest.group.position.x, nearest.group.position.y + 1.8, nearest.group.position.z) : null,
@@ -799,6 +882,10 @@ function frame() {
   camNow += (reach - camNow) * (reach < camNow ? 1 : 1 - Math.exp(-dt * 6));
   camera.position.set(eye.x + dir.x * camNow, Math.max(0.25, eye.y + dir.y * camNow), eye.z + dir.z * camNow);
   camera.lookAt(eye.x, eye.y, eye.z);
+  if (debugCam) {
+    camera.position.set(debugCam[0], debugCam[1], debugCam[2]);
+    camera.lookAt(debugCam[3], debugCam[4], debugCam[5]);
+  }
   me.tag.visible = camNow > 2.6; // my own name tag gets in the way up close
   renderer.render(scene, camera);
 }
@@ -806,8 +893,15 @@ frame();
 
 // Small handle for automated tests and debugging in the console.
 window.__tiu = {
+  // free camera for screenshots: __tiu.cam(x, y, z, lookX, lookY, lookZ); __tiu.cam() to go back
+  slow(k = 1) {
+    timeScale = k;
+  },
+  cam(...v) {
+    debugCam = v.length === 6 ? v : null;
+  },
   get me() {
-    return me && { id: me.id, x: me.group.position.x, y: me.group.position.y, z: me.group.position.z, grounded: body.grounded };
+    return me && { id: me.id, x: me.group.position.x, y: me.group.position.y, z: me.group.position.z, grounded: body.grounded, jump: jumpState.phase, crouch: jumpState.crouch, vy: body.vy };
   },
   players: () => [...players.values()].map((a) => ({ id: a.id, name: a.name, x: a.tx, y: a.ty, z: a.tz, dist: a.dist, voice: a.voice, speaking: a.speaking })),
   peers: () => [...peers].map(([id, p]) => ({ id, state: p.pc.connectionState, audio: Boolean(p.panner) })),
