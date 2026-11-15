@@ -5,7 +5,7 @@
 <script type="module">
 // Test page: both T-shirts, front and back.
 import * as THREE from "three";
-import { loadCharacterKit, makeCharacter } from "/character.js";
+import { loadCharacterKit, loadCrowdBody, makeCharacter } from "/character.js";
 const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("c"), antialias: true });
 renderer.setSize(innerWidth, innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -19,7 +19,7 @@ scene.add(sun);
 const back = new THREE.DirectionalLight("#fff2dd", 2.0);
 back.position.set(-1, 3, -4);
 scene.add(back);
-const kit = await loadCharacterKit(renderer);
+const kit = await loadCrowdBody(renderer, "/models/people/Male_Adult_11.glb");
 [["tiu", 0], ["reboot", 0], ["reboot", Math.PI]].forEach(([shirt, turn], i) => {
   const c = makeCharacter(kit, { uniform: true, shirt });
   const g = new THREE.Group();

@@ -594,6 +594,108 @@ export async function loadCrowdBody(renderer, url) {
  * print kept), the trousers or skirt tinted separately, and skin is left untouched (skin is found
  * by its colour). v: { hue (radians), sat, top: [r, g, b], bottom: [r, g, b] }.
  */
+/**
+ * The player's shirt on a photographic (Rocketbox) body that wears a short-sleeved collared shirt:
+ * the shirt is re-dyed and printed, keeping the folds, collar, placket and seams of the original
+ * photo texture, and leaving skin and trousers alone.
+ *   "reboot": black pique, School of the Future print on the left chest, the big print on the back
+ *   "tiu":    navy and off-white split on the diagonal, red TIU badge on the left chest
+ * Positions are taken in the body's resting pose and measured in metres from the feet (wearer's
+ * left +x, forward +z), whatever axes the model came with.
+ */
+function dressRocketboxShirt(model, shirt = "tiu") {
+  const pr = rebootPrints();
+  model.traverse((o) => {
+    if (!o.isSkinnedMesh || o.material.name !== "body") return;
+    const bindPos = (name) => {
+      const i = o.skeleton.bones.findIndex((b) => b.name === name);
+      const v = new THREE.Vector3();
+      if (i >= 0) new THREE.Matrix4().copy(o.skeleton.boneInverses[i]).invert().decompose(v, new THREE.Quaternion(), new THREE.Vector3());
+      return v;
+    };
+    if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+    const bb = o.geometry.boundingBox;
+    const head = bindPos("Head");
+    const feet = bindPos("LeftFoot").add(bindPos("RightFoot")).multiplyScalar(0.5);
+    const up = head.clone().sub(feet).normalize();
+    const eye = bindPos("LeftEye").add(bindPos("RightEye")).multiplyScalar(0.5);
+    const fwd = eye.clone().sub(head);
+    fwd.addScaledVector(up, -fwd.dot(up)).normalize();
+    const left = new THREE.Vector3().crossVectors(up, fwd).normalize(); // wearer's left
+    // the ground under the feet along `up`, and metres per model unit (the body is about 1.75 m)
+    let lowest = Infinity;
+    let highest = -Infinity;
+    const pos = o.geometry.attributes.position;
+    const tmp = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i += 7) {
+      tmp.fromBufferAttribute(pos, i);
+      const h = tmp.dot(up);
+      lowest = Math.min(lowest, h);
+      highest = Math.max(highest, h);
+    }
+    const scale = 1.75 / (highest - lowest);
+    const centre = head.clone().addScaledVector(up, -head.dot(up)); // the body's midline
+    const m = o.material.clone();
+    m.onBeforeCompile = (sh) => {
+      Object.assign(sh.uniforms, {
+        uUp: { value: up },
+        uFwd: { value: fwd },
+        uLeft: { value: left },
+        uMid: { value: centre },
+        uFloor: { value: lowest },
+        uScale: { value: scale },
+        uFront: { value: pr.front },
+        uBack: { value: pr.back },
+        uReboot: { value: shirt === "reboot" ? 1 : 0 },
+      });
+      sh.vertexShader = sh.vertexShader
+        .replace("#include <common>", "#include <common>\nvarying vec3 vBody;\nuniform vec3 uUp; uniform vec3 uFwd; uniform vec3 uLeft; uniform vec3 uMid; uniform float uFloor; uniform float uScale;")
+        .replace("#include <begin_vertex>", "#include <begin_vertex>\nvec3 rel = position - uMid;\nvBody = vec3(dot(rel, uLeft), dot(position, uUp) - uFloor, dot(rel, uFwd)) * uScale;");
+      sh.fragmentShader = sh.fragmentShader
+        .replace("#include <common>", "#include <common>\nvarying vec3 vBody;\nuniform sampler2D uFront; uniform sampler2D uBack; uniform int uReboot;")
+        .replace(
+          "#include <map_fragment>",
+          `#include <map_fragment>
+          {
+            vec3 c = diffuseColor.rgb;
+            vec3 s = pow(max(c, vec3(0.0)), vec3(0.4545));
+            float Y = dot(s, vec3(0.299, 0.587, 0.114));
+            float cb = 0.5 - 0.169 * s.r - 0.331 * s.g + 0.5 * s.b;
+            float cr = 0.5 + 0.5 * s.r - 0.419 * s.g - 0.081 * s.b;
+            float skin = smoothstep(0.29, 0.33, cb) * (1.0 - smoothstep(0.48, 0.52, cb)) * smoothstep(0.52, 0.55, cr) * (1.0 - smoothstep(0.66, 0.7, cr)) * smoothstep(0.12, 0.2, Y);
+            // the shirt: above the belt (about 1.0 m on a 1.75 m body), not skin, not the head
+            float shirtK = smoothstep(0.99, 1.02, vBody.y) * (1.0 - smoothstep(1.64, 1.68, vBody.y)) * (1.0 - skin);
+            // folds and seams of the original, as light and shade on the new colour
+            float shade = clamp(Y / 0.22, 0.45, 1.6);
+            vec3 cloth;
+            if (uReboot == 1) {
+              cloth = vec3(0.02, 0.02, 0.022) * shade;
+              if (vBody.z > 0.02) {
+                vec2 uv = vec2((vBody.x - 0.03) / 0.105, (vBody.y - 1.375) / 0.032);
+                if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0) { vec4 p = texture2D(uFront, uv); cloth = mix(cloth, p.rgb * 0.85, p.a); }
+              }
+              if (vBody.z < -0.02) {
+                vec2 uv = vec2((0.125 - vBody.x) / 0.25, (vBody.y - 1.0) / 0.42);
+                if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0) { vec4 p = texture2D(uBack, uv); cloth = mix(cloth, p.rgb * 0.85, p.a); }
+              }
+            } else {
+              vec3 navy = vec3(0.012, 0.018, 0.05);
+              vec3 offWhite = vec3(0.8, 0.78, 0.74);
+              // diagonal from the wearer's right shoulder down to the left hip
+              float side = dot(vBody.xy - vec2(-0.075, 1.45), vec2(0.897, 0.441));
+              cloth = mix(navy, offWhite, smoothstep(-0.004, 0.004, side)) * shade;
+              vec2 badge = vec2(vBody.x - 0.088, vBody.y - 1.38);
+              if (vBody.z > 0.02 && length(badge) < 0.032) cloth = vec3(0.6, 0.02, 0.03);
+            }
+            diffuseColor.rgb = mix(c, cloth, shirtK);
+          }`,
+        );
+    };
+    m.customProgramCacheKey = () => "rb-shirt";
+    o.material = m;
+  });
+}
+
 export function varyBody(c, v) {
   const model = c.model;
   model.traverse((o) => {
@@ -858,7 +960,8 @@ export function makeCharacter(kit, opts = {}) {
   });
   const look = opts.look || {};
   const rocketbox = kit.kind === "rocketbox";
-  if (opts.uniform) dressInUniform(model, opts.shirt);
+  if (opts.uniform && rocketbox) dressRocketboxShirt(model, opts.shirt);
+  else if (opts.uniform) dressInUniform(model, opts.shirt);
   else if (!rocketbox) dressInLook(model, look);
   // hair colour, or none
   const hairMesh = rocketbox ? null : model.getObjectByName("Hair");

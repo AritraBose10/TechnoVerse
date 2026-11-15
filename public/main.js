@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import RAPIER from "/vendor/rapier.es.js";
 import { buildWorld } from "/world.js";
-import { loadCharacterKit, makeCharacter } from "/character.js";
+import { loadCharacterKit, loadCrowdBody, makeCharacter } from "/character.js";
 import { buildBicycle, newRide, stepBike, BICYCLE_KINDS } from "/bicycle.js";
 import { buildDaylight } from "/daylight.js";
 import { buildMotorcycle, MOTORCYCLE_KINDS, MOTORCYCLE_DESIGNS, makeEngineSound, setMotorcycleNight } from "/motorcycle.js";
@@ -301,8 +301,15 @@ function showRemoteBike(a, dt, roll) {
     a.bikeModel.pose({ roll, crankAngle: a.crank });
   }
 }
+// Players wear a photographic body in a short-sleeved collared shirt, dyed and printed as the
+// chosen T-shirt (see dressRocketboxShirt in character.js); the older stylised body is the
+// fallback if it cannot load. A MetaHuman replaces this when it is ready.
+const playerKitLoading = loadCrowdBody(renderer, "/models/people/Male_Adult_11.glb").catch((err) => {
+  console.warn("Could not load the player body; using the older one.", err);
+  return null;
+});
 async function attachCharacter(a, mine = false) {
-  const kit = await kitLoading;
+  const kit = (await playerKitLoading) || (await kitLoading);
   if (!kit || a.removed) return;
   const c = makeCharacter(kit, { uniform: true, shirt: a.shirt, gear: [{ kind: "helmet", color: mine ? "#1b1d22" : ["#1b1d22", "#c41e24", "#e8e8e8", "#1e3a8a"][a.id.length % 4] }] });
   c.showGear("helmet", false); // worn on a motorcycle
