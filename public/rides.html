@@ -1,0 +1,93 @@
+<!doctype html><meta charset="utf-8"><title>Two-wheelers</title>
+<style>body{margin:0;background:#8a9099}canvas{display:block}</style>
+<script type="importmap">{ "imports": { "three": "/vendor/three.module.js" } }</script>
+<canvas id="c"></canvas>
+<script type="module">
+// Test page: every bicycle and motorcycle design side by side.
+// /rides.html?set=bicycle|motorcycle|all &view=side|front|rear|top &rider=1 &one=<design> &steer=0.4
+import * as THREE from "three";
+import { buildBicycle, BICYCLE_KINDS } from "/bicycle.js";
+import { buildMotorcycle, MOTORCYCLE_KINDS, MOTORCYCLE_DESIGNS } from "/motorcycle.js";
+const q = new URLSearchParams(location.search);
+const set = q.get("set") || "all", view = q.get("view") || "side", one = q.get("one");
+const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("c"), antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.45;
+renderer.shadowMap.enabled = true;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color("#9aa3ad");
+scene.add(new THREE.HemisphereLight("#dfe9ff", "#6b5a48", 0.5));
+{
+  const { Sky } = await import("/vendor/jsm/objects/Sky.js");
+  const sky = new Sky();
+  sky.scale.setScalar(1000);
+  sky.material.uniforms.sunPosition.value.set(3, 6, 4).normalize();
+  sky.material.uniforms.turbidity.value = 7;
+  const pm = new THREE.PMREMGenerator(renderer);
+  const sc = new THREE.Scene();
+  sc.add(sky);
+  const g = new THREE.Mesh(new THREE.PlaneGeometry(900, 900), new THREE.MeshBasicMaterial({ color: "#6f6f6c" }));
+  g.rotation.x = -Math.PI / 2; g.position.y = -2; sc.add(g);
+  scene.environment = pm.fromScene(sc, 0, 0.1, 4000).texture;
+}
+const sun = new THREE.DirectionalLight("#fff2dd", 3);
+sun.position.set(3, 6, 4);
+sun.castShadow = true;
+Object.assign(sun.shadow.camera, { left: -8, right: 8, top: 8, bottom: -8 });
+sun.shadow.mapSize.set(2048, 2048);
+scene.add(sun);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), new THREE.MeshStandardMaterial({ color: "#7d7f80", roughness: 1 }));
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+let list = [];
+if (set !== "motorcycle") for (const d of BICYCLE_KINDS) list.push(["bicycle", d]);
+if (set !== "bicycle") for (const d of MOTORCYCLE_KINDS) list.push(["motorcycle", d]);
+if (one) list = list.filter(([, d]) => d === one);
+const gap = view === "side" ? 2.3 : 1.3;
+const models = [];
+list.forEach(([kind, d], i) => {
+  const m = kind === "bicycle" ? buildBicycle({ design: d }) : buildMotorcycle({ design: d, color: MOTORCYCLE_DESIGNS[d].colors[+(q.get("c") || 0)][0] });
+  m.pose({ steerAngle: +(q.get("steer") || 0), kickstand: q.get("stand") === "1" });
+  const g = new THREE.Group();
+  g.add(m.group);
+  if (view === "side") { g.position.z = (i - (list.length - 1) / 2) * 0; g.position.x = 0; g.position.set((i % 4 - 1.5) * gap * (list.length > 1 ? 1 : 0), 0, -Math.floor(i / 4) * 0); g.rotation.y = q.get("flip") === "1" ? Math.PI / 2 : -Math.PI / 2; g.position.y = 0; g.position.z = 0; g.position.x = ((i % 4) - (Math.min(4, list.length) - 1) / 2) * gap; g.userData.row = Math.floor(i / 4); }
+  else g.position.x = (i - (list.length - 1) / 2) * gap;
+  scene.add(g);
+  models.push({ m, g });
+});
+const rows = Math.ceil(list.length / 4);
+const cams = [];
+const camera = new THREE.PerspectiveCamera(28, innerWidth / innerHeight, 0.1, 80);
+if (view === "side") {
+  // two rows: put the second row below by moving it down the screen (further along z does not work side-on), so shift in y
+  models.forEach(({ g }) => { g.position.y = -g.userData.row * 1.5; });
+  ground.visible = rows === 1;
+  const w = Math.min(4, list.length) * gap;
+  camera.position.set(0, 0.6 - (rows - 1) * 0.75, Math.max(3.2, w * 1.25, rows * 3.6));
+  camera.lookAt(0, 0.55 - (rows - 1) * 0.75, 0);
+} else if (view === "front") { camera.position.set(1.2, 1.1, -(3 + list.length * 0.9)); camera.lookAt(0, 0.55, 0); }
+else if (view === "rear") { camera.position.set(-1.2, 1.2, 3 + list.length * 0.9); camera.lookAt(0, 0.55, 0); }
+else if (view === "q") { camera.position.set(2.0, 1.25, -2.3); camera.lookAt(0, 0.55, 0); }
+else if (view === "q2") { camera.position.set(-1.9, 1.2, 2.3); camera.lookAt(0, 0.55, 0); }
+else if (view === "r") { camera.position.set(3.2, 0.75, 0.05); camera.lookAt(0, 0.6, 0); }
+else if (view === "l") { camera.position.set(-3.2, 0.75, 0.05); camera.lookAt(0, 0.6, 0); }
+else { camera.position.set(0, 9, 0.01); camera.lookAt(0, 0, 0); }
+if (q.get("rider") === "1") {
+  const { loadCharacterKit, makeCharacter } = await import("/character.js");
+  const kit = await loadCharacterKit(renderer);
+  for (const { m, g } of models) {
+    const c = makeCharacter(kit, { uniform: true });
+    g.add(c.model);
+    g.updateMatrixWorld(true);
+    const W = (o) => o.getWorldPosition(new THREE.Vector3());
+    const qq = g.getWorldQuaternion(new THREE.Quaternion());
+    const dir = (x, y, z) => new THREE.Vector3(x, y, z).applyQuaternion(qq);
+    for (let k = 0; k < 3; k++) c.update(1 / 30, { speed: 0, grounded: true, turnRate: 0, facing: g.rotation.y, ride: { saddle: W(m.saddle), gripL: W(m.grips[0]), gripR: W(m.grips[1]), pedalL: W(m.pedals[1]), pedalR: W(m.pedals[0]), groundL: g.localToWorld(new THREE.Vector3(-0.36, 0.1, 0.12)), groundR: g.localToWorld(new THREE.Vector3(0.36, 0.1, 0.12)), right: dir(1, 0, 0), up: dir(0, 1, 0), back: dir(0, 0, 1), crank: 0.6, effort: 0.2, footDown: +(q.get("foot") || 0), backing: 0, posture: m.spec.posture } });
+  }
+}
+renderer.render(scene, camera);
+window.__done = list.map(([, d]) => d);
+window.__info = renderer.info.render;
+</script>

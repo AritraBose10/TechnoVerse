@@ -1,8 +1,17 @@
 import * as THREE from "three";
 import RAPIER from "/vendor/rapier.es.js";
 import { buildWorld } from "/world.js";
-import { loadHero } from "/character.js";
-import { buildBicycle, newRide, stepBike, BIKE } from "/bicycle.js";
+import { loadCharacterKit, makeCharacter } from "/character.js";
+import { buildBicycle, newRide, stepBike, BICYCLE_KINDS } from "/bicycle.js";
+import { buildDaylight } from "/daylight.js";
+import { buildMotorcycle, MOTORCYCLE_KINDS, MOTORCYCLE_DESIGNS, makeEngineSound } from "/motorcycle.js";
+import { buildTraffic } from "/traffic.js";
+import { buildPeople } from "/people.js";
+import { loadCrowdBodies, crowdBodies } from "/crowdbodies.js";
+import { EffectComposer } from "/vendor/jsm/postprocessing/EffectComposer.js";
+import { RenderPass } from "/vendor/jsm/postprocessing/RenderPass.js";
+import { GTAOPass } from "/vendor/jsm/postprocessing/GTAOPass.js";
+import { OutputPass } from "/vendor/jsm/postprocessing/OutputPass.js";
 
 await RAPIER.init(); // loads the physics engine (WebAssembly)
 
@@ -34,24 +43,38 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 0.95;
+renderer.toneMappingExposure = 0.34;
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(55, 1, 0.2, 1500);
 
 // Soft light from the hazy sky plus a warm afternoon sun. The sun's shadow follows the player.
-scene.add(new THREE.HemisphereLight("#dfe9f2", "#8a8468", 0.55));
-const sun = new THREE.DirectionalLight("#fff0d2", 2.4);
+// The sky itself lights the scene (see world.js); this adds a little bounce from the ground.
+const hemi = new THREE.HemisphereLight("#cfd9e2", "#9a927c", 0.35);
+scene.add(hemi);
+const sun = new THREE.DirectionalLight("#fff1dc", 3.6);
 const SUN_OFFSET = new THREE.Vector3(55, 85, 35);
 sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.bias = -0.0004;
-sun.shadow.normalBias = 0.05;
-Object.assign(sun.shadow.camera, { left: -75, right: 75, top: 75, bottom: -75, near: 1, far: 260 });
+// Picture quality: "high" adds soft contact shadows where surfaces meet (ambient occlusion) and
+// sharper sun shadows. Phones start on "low". Override with ?q=high or ?q=low in the address.
+const QUALITY = new URLSearchParams(location.search).get("q") || (matchMedia("(pointer:coarse)").matches ? "low" : "high");
+const HIGH = QUALITY !== "low";
+sun.shadow.mapSize.set(HIGH ? 4096 : 2048, HIGH ? 4096 : 2048);
+sun.shadow.bias = -0.0003;
+sun.shadow.normalBias = 0.04;
+sun.shadow.radius = 2.5;
+Object.assign(sun.shadow.camera, { left: -62, right: 62, top: 62, bottom: -62, near: 1, far: 260 });
 sun.position.copy(SUN_OFFSET);
 scene.add(sun, sun.target);
 
+let composer = null;
+let aoPass = null;
+function draw() {
+  if (composer) composer.render();
+  else renderer.render(scene, camera);
+}
 function resize() {
   renderer.setSize(innerWidth, innerHeight, false);
+  if (composer) composer.setSize(innerWidth, innerHeight);
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
 }
@@ -64,8 +87,8 @@ function makeLabel(text, { size = 44, color = "#ffffff", bg = "rgba(16,24,36,.78
   const g = c.getContext("2d");
   const font = `600 ${size}px system-ui, sans-serif`;
   g.font = font;
-  const w = Math.ceil(g.measureText(text).width) + size;
-  const h = Math.ceil(size * 1.6);
+  const w = Math.ceil(g.measureText(text).width) + size * 0.8;
+  const h = Math.ceil(size * 1.45);
   c.width = w;
   c.height = h;
   g.font = font;
@@ -93,7 +116,20 @@ function disposeLabel(sprite) {
 const world = new RAPIER.World({ x: 0, y: -GRAVITY, z: 0 });
 world.timestep = STEP;
 const campus = await (await fetch("/campus.json")).json();
-const { places, props, focus, entranceYaw } = buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel });
+const worldInfo = buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel });
+const { places, props, focus, entranceYaw, animate: animateWorld, captureReflections } = worldInfo;
+if (HIGH) {
+  composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(innerWidth, innerHeight, { type: THREE.HalfFloatType, samples: 4 }));
+  composer.setPixelRatio(renderer.getPixelRatio());
+  composer.addPass(new RenderPass(scene, camera));
+  aoPass = new GTAOPass(scene, camera, innerWidth, innerHeight);
+  aoPass.updateGtaoMaterial({ radius: 1.1, distanceExponent: 1.4, thickness: 1.2, scale: 1.15, samples: 12, screenSpaceRadius: false });
+  aoPass.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 6, rings: 2, samples: 12 });
+  aoPass.blendIntensity = 0.9;
+  composer.addPass(aoPass);
+  composer.addPass(new OutputPass());
+  composer.setSize(innerWidth, innerHeight);
+}
 
 // My own body: a capsule moved by a character controller, so it walks up steps and
 // ramps, slides along walls, falls with gravity and pushes loose objects.
@@ -151,8 +187,8 @@ function makeAvatar(info) {
   ring.rotation.x = Math.PI / 2;
   ring.position.y = 2.45;
   ring.visible = false;
-  const tag = makeLabel(info.name, { height: 0.5 });
-  tag.position.y = 2.95;
+  const tag = makeLabel(info.name, { height: 0.2 });
+  tag.position.y = 2.6;
   group.add(body, legs, head, nose, ring, tag);
   const simple = [body, legs, head, nose];
   group.position.set(info.x, info.y || 0, info.z);
@@ -164,12 +200,12 @@ function makeAvatar(info) {
     ring,
     tag,
     simple,
-    bubbleY: 3.65,
+    bubbleY: 2.98,
     tx: info.x,
     ty: info.y || 0,
     tz: info.z,
     try: info.ry,
-    bikeOn: Boolean(info.bike),
+    bikeOn: info.bike | 0,
     tlean: info.lean || 0,
     bubble: null,
     bubbleUntil: 0,
@@ -177,48 +213,197 @@ function makeAvatar(info) {
     dist: Infinity,
   };
 }
-// My own avatar swaps the simple figure for the detailed animated character once it has loaded.
+// Every player swaps the simple figure for the detailed animated character once it has loaded:
+// the same body and TIU polo for everyone, each with their own animation.
 let hero = null;
-const heroLoading = loadHero(renderer).catch((err) => {
+const kitLoading = loadCharacterKit(renderer).catch((err) => {
   console.warn("Could not load the detailed character; using the simple figure.", err);
   return null;
 });
+// The street's own life: traffic on both carriageways, and the people on the pavements and at
+// the stalls (see traffic.js and people.js).
+const streetLife = new URLSearchParams(location.search).get("life") !== "off";
+const traffic = streetLife ? buildTraffic({ scene, world, RAPIER, local: worldInfo.local, phi: worldInfo.phi, kitLoading, quality: HIGH ? "high" : "low" }) : null;
+const bodiesLoading = streetLife ? loadCrowdBodies(renderer, HIGH ? 12 : 8, HIGH ? 99 : 10) : null;
+const crowd = streetLife ? buildPeople({ scene, world, RAPIER, local: worldInfo.local, phi: worldInfo.phi, spots: worldInfo.spots, kitLoading, bodiesLoading, traffic, quality: HIGH ? "high" : "low", camera }) : null;
+// the real time of day in Salt Lake: sun, moon, sky, lamps (see daylight.js)
+const daylight = buildDaylight({ scene, renderer, sun, hemi, sunOffset: SUN_OFFSET, worldInfo, traffic, high: HIGH, clockEl: document.getElementById("clock") });
+let lastLocal = null;
+let streetT = 0; // the street's own clock
+function updateStreet(dt, pos) {
+  if (!traffic) return;
+  streetT += dt;
+  const t = streetT;
+  // me and the other players, in the street's frame: obstacles for drivers and walkers
+  const [lx, lz] = worldInfo.toLocal(pos.x, pos.z);
+  const vx = lastLocal ? (lx - lastLocal[0]) / Math.max(dt, 1e-3) : 0;
+  const vz = lastLocal ? (lz - lastLocal[1]) / Math.max(dt, 1e-3) : 0;
+  lastLocal = [lx, lz];
+  const extra = [{ x: lx, z: lz, r: riding ? 0.7 : 0.35, vx, vz }];
+  for (const a of players.values()) {
+    const [ax, az] = worldInfo.toLocal(a.group.position.x, a.group.position.z);
+    extra.push({ x: ax, z: az, r: a.bikeOn ? 0.7 : 0.35, vx: 0, vz: 0 });
+  }
+  const onRoad = crowd.onRoad();
+  for (const e of extra) if ((e.z > 8.4 && e.z < 15.4) || (e.z > 19.4 && e.z < 25.6)) onRoad.push({ x: e.x, z: e.z, vx: e.vx, w: e.r > 0.5 ? 0.9 : 0.7 });
+  for (const b of bikes) {
+    if (riding?.bike === b) continue;
+    const [bx, bz] = worldInfo.toLocal(b.x, b.z);
+    if ((bz > 8.4 && bz < 15.4) || (bz > 19.4 && bz < 25.6)) onRoad.push({ x: bx, z: bz, vx: 0, w: 0.9 });
+  }
+  traffic.update(dt, onRoad, t, [lx, lz]);
+  crowd.update(dt, t, extra);
+}
 // Someone else on a bike: a lighter copy of the bike under their figure, leaning as they lean.
 function showRemoteBike(a, dt, roll) {
-  if (a.bikeOn && !a.bikeModel) {
-    a.bikeModel = buildBicycle({ color: a.color || "#8f1d22", detail: false });
-    a.bikeRig = new THREE.Group();
-    a.bikeRig.add(a.bikeModel.group);
-    a.group.add(a.bikeRig);
-    for (const part of a.simple) {
-      part.userData.baseY = part.position.y;
-      a.bikeRig.attach(part);
+  if (a.bikeOn && a.bikeCode !== a.bikeOn) {
+    // which machine they are on (see RIDE_KINDS); built the first time, rebuilt if they change
+    if (a.bikeModel) a.bikeRig.remove(a.bikeModel.group);
+    a.bikeCode = a.bikeOn;
+    a.bikeModel = buildRide(a.bikeOn, { detail: false });
+    if (!a.bikeRig) {
+      a.bikeRig = new THREE.Group();
+      a.group.add(a.bikeRig);
+      for (const part of a.simple) {
+        part.userData.baseY = part.position.y;
+        a.bikeRig.attach(part);
+      }
+      a.lean = 0;
+      a.crank = 0;
     }
-    a.lean = 0;
-    a.crank = 0;
+    a.bikeRig.add(a.bikeModel.group);
   }
   if (!a.bikeModel) return;
-  a.bikeModel.group.visible = a.bikeOn;
+  if (a.char) {
+    const holder = a.char.model;
+    const want = a.bikeOn ? a.bikeRig : a.group;
+    if (holder.parent !== want) want.add(holder);
+  }
+  a.bikeModel.group.visible = Boolean(a.bikeOn);
+  if (a.char && a.helmetOn !== Boolean(a.bikeOn && a.bikeModel.spec.motor)) {
+    a.helmetOn = Boolean(a.bikeOn && a.bikeModel.spec.motor);
+    a.char.showGear("helmet", a.helmetOn);
+  }
   for (const part of a.simple) part.position.y = part.userData.baseY + (a.bikeOn ? 0.45 : 0); // seated on the saddle
   a.lean += ((a.bikeOn ? a.tlean : 0) - a.lean) * (1 - Math.exp(-dt * 8));
   a.bikeRig.rotation.z = -a.lean;
   if (a.bikeOn) {
-    a.crank += roll / BIKE.wheelRadius / BIKE.gear;
+    a.crank += roll / a.bikeModel.spec.wheelRadius / a.bikeModel.spec.gear;
     a.bikeModel.pose({ roll, crankAngle: a.crank });
   }
 }
-async function attachHero(a) {
-  const loaded = await heroLoading;
-  if (!loaded) return;
-  hero = loaded;
+async function attachCharacter(a, mine = false) {
+  const kit = await kitLoading;
+  if (!kit || a.removed) return;
+  const c = makeCharacter(kit, { uniform: true, gear: [{ kind: "helmet", color: mine ? "#1b1d22" : ["#1b1d22", "#c41e24", "#e8e8e8", "#1e3a8a"][a.id.length % 4] }] });
+  c.showGear("helmet", false); // worn on a motorcycle
+  a.char = c;
+  if (mine) {
+    hero = c;
+    window.__heroModel = hero.model; // for checking the character in the console
+  }
   for (const part of a.simple) part.visible = false;
-  a.group.add(hero.model);
-  a.tag.position.y = 2.2;
+  (a.bikeOn && a.bikeRig ? a.bikeRig : a.group).add(c.model);
+  a.tag.position.y = 2.02;
   a.ring.position.y = 2.02;
   a.ring.scale.setScalar(0.7);
-  a.bubbleY = 2.85;
+  a.bubbleY = 2.32;
+}
+const JUMP_PHASES = [null, "prep", "air", "land"];
+// ---------- Greetings between people ----------
+// 1 nomoshkar (palms together), 2 a wave, 3 a handshake. Others see yours; when someone beside
+// you offers a hand, your character takes it.
+const GREETINGS = [null, "namaste", "wave", "handshake"];
+const myGreet = { code: 0, until: 0, cool: 0 };
+const _hand = new THREE.Vector3();
+const _g = {};
+function partnerOf(a) {
+  // whoever stands closest to this person, within arm's reach
+  let best = null;
+  let bd = 2.0;
+  for (const o of [me, ...players.values()]) {
+    if (!o || o === a) continue;
+    const d = Math.hypot(o.group.position.x - a.group.position.x, o.group.position.z - a.group.position.z);
+    if (d < bd && d > 0.25) {
+      bd = d;
+      best = o;
+    }
+  }
+  return best;
+}
+function greet(code, answering = false, ms = 0) {
+  if (!me || riding) return;
+  const now = performance.now();
+  if (code === 3 && !partnerOf(me)) {
+    if (!answering) logLine("Step up to someone to shake hands.", true);
+    return;
+  }
+  Object.assign(myGreet, { code, until: now + (ms || (code === 2 ? 2200 : 2600)) });
+}
+function greetingOf(a, now) {
+  const code = a === me ? (now < myGreet.until ? myGreet.code : 0) : a.gest || 0;
+  for (const k in _g) delete _g[k];
+  if (!code) return _g;
+  _g[GREETINGS[code]] = 1;
+  if (code === 3) {
+    const other = partnerOf(a);
+    if (other) {
+      // hands meet halfway between the two, at about waist-to-chest height
+      _hand.copy(a.group.position).add(other.group.position).multiplyScalar(0.5);
+      _hand.y += 1.02;
+      _g.at = _hand;
+      // turn to face them
+      const want = Math.atan2(-(other.group.position.x - a.group.position.x), -(other.group.position.z - a.group.position.z));
+      if (a === me && Math.hypot(vel.x, vel.z) < 0.3) me.group.rotation.y = lerpAngle(me.group.rotation.y, want, 0.2);
+    }
+  }
+  return _g;
+}
+const _r = { saddle: new THREE.Vector3(), gripL: new THREE.Vector3(), gripR: new THREE.Vector3(), pedalL: new THREE.Vector3(), pedalR: new THREE.Vector3(), groundL: new THREE.Vector3(), groundR: new THREE.Vector3(), right: new THREE.Vector3(), up: new THREE.Vector3(), back: new THREE.Vector3() };
+// Someone else's character, animated from what the network tells us: how fast they move, whether
+// they are jumping, riding, talking.
+function animateRemote(a, dt, moved, turned, now) {
+  const c = a.char;
+  if (!c) return;
+  const speed = moved / Math.max(dt, 1e-3);
+  a.spd = (a.spd || 0) + (Math.min(speed, 9) - (a.spd || 0)) * (1 - Math.exp(-dt * 6));
+  if (a.dist > 70) return; // too far to see the detail; keep the cost down
+  let talk = 0;
+  if (a.speaking) talk = 0.3 + 0.3 * Math.abs(Math.sin(now / 90 + a.id.length));
+  else if (a.bubble && now - (a.bubbleUntil - CHAT_BUBBLE_MS) < 1600) talk = 0.25 + 0.25 * Math.sin(now / 55) * Math.sin(now / 23);
+  if (a.bikeOn && a.bikeModel) {
+    a.group.updateMatrixWorld(true);
+    const m = a.bikeModel;
+    m.saddle.getWorldPosition(_r.saddle);
+    m.grips[0].getWorldPosition(_r.gripL);
+    m.grips[1].getWorldPosition(_r.gripR);
+    m.pedals[1].getWorldPosition(_r.pedalL);
+    m.pedals[0].getWorldPosition(_r.pedalR);
+    const q = a.bikeRig.getWorldQuaternion(new THREE.Quaternion());
+    _r.right.set(1, 0, 0).applyQuaternion(q);
+    _r.up.set(0, 1, 0).applyQuaternion(q);
+    _r.back.set(0, 0, 1).applyQuaternion(q);
+    a.group.localToWorld(_r.groundL.set(-0.36, 0.1, 0.12));
+    a.group.localToWorld(_r.groundR.set(0.36, 0.1, 0.12));
+    c.update(dt, { speed: 0, grounded: true, turnRate: 0, facing: a.group.rotation.y, ride: { ..._r, crank: a.bikeModel.spec.motor ? 0.6 : a.crank, effort: a.bikeModel.spec.motor ? 0.1 : Math.min(1, a.spd / 7), footDown: a.spd < 0.3 ? 1 : 0, backing: 0, backDist: 0, posture: a.bikeModel.spec.posture } });
+    return;
+  }
+  const phase = JUMP_PHASES[a.jump || 0];
+  c.update(dt, {
+    speed: phase === "air" ? a.spd : a.spd < 0.15 ? 0 : a.spd,
+    grounded: phase !== "air",
+    jump: { phase, t: phase === "prep" ? 0.5 : 0, crouch: a.crouch || 0, run: a.spd > 2.5 ? 1 : 0, vy: (a.ty - a.group.position.y) * 10, launchV: 3 },
+    turnRate: turned / Math.max(dt, 1e-3),
+    facing: a.group.rotation.y,
+    lookAt: null,
+    talk,
+    friendly: false,
+    gesture: greetingOf(a, now),
+    groundAt: a.dist < 25 ? groundAt : null,
+  });
 }
 function removeAvatar(a) {
+  a.removed = true;
   scene.remove(a.group);
   a.group.traverse((o) => {
     if (o.isSprite) disposeLabel(o);
@@ -234,7 +419,7 @@ function showBubble(a, text) {
     disposeLabel(a.bubble);
   }
   const short = text.length > 48 ? text.slice(0, 47) + "…" : text;
-  a.bubble = makeLabel(short, { height: 0.6, color: "#14202e", bg: "rgba(255,255,255,.95)" });
+  a.bubble = makeLabel(short, { height: 0.28, color: "#14202e", bg: "rgba(255,255,255,.95)" });
   a.bubble.position.y = a.bubbleY;
   a.group.add(a.bubble);
   a.bubbleUntil = performance.now() + CHAT_BUBBLE_MS;
@@ -261,9 +446,13 @@ function connect(profile) {
         chatRange = msg.chatRange;
         me = makeAvatar(msg.you);
         spawnBody(msg.you.x, 0, msg.you.z);
-        attachHero(me);
+        attachCharacter(me, true);
         camYaw = msg.you.ry;
-        for (const p of msg.players) players.set(p.id, makeAvatar(p));
+        for (const p of msg.players) {
+          const a = makeAvatar(p);
+          players.set(p.id, a);
+          attachCharacter(a);
+        }
         $("#join").hidden = true;
         $("#join").style.display = "none";
         $("#hud").hidden = false;
@@ -273,7 +462,11 @@ function connect(profile) {
         $("#joinError").textContent = "The campus is full right now. Try again soon.";
         break;
       case "joined":
-        players.set(msg.player.id, makeAvatar(msg.player));
+        {
+          const a = makeAvatar(msg.player);
+          players.set(msg.player.id, a);
+          attachCharacter(a);
+        }
         break;
       case "left": {
         const a = players.get(msg.id);
@@ -283,9 +476,9 @@ function connect(profile) {
         break;
       }
       case "snap":
-        for (const [id, x, y, z, ry, bk, lean] of msg.p) {
+        for (const [id, x, y, z, ry, bk, lean, jump, crouch, gest] of msg.p) {
           const a = players.get(id);
-          if (a) Object.assign(a, { tx: x, ty: y, tz: z, try: ry, bikeOn: Boolean(bk), tlean: lean || 0 });
+          if (a) Object.assign(a, { tx: x, ty: y, tz: z, try: ry, bikeOn: bk | 0, tlean: lean || 0, jump: jump || 0, crouch: crouch || 0, gest: gest || 0 });
         }
         break;
       case "chat": {
@@ -405,6 +598,7 @@ function setTalking(on) {
   $("#talk").textContent = on ? "Talking…" : "Hold to talk (V)";
 }
 $("#ride").addEventListener("click", () => toggleRide());
+for (const b of document.querySelectorAll("#greet button")) b.addEventListener("click", () => greet(+b.dataset.g));
 $("#voiceJoin").addEventListener("click", () => (voice.on ? leaveVoice() : joinVoice()));
 const talkBtn = $("#talk");
 talkBtn.addEventListener("pointerdown", (e) => {
@@ -596,6 +790,7 @@ addEventListener("keydown", (e) => {
   if (e.code === "Space") e.preventDefault();
   if (e.code === "KeyV") setTalking(true);
   if (e.code === "KeyE" && !e.repeat) toggleRide();
+  if (!e.repeat && (e.code === "Digit1" || e.code === "Digit2" || e.code === "Digit3")) greet(+e.code.slice(5));
 });
 addEventListener("keyup", (e) => {
   keys.delete(e.code);
@@ -763,35 +958,56 @@ function updateJump(dt, wantJump, speedNow) {
 const lookTarget = new THREE.Vector3();
 const DOWN = { x: 0, y: -1, z: 0 };
 // Height of the solid ground under a point, ignoring my own body and loose objects.
-// ---------- Bicycles ----------
-// A rack of three bikes on the forecourt beside the main entrance. Each visitor's bikes are their
-// own (like the footballs); other people see you on a bike when you ride one.
+// ---------- Bicycles and motorcycles ----------
+// Five kinds of bicycle and three everyday motorcycles stand on the forecourt and along the
+// street. Each visitor's machines are their own (like the footballs); other people see you on
+// the one you ride.
+const RIDE_KINDS = [...BICYCLE_KINDS.map((d) => ["bicycle", d]), ...MOTORCYCLE_KINDS.map((d) => ["motorcycle", d])]; // place in this list + 1 is what goes over the network
+function buildRide(code, opts = {}) {
+  const [kind, design] = RIDE_KINDS[code - 1] || RIDE_KINDS[0];
+  return kind === "bicycle" ? buildBicycle({ design, ...opts }) : buildMotorcycle({ design, ...opts });
+}
+const rideCode = (model) => RIDE_KINDS.findIndex(([k, d]) => k === model.kind && d === model.design) + 1;
 const bikes = [];
-const bikeColors = ["#8f1d22", "#1f4f7a", "#2d5a3a"];
 function parkBike(b, x, y, z, heading) {
   Object.assign(b, { x, y, z, heading });
   scene.add(b.stand);
   b.stand.add(b.model.group);
   b.model.group.position.set(0, 0, 0);
-  b.model.group.rotation.set(0, 0, 0.14); // resting on its kickstand, leaning left
+  b.model.group.rotation.set(0, 0, b.model.spec.parkLean); // resting on its side stand, leaning left (upright on a centre stand)
   b.stand.position.set(x, y, z);
   b.stand.rotation.set(0, heading, 0);
-  b.model.pose({ steerAngle: -0.3, kickstand: true });
-  b.collider = world.createCollider(RAPIER.ColliderDesc.cuboid(0.22, 0.55, 0.85).setTranslation(x, y + 0.55, z).setRotation({ x: 0, y: Math.sin(heading / 2), z: 0, w: Math.cos(heading / 2) }));
+  b.model.pose({ steerAngle: b.model.spec.parkLean ? -0.3 : 0, kickstand: true });
+  const { L, H } = b.model.size;
+  b.collider = world.createCollider(RAPIER.ColliderDesc.cuboid(0.24, H / 2, L / 2 - 0.05).setTranslation(x, y + H / 2, z).setRotation({ x: 0, y: Math.sin(heading / 2), z: 0, w: Math.cos(heading / 2) }));
+}
+function addRide(model, lx, lz, turn = Math.PI / 2) {
+  const b = { model, stand: new THREE.Group() };
+  const [x, z] = worldInfo.local(lx, lz);
+  parkBike(b, x, 0, z, entranceYaw + turn);
+  bikes.push(b);
+  return b;
 }
 {
-  const cosP = Math.cos(entranceYaw);
-  const sinP = Math.sin(entranceYaw);
-  const local = (x, z) => [focus.x + x * cosP + z * sinP, focus.z - x * sinP + z * cosP];
-  // On the forecourt between the raised entrance floor (ends 3 m out) and the railing (6.3 m out),
-  // side by side, front wheels toward the gate.
-  [3.8, 4.8, 5.8].forEach((out, i) => {
-    const b = { model: buildBicycle({ color: bikeColors[i] }), stand: new THREE.Group() };
-    const [x, z] = local(11.6, out);
-    parkBike(b, x, 0, z, entranceYaw + Math.PI / 2);
-    bikes.push(b);
-  });
+  const plates = ["WB 06 AF 6627", "WB 02 AK 3391", "WB 08 H 5012", "WB 04 J 8847", "WB 12 BC 1204", "WB 26 S 7730", "WB 10 P 4459"];
+  const moto = (design, i) => buildMotorcycle({ design, color: MOTORCYCLE_DESIGNS[design].colors[i % MOTORCYCLE_DESIGNS[design].colors.length][0], plate: plates[i % plates.length] });
+  // On the forecourt between the raised entrance floor (ends 3 m out) and the railing (6.3 m out):
+  // one of each bicycle side by side, front wheels toward the gate, then the three motorcycles.
+  addRide(buildBicycle({ design: "city" }), 25.2, 3.6);
+  addRide(buildBicycle({ design: "roadster" }), 25.2, 4.2);
+  addRide(buildBicycle({ design: "mtb" }), 25.2, 4.8);
+  addRide(buildBicycle({ design: "ladies" }), 25.2, 5.4);
+  addRide(buildBicycle({ design: "sport" }), 25.2, 6.0);
+  // the motorcycles stand in a row at the kerb just outside the gate, the way they do
+  ["commuter", "scooter", "classic", "bullet", "commuter", "bullet"].forEach((d, i) => addRide(moto(d, i === 4 ? 1 : i === 5 ? 2 : i === 1 ? 2 : 0), 33.2 + i * 1.25, 9.0, Math.PI * 0.82));
+  // and by the stalls opposite
+  addRide(moto("classic", 2), -3.2, 25.1, -Math.PI * 0.2);
+  addRide(moto("scooter", 4), -4.4, 25.1, -Math.PI * 0.2);
+  addRide(moto("commuter", 3), 9.5, 25.1, -Math.PI * 0.2);
+  addRide(buildBicycle({ design: "roadster", color: "#15301f" }), 10.9, 25.2, -Math.PI * 0.35);
+  addRide(buildBicycle({ design: "ladies", color: "#1f8a8a" }), 14.5, 25.2, -Math.PI * 0.35);
 }
+const engine = makeEngineSound();
 let riding = null; // { bike, r }
 const rideRig = new THREE.Group(); // leans the bike and rider together about the tyre contact line
 let rideGrade = 0;
@@ -819,6 +1035,9 @@ function toggleRide() {
     const p = me.group.position;
     rideRig.remove(bike.model.group);
     parkBike(bike, p.x, p.y, p.z, r.heading);
+    engine.set(1300, 0, false);
+    engine.horn(false);
+    hero.showGear("helmet", false);
     me.group.add(hero.model);
     me.group.remove(rideRig);
     // step off to the left of the bike
@@ -840,10 +1059,12 @@ function toggleRide() {
   me.group.rotation.y = b.heading;
   vel.x = vel.z = 0;
   riding = { bike: b, r: newRide(b.heading) };
+  hero.showGear("helmet", Boolean(b.model.spec.motor)); // helmet on for anything with an engine
+  myGreet.code = 0;
   jumpState.phase = null;
   camYaw = b.heading;
 }
-const _w = { saddle: new THREE.Vector3(), gripL: new THREE.Vector3(), gripR: new THREE.Vector3(), pedalL: new THREE.Vector3(), pedalR: new THREE.Vector3(), groundL: new THREE.Vector3(), right: new THREE.Vector3(), up: new THREE.Vector3(), back: new THREE.Vector3() };
+const _w = { saddle: new THREE.Vector3(), gripL: new THREE.Vector3(), gripR: new THREE.Vector3(), pedalL: new THREE.Vector3(), pedalR: new THREE.Vector3(), groundL: new THREE.Vector3(), groundR: new THREE.Vector3(), right: new THREE.Vector3(), up: new THREE.Vector3(), back: new THREE.Vector3() };
 function rideFrame(dt) {
   const { bike, r } = riding;
   let pedal = keys.has("KeyW") || keys.has("ArrowUp") ? 1 : 0;
@@ -854,7 +1075,12 @@ function rideFrame(dt) {
   steer = Math.max(-1, Math.min(1, steer + stickVec.x));
   const sprint = keys.has("ShiftLeft") || keys.has("ShiftRight") || Math.hypot(stickVec.x, stickVec.y) > 0.95;
   const before = body.rigid.translation();
-  const { vx, vz } = stepBike(r, { pedal, brake, steer, sprint }, { grounded: body.grounded, grade: rideGrade }, dt);
+  const spec = bike.model.spec;
+  const { vx, vz } = stepBike(r, { pedal, brake, steer, sprint }, { grounded: body.grounded, grade: rideGrade }, dt, spec);
+  if (spec.motor) {
+    engine.set(r.rpm, r.throttle, true);
+    engine.horn(keys.has("KeyH"));
+  }
   // Nothing passes through a wall: look ahead of the front wheel (or behind the back one)
   const dir = Math.sign(r.v);
   if (dir) {
@@ -893,7 +1119,7 @@ function rideFrame(dt) {
   me.group.rotation.y = r.heading;
   rideRig.rotation.z = -r.lean;
   rideRig.position.y = -landBob;
-  bike.model.pose({ steerAngle: r.steer, roll: r.roll, crankAngle: r.crank, kickstand: false });
+  bike.model.pose({ steerAngle: r.steer, roll: r.roll, crankAngle: r.crank, kickstand: false, brake: brake > 0 });
   me.group.updateMatrixWorld(true);
   const m = bike.model;
   m.saddle.getWorldPosition(_w.saddle);
@@ -906,6 +1132,7 @@ function rideFrame(dt) {
   _w.up.set(0, 1, 0).applyQuaternion(q);
   _w.back.set(0, 0, 1).applyQuaternion(q);
   me.group.localToWorld(_w.groundL.set(-0.36, 0.1, 0.12));
+  me.group.localToWorld(_w.groundR.set(0.36, 0.1, 0.12));
   hero.update(dt, {
     speed: 0,
     grounded: true,
@@ -913,15 +1140,19 @@ function rideFrame(dt) {
     facing: r.heading,
     lookAt: null,
     talk: 0,
-    ride: { ...(_w), crank: r.crank, effort: r.effort, footDown: r.footDown },
+    ride: { ...(_w), crank: spec.motor ? 0.6 : r.crank, effort: r.effort, footDown: r.footDown, backing: r.backing, backDist: r.backDist, posture: spec.posture },
   });
   // camera swings round behind the rider while moving, unless you are looking around
   if (!drag && Math.abs(r.v) > 1) camYaw = lerpAngle(camYaw, r.heading, 1 - Math.exp(-dt * 1.6));
   airTime = body.grounded ? 0 : airTime + dt;
 }
 
+const fixedOnly = (c) => {
+  const p = c.parent();
+  return !p || p.isFixed();
+};
 function groundAt(x, z, fromY) {
-  const hit = world.castRay(new RAPIER.Ray({ x, y: fromY, z }, DOWN), 1.5, true, undefined, undefined, undefined, body.rigid, (c) => !c.parent()?.isDynamic());
+  const hit = world.castRay(new RAPIER.Ray({ x, y: fromY, z }, DOWN), 1.5, true, undefined, undefined, undefined, body.rigid, fixedOnly);
   return hit ? fromY - hit.toi : null;
 }
 let camNow = 5.5;
@@ -936,11 +1167,14 @@ function frame() {
   const now = performance.now();
 
   if (!me) {
+    daylight.update(dt, camera.position);
+    sun.position.copy(camera.position).add(SUN_OFFSET);
+    sun.target.position.copy(camera.position);
     // Slow fly-around behind the join screen
     const t = now / 9000;
     camera.position.set(focus.x + Math.sin(t) * 120, 55, focus.z + Math.cos(t) * 120);
     camera.lookAt(focus.x, focus.height * 0.4, focus.z);
-    renderer.render(scene, camera);
+    draw();
     return;
   }
 
@@ -948,6 +1182,7 @@ function frame() {
   if (riding && hero) rideFrame(dt);
   else walkFrame(dt, now);
   updateRideHint();
+  daylight.update(dt / (timeScale || 1), pos);
   sun.position.copy(pos).add(SUN_OFFSET);
   sun.target.position.copy(pos);
   afterMove(dt, now, pos);
@@ -956,11 +1191,16 @@ function updateRideHint() {
   const hint = $("#rideHint");
   const btn = $("#ride");
   let text = "";
-  if (riding) text = Math.abs(riding.r.v) > 1.5 ? "W pedal · S brake · A D steer · Shift sprint" : "E to get off";
-  else if (nearestBike()) text = "E to ride the bike";
+  const near = riding ? null : nearestBike();
+  if (riding && riding.bike.model.spec.motor) {
+    const r = riding.r;
+    const kmh = Math.round(Math.abs(r.v) * 3.6);
+    text = r.v < -0.05 ? "Paddling it back · W to stop" : Math.abs(r.v) > 1.5 ? `${kmh} km/h${riding.bike.model.spec.cvt ? "" : " · gear " + r.gearNo} · W throttle · Shift full · S brake · H horn` : "E to get off · W throttle · hold S to back up · H horn";
+  } else if (riding) text = riding.r.v < -0.05 ? "Walking it back · W to stop" : Math.abs(riding.r.v) > 1.5 ? "W pedal · S brake · A D steer · Shift sprint" : "E to get off · hold S to back up";
+  else if (near) text = `E to ride the ${near.model.label}`;
   hint.textContent = text;
   hint.hidden = !text;
-  btn.hidden = !(riding || nearestBike());
+  btn.hidden = !(riding || near);
   btn.textContent = riding ? "Get off" : "Ride";
 }
 function walkFrame(dt, now) {
@@ -1027,12 +1267,37 @@ function walkFrame(dt, now) {
       facing: me.group.rotation.y,
       lookAt: nearest ? lookTarget.set(nearest.group.position.x, nearest.group.position.y + 1.8, nearest.group.position.z) : null,
       friendly: Boolean(nearest),
+      gesture: greetingOf(me, now),
       talk,
       groundAt,
     });
   }
 }
+let reflectionsDone = false;
+// If the device cannot keep up with high quality, step down on its own after a few seconds.
+const perf = { t: 0, frames: 0, checked: false };
+function watchPerformance(dt) {
+  if (perf.checked || !composer) return;
+  perf.t += dt;
+  perf.frames++;
+  if (perf.t < 4) return;
+  perf.checked = true;
+  if (perf.frames / perf.t < 24) {
+    composer = null;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.map?.dispose();
+    sun.shadow.map = null;
+    logLine("Switched to faster graphics for this device. Add ?q=high to the address to force full quality.", true);
+  }
+}
 function afterMove(dt, now, pos) {
+  watchPerformance(dt / (timeScale || 1));
+  if (!reflectionsDone) {
+    reflectionsDone = true;
+    captureReflections();
+  }
+  animateWorld(now / 1000); // leaves moving in the breeze
+  updateStreet(dt, pos);
   for (const p of props) {
     const pt = p.body.translation();
     if (pt.y < -20) {
@@ -1051,9 +1316,17 @@ function afterMove(dt, now, pos) {
     p.y += (a.ty - p.y) * k;
     p.z += (a.tz - p.z) * k;
     const moved = Math.hypot(a.tx - p.x, a.tz - p.z);
+    const before = a.group.rotation.y;
     a.group.rotation.y = lerpAngle(a.group.rotation.y, a.try, k);
     a.dist = Math.hypot(p.x - pos.x, p.z - pos.z);
     showRemoteBike(a, dt, moved * k);
+    // someone beside me offers a hand: take it
+    if (a.gest === 3 && a.dist < 1.9 && !riding && now > myGreet.until && now > myGreet.cool && partnerOf(a) === me) {
+      greet(3, true);
+      myGreet.cool = now + 6000;
+      logLine(`You shook hands with ${a.name}.`, true);
+    }
+    animateRemote(a, dt, moved * k, Math.atan2(Math.sin(a.group.rotation.y - before), Math.cos(a.group.rotation.y - before)), now);
   }
   for (const a of [me, ...players.values()]) {
     if (a.bubble && now > a.bubbleUntil) {
@@ -1069,10 +1342,12 @@ function afterMove(dt, now, pos) {
   if (sendTimer >= 0.1) {
     sendTimer = 0;
     const lean = riding ? riding.r.lean : 0;
-    const state = `${pos.x.toFixed(2)},${pos.y.toFixed(2)},${pos.z.toFixed(2)},${me.group.rotation.y.toFixed(2)},${riding ? 1 : 0},${lean.toFixed(2)}`;
+    const code = riding ? rideCode(riding.bike.model) : 0;
+    const gcode = now < myGreet.until ? myGreet.code : 0;
+    const state = `${pos.x.toFixed(2)},${pos.y.toFixed(2)},${pos.z.toFixed(2)},${me.group.rotation.y.toFixed(2)},${code},${lean.toFixed(2)},${jumpState.phase},${(jumpState.crouch || 0).toFixed(2)},${gcode}`;
     if (state !== lastSent) {
       lastSent = state;
-      sendMsg({ t: "pos", x: pos.x, y: pos.y, z: pos.z, ry: me.group.rotation.y, b: riding ? 1 : 0, l: lean });
+      sendMsg({ t: "pos", x: pos.x, y: pos.y, z: pos.z, ry: me.group.rotation.y, b: code, l: lean, j: Math.max(0, JUMP_PHASES.indexOf(jumpState.phase)), c: +(jumpState.crouch || 0).toFixed(2), g: gcode });
     }
   }
   slowTimer += dt;
@@ -1086,7 +1361,7 @@ function afterMove(dt, now, pos) {
   // Camera follows behind and above, and moves in closer rather than passing through a wall
   const eye = { x: pos.x, y: pos.y + (riding ? 1.75 : 1.55), z: pos.z };
   const dir = { x: Math.sin(camYaw) * Math.cos(camPitch), y: Math.sin(camPitch), z: Math.cos(camYaw) * Math.cos(camPitch) };
-  const hit = world.castRay(new RAPIER.Ray(eye, dir), camDist + 0.4, true, undefined, undefined, undefined, body.rigid, (c) => !c.parent()?.isDynamic());
+  const hit = world.castRay(new RAPIER.Ray(eye, dir), camDist + 0.4, true, undefined, undefined, undefined, body.rigid, fixedOnly);
   const reach = Math.max(0.6, (hit ? Math.min(camDist, hit.toi - 0.3) : camDist));
   camNow += (reach - camNow) * (reach < camNow ? 1 : 1 - Math.exp(-dt * 6));
   camera.position.set(eye.x + dir.x * camNow, Math.max(0.25, eye.y + dir.y * camNow), eye.z + dir.z * camNow);
@@ -1096,15 +1371,15 @@ function afterMove(dt, now, pos) {
     camera.lookAt(debugCam[3], debugCam[4], debugCam[5]);
   }
   me.tag.visible = camNow > 2.6; // my own name tag gets in the way up close
-  renderer.render(scene, camera);
+  draw();
 }
 frame();
 
 // Small handle for automated tests and debugging in the console.
 window.__tiu = {
   // free camera for screenshots: __tiu.cam(x, y, z, lookX, lookY, lookZ); __tiu.cam() to go back
-  bikes: () => bikes.map((b) => ({ x: b.x, y: b.y, z: b.z, heading: b.heading })),
-  ride: () => riding && { v: +riding.r.v.toFixed(2), kmh: +(riding.r.v * 3.6).toFixed(1), heading: riding.r.heading, steer: +riding.r.steer.toFixed(3), lean: +riding.r.lean.toFixed(3), footDown: +riding.r.footDown.toFixed(2), grade: +rideGrade.toFixed(3) },
+  bikes: () => bikes.map((b) => ({ x: b.x, y: b.y, z: b.z, heading: b.heading, kind: b.model.kind, design: b.model.design })),
+  ride: () => riding && { v: +riding.r.v.toFixed(2), kmh: +(riding.r.v * 3.6).toFixed(1), rpm: Math.round(riding.r.rpm), gear: riding.r.gearNo, design: riding.bike.model.design, heading: riding.r.heading, steer: +riding.r.steer.toFixed(3), lean: +riding.r.lean.toFixed(3), footDown: +riding.r.footDown.toFixed(2), grade: +rideGrade.toFixed(3) },
   slow(k = 1) {
     timeScale = k;
   },
@@ -1124,6 +1399,7 @@ window.__tiu = {
   },
   entranceYaw,
   hero: () => Boolean(hero),
+  greet,
   // +1 when the character's face points the way the body is travelling, -1 when it is backwards
   facingCheck() {
     const eye = hero.model.getObjectByName("LeftEye").getWorldPosition(new THREE.Vector3());
@@ -1135,9 +1411,29 @@ window.__tiu = {
   renderInfo: () => ({ calls: renderer.info.render.calls, triangles: renderer.info.render.triangles, textures: renderer.info.memory.textures, geometries: renderer.info.memory.geometries }),
   // adds a stand-in person at a spot, to test looking at people without a second browser
   standIn(x, z) {
-    players.set("stand-in", makeAvatar({ id: "stand-in", name: "Riya", dept: "", color: "#2ec4a6", x, y: 0, z, ry: 0, voice: false }));
+    const a = makeAvatar({ id: "stand-in", name: "Riya", dept: "", color: "#2ec4a6", x, y: 0, z, ry: 0, voice: false });
+    players.set("stand-in", a);
+    attachCharacter(a);
+    return a.id;
   },
   stride: () => hero && hero.stride,
+  // run the street on its own for a while (traffic and people only), to check how it behaves
+  simulate(seconds, step = 0.1) {
+    const pos = me.group.position;
+    for (let i = 0; i < seconds / step; i++) updateStreet(step, pos);
+  },
+  traffic: () => traffic && traffic.vehicles.map((v) => ({ kind: v.kind, road: v.road, x: +v.x.toFixed(1), lat: +v.lat.toFixed(2), v: +v.v.toFixed(2), state: v.state, ind: v.ind })),
+  crowd: () => crowd && crowd.people.map((p) => ({ role: p.role, x: +p.x.toFixed(1), z: +p.z.toFixed(2), task: p.tasks[0]?.type, act: p.tasks[0]?.act, left: p.tasks.length, sp: +p.speed.toFixed(2), body: p.bodyName })),
+  crowdStats: () => crowd && crowd.stats,
+  deals: () => crowd && crowd.deals(),
+  bodies: () => crowdBodies.map((b) => b.name),
+  vehicleDetail: () => traffic && traffic.vehicles.filter((v) => v.state !== "parked" && v.state !== "drive").map((v) => ({ kind: v.kind, road: v.road, state: v.state, x: +v.x.toFixed(2), lat: +v.lat.toFixed(2), latT: +v.latTarget.toFixed(2), v: +v.v.toFixed(2), slot: v.slot && v.slot.x, stopX: v.stopX })),
+  // the clock: __tiu.time("19:30") fixes Indian time, __tiu.time() goes back to the real clock
+  time(t) {
+    daylight.setTime(t);
+    return daylight.state;
+  },
+  daylight: () => daylight.state,
   teleport(x, z, y = 0) {
     placeBody(x, y, z);
   },

@@ -1,7 +1,7 @@
 {
-  "name": "tiu-campus",
+  "name": "technoverse",
   "version": "1.0.0",
-  "description": "People of TIU prototype: walkable 3D campus with nearby chat and voice",
+  "description": "TechnoVerse: walkable 3D TIU and Sector V street with traffic, people, real time of day, chat and voice",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

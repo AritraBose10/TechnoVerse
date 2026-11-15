@@ -24,7 +24,7 @@ import json, math, os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LAT0, LON0 = 22.5760302, 88.4284409  # "Techno India University" node in OSM
-RADIUS = 240  # keep things whose centre is within this many metres
+RADIUS = 600  # keep things whose centre is within this many metres east-west and north-south: from the Sector V metro station (north) to Meen Bhavan (south)
 M_PER_DEG_LON = 111320 * math.cos(math.radians(LAT0))
 M_PER_DEG_LAT = 110574
 
@@ -99,7 +99,7 @@ survey = json.load(open(os.path.join(HERE, "survey.json")))
 DROP = set(survey.get("drop", {}).get("osm", []))
 nodes = {e["id"]: e for e in data["elements"] if e["type"] == "node"}
 ways = {e["id"]: e for e in data["elements"] if e["type"] == "way"}
-out = {"buildings": [], "roads": [], "paths": [], "pitches": [], "grass": [], "water": [], "construction": [], "trees": [], "labels": []}
+out = {"buildings": [], "roads": [], "paths": [], "pitches": [], "grass": [], "water": [], "construction": [], "trees": [], "labels": [], "rail": []}
 
 
 def way_pts(w):
@@ -108,7 +108,7 @@ def way_pts(w):
 
 def near(pts, r=RADIUS):
     c = centroid(pts)
-    return math.hypot(c[0], c[1]) < r
+    return max(abs(c[0]), abs(c[1])) < r
 
 
 # ---------- OpenStreetMap ----------
@@ -117,12 +117,18 @@ for e in data["elements"]:
     tags = e.get("tags", {})
     if e["type"] == "node":
         x, z = to_xz(e["lat"], e["lon"])
-        if math.hypot(x, z) > RADIUS:
+        if max(abs(x), abs(z)) > RADIUS:
             continue
         if tags.get("natural") == "tree":
             out["trees"].append({"x": x, "z": z})
         elif "name" in tags and tags.get("highway") != "bus_stop":
             out["labels"].append({"name": tags["name"], "x": x, "z": z})
+        continue
+
+    if e["type"] == "way" and tags.get("railway") == "subway":
+        pts = way_pts(e)
+        if len(pts) > 1 and any(max(abs(q[0]), abs(q[1])) < RADIUS for q in pts):
+            out["rail"].append({"pts": pts, "name": tags.get("name", "")})
         continue
 
     if e["type"] == "relation":
@@ -143,7 +149,7 @@ for e in data["elements"]:
     closed = e["nodes"][0] == e["nodes"][-1]
     hw = tags.get("highway")
     if hw:
-        if not any(math.hypot(p[0], p[1]) < RADIUS + 40 for p in pts):
+        if not any(max(abs(p[0]), abs(p[1])) < RADIUS + 40 for p in pts):
             continue
         if hw in ("footway", "path", "pedestrian", "steps", "cycleway"):
             out["paths"].append({"kind": hw, "pts": pts})

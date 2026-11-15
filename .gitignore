@@ -1,1 +1,14 @@
-node_modules
+node_modules/
+*.tgz
+*.zip
+.env
+.DS_Store
+# large source data, kept out of the repo (re-fetch with tools/)
+tools/osm-extract.json
+tools/osm-extract-new.json
+tools/overture-buildings.json
+tools/overture-places.json
+tools/esri-tiles.tgz
+# raw downloads before conversion (see tools/models/README)
+assets-src/
+*.bundle

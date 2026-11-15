@@ -67,6 +67,8 @@
   #stick i { position:absolute; left:50%; top:50%; width:46px; height:46px; margin:-23px; border-radius:50%; background:rgba(255,255,255,.55); }
   #jump { position:absolute; left:150px; bottom:240px; width:64px; height:64px; border-radius:50%; display:none;
     border:1px solid var(--line); background:rgba(255,255,255,.2); color:var(--text); touch-action:none; }
+  #greet { position:absolute; right:14px; top:50%; transform:translateY(-50%); display:flex; flex-direction:column; gap:8px; }
+  #greet button { width:46px; height:46px; border-radius:50%; border:0; font-size:22px; cursor:pointer; background:rgba(16,24,36,.78); }
   #rideHint { position:absolute; left:50%; bottom:96px; transform:translateX(-50%); padding:8px 14px; font-size:14px; white-space:nowrap; }
   #ride { position:absolute; left:50%; bottom:40px; transform:translateX(-50%); padding:10px 22px; border-radius:22px; border:0;
           background:#ffb53d; color:#1b1f27; font-weight:700; font-size:15px; cursor:pointer; }
@@ -95,7 +97,7 @@
 </div>
 
 <div id="hud" hidden>
-  <div id="top" class="panel">You are near <b id="place">Main Gate</b> · <span id="count">1</span> on campus</div>
+  <div id="top" class="panel">You are near <b id="place">Main Gate</b> · <span id="count">1</span> on campus · <span id="clock"></span> IST</div>
 
   <div id="nearby" class="panel">
     <h2>Nearby</h2>
@@ -106,6 +108,7 @@
   <div id="credit">Map data © OpenStreetMap contributors</div>
   <div id="stick"><i></i></div>
   <button id="jump" type="button">Jump</button>
+  <div id="greet"><button type="button" data-g="1" title="Nomoshkar (1)">🙏</button><button type="button" data-g="2" title="Wave hello (2)">👋</button><button type="button" data-g="3" title="Handshake (3)">🤝</button></div>
   <div id="rideHint" class="panel" hidden></div>
   <button id="ride" type="button" hidden>Ride</button>
 

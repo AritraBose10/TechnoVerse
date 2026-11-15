@@ -1,0 +1,158 @@
+[
+ {
+  "name": "Business_Male_06",
+  "file": "Business_Male_06.glb",
+  "role": "office",
+  "sex": "m"
+ },
+ {
+  "name": "Business_Male_07",
+  "file": "Business_Male_07.glb",
+  "role": "office",
+  "sex": "m"
+ },
+ {
+  "name": "Male_Adult_08",
+  "file": "Male_Adult_08.glb",
+  "role": "office",
+  "sex": "m"
+ },
+ {
+  "name": "Business_Male_01",
+  "file": "Business_Male_01.glb",
+  "role": "office",
+  "sex": "m"
+ },
+ {
+  "name": "Business_Female_02",
+  "file": "Business_Female_02.glb",
+  "role": "office",
+  "sex": "f"
+ },
+ {
+  "name": "Female_Adult_02",
+  "file": "Female_Adult_02.glb",
+  "role": "office",
+  "sex": "f"
+ },
+ {
+  "name": "Male_Adult_06",
+  "file": "Male_Adult_06.glb",
+  "role": "student",
+  "sex": "m"
+ },
+ {
+  "name": "Male_Adult_09",
+  "file": "Male_Adult_09.glb",
+  "role": "student",
+  "sex": "m"
+ },
+ {
+  "name": "Male_Adult_10",
+  "file": "Male_Adult_10.glb",
+  "role": "student",
+  "sex": "m"
+ },
+ {
+  "name": "Male_Adult_11",
+  "file": "Male_Adult_11.glb",
+  "role": "student",
+  "sex": "m"
+ },
+ {
+  "name": "Male_Adult_16",
+  "file": "Male_Adult_16.glb",
+  "role": "student",
+  "sex": "m"
+ },
+ {
+  "name": "Male_Adult_20",
+  "file": "Male_Adult_20.glb",
+  "role": "student",
+  "sex": "m"
+ },
+ {
+  "name": "Female_Adult_01",
+  "file": "Female_Adult_01.glb",
+  "role": "student",
+  "sex": "f"
+ },
+ {
+  "name": "Female_Adult_03",
+  "file": "Female_Adult_03.glb",
+  "role": "student",
+  "sex": "f"
+ },
+ {
+  "name": "Female_Adult_05",
+  "file": "Female_Adult_05.glb",
+  "role": "student",
+  "sex": "f"
+ },
+ {
+  "name": "Female_Adult_15",
+  "file": "Female_Adult_15.glb",
+  "role": "student",
+  "sex": "f"
+ },
+ {
+  "name": "Female_Adult_17",
+  "file": "Female_Adult_17.glb",
+  "role": "student",
+  "sex": "f"
+ },
+ {
+  "name": "Male_Adult_15",
+  "file": "Male_Adult_15.glb",
+  "role": "local",
+  "sex": "m"
+ },
+ {
+  "name": "Male_Adult_14",
+  "file": "Male_Adult_14.glb",
+  "role": "local",
+  "sex": "m"
+ },
+ {
+  "name": "Male_Adult_03",
+  "file": "Male_Adult_03.glb",
+  "role": "local",
+  "sex": "m"
+ },
+ {
+  "name": "Male_Adult_05",
+  "file": "Male_Adult_05.glb",
+  "role": "local",
+  "sex": "m"
+ },
+ {
+  "name": "Female_Adult_10",
+  "file": "Female_Adult_10.glb",
+  "role": "local",
+  "sex": "f"
+ },
+ {
+  "name": "Female_Adult_04",
+  "file": "Female_Adult_04.glb",
+  "role": "local",
+  "sex": "f"
+ },
+ {
+  "name": "Female_Adult_11",
+  "file": "Female_Adult_11.glb",
+  "role": "local",
+  "sex": "f"
+ },
+ {
+  "name": "Gardener_Male_01",
+  "file": "Gardener_Male_01.glb",
+  "role": "keeper",
+  "sex": "m"
+ },
+ {
+  "name": "Security_Male_01",
+  "file": "Security_Male_01.glb",
+  "role": "guard",
+  "sex": "m"
+ }
+]

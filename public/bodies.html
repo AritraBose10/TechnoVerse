@@ -1,0 +1,44 @@
+<!doctype html><meta charset="utf-8"><title>Crowd bodies</title>
+<style>body{margin:0;background:#8a9099}canvas{display:block}</style>
+<script type="importmap">{ "imports": { "three": "/vendor/three.module.js" } }</script>
+<canvas id="c"></canvas>
+<script type="module">
+// Test page: every crowd body side by side. /bodies.html?from=0&n=9&z=1 (z=1: faces close up)
+import * as THREE from "three";
+import { loadCrowdBody, makeCharacter, EXPRESSION_NAMES } from "/character.js";
+const q = new URLSearchParams(location.search);
+const from = +(q.get("from") || 0), n = +(q.get("n") || 9), close = q.get("z") === "1";
+const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("c"), antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.9;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color("#8a9099");
+scene.add(new THREE.HemisphereLight("#dfe9ff", "#6b5a48", 1.6));
+const sun = new THREE.DirectionalLight("#fff2dd", 3);
+sun.position.set(2, 5, 4);
+scene.add(sun);
+// ?expr=K: one body (number `from`) wearing expressions K, K+1, ...
+const exprFrom = q.has("expr") ? +q.get("expr") : -1;
+const all = await (await fetch("/models/people/index.json")).json();
+const list = exprFrom >= 0 ? Array.from({ length: n }, () => all[from]) : all.slice(from, from + n);
+const gap = close ? 0.42 : 0.8;
+const camera = new THREE.PerspectiveCamera(close ? 11 : 30, innerWidth / innerHeight, 0.1, 50);
+const chars = [];
+let sharedKit = null;
+for (let i = 0; i < list.length; i++) {
+  const kit = exprFrom >= 0 ? (sharedKit ||= await loadCrowdBody(renderer, "/models/people/" + list[i].file)) : await loadCrowdBody(renderer, "/models/people/" + list[i].file);
+  const c = makeCharacter(kit, {});
+  const g = new THREE.Group();
+  g.position.x = (i - (list.length - 1) / 2) * gap;
+  g.rotation.y = Math.PI; // face the camera (+z)
+  g.add(c.model);
+  scene.add(g);
+  chars.push(c);
+}
+camera.position.set(0, close ? 1.66 : 1.0, close ? 3.4 : 4.6 + list.length * 0.25);
+camera.lookAt(0, close ? 1.66 : 0.95, 0);
+for (let k = 0; k < 40; k++) chars.forEach((c, i) => c.update(1 / 30, { speed: 0, grounded: true, turnRate: 0, facing: Math.PI, expr: exprFrom >= 0 ? EXPRESSION_NAMES[exprFrom + i] : undefined }));
+renderer.render(scene, camera);
+window.__done = exprFrom >= 0 ? EXPRESSION_NAMES.slice(exprFrom, exprFrom + n) : list.map((b) => b.name);
+</script>

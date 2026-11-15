@@ -11,11 +11,12 @@ const zlib = require("zlib");
 const { WebSocketServer } = require("ws");
 
 const PORT = Number(process.env.PORT) || 3000;
+const PORT_TRIES = 10; // try the next local ports instead of crashing when the preferred one is busy
 const PUBLIC_DIR = path.join(__dirname, "public");
 const CHAT_RANGE = 15; // metres: who receives a chat message
 const SIGNAL_RANGE = 30; // metres: who may set up a voice call with whom
 const TICK_MS = 100; // snapshot interval
-const WORLD_LIMIT = 245; // players are kept inside +/- this many metres
+const WORLD_LIMIT = 615; // players are kept inside +/- this many metres
 const MAX_PLAYERS = 200;
 const HEARTBEAT_MS = 15000; // ping every client this often; drop any that miss a whole interval
 
@@ -174,11 +175,15 @@ function iceServers() {
 }
 
 const wss = new WebSocketServer({ server, path: "/ws", maxPayload: 64 * 1024 });
+// A failed HTTP bind is also re-emitted by ws. The HTTP server's listen() helper below
+// chooses another port, so this listener prevents ws from turning that recoverable error
+// into an unhandled exception.
+wss.on("error", () => {});
 const players = new Map(); // id -> { ws, id, name, dept, color, x, z, ry, voice, lastChat }
 
 // New arrivals stand on the forecourt in front of the university's main entrance, facing it.
 // The numbers match the building's position in public/campus.json.
-const ENTRANCE = { x: 0.37, z: 33.67, yaw: 1.116 };
+const ENTRANCE = { x: 5.64, z: 22.89, yaw: 1.116 }; // centre of the entrance portico (local x = 12 in public/tiu.js)
 function spawnPoint() {
   const along = (Math.random() - 0.5) * 8; // spread people out along the building front
   const out = 4.6 + Math.random() * 1.2; // metres out from the building
@@ -267,8 +272,11 @@ wss.on("connection", (ws) => {
       me.y = clamp(num(msg.y), -5, 60);
       me.z = clamp(num(msg.z), -WORLD_LIMIT, WORLD_LIMIT);
       me.ry = num(msg.ry);
-      me.bike = msg.b ? 1 : 0; // riding a bicycle
+      me.bike = clamp(Math.round(num(msg.b)), 0, 15); // 0 on foot, otherwise which bicycle or motorcycle
       me.lean = clamp(num(msg.l), -0.8, 0.8); // its lean, so others see it bank into turns
+      me.jump = clamp(Math.round(num(msg.j)), 0, 3); // 0 walking, 1 crouching to jump, 2 in the air, 3 landing
+      me.crouch = clamp(num(msg.c), 0, 0.4);
+      me.gest = clamp(Math.round(num(msg.g)), 0, 3); // 0 none, 1 nomoshkar, 2 waving, 3 offering a handshake
     } else if (msg.t === "chat") {
       const text = clean(msg.text, 240);
       const now = Date.now();
@@ -317,14 +325,35 @@ setInterval(() => {
   if (players.size < 2) return;
   const snapshot = JSON.stringify({
     t: "snap",
-    p: [...players.values()].map((p) => [p.id, +p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2), +p.ry.toFixed(2), p.bike, +p.lean.toFixed(2)]),
+    p: [...players.values()].map((p) => [p.id, +p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2), +p.ry.toFixed(2), p.bike, +p.lean.toFixed(2), p.jump || 0, +(p.crouch || 0).toFixed(2), p.gest || 0]),
   });
   for (const p of players.values()) if (p.ws.readyState === 1) p.ws.send(snapshot);
 }, TICK_MS);
 
-server.listen(PORT, () => {
-  console.log(`TIU Campus running on http://localhost:${PORT}`);
+function listen(port, attemptsLeft = PORT_TRIES) {
+  const onListening = () => server.removeListener("error", onError);
+  const onError = (err) => {
+    server.removeListener("listening", onListening);
+    if (err.code === "EADDRINUSE" && attemptsLeft > 0) {
+      console.warn(`Port ${port} is busy; trying http://localhost:${port + 1}`);
+      listen(port + 1, attemptsLeft - 1);
+      return;
+    }
+    console.error(`Could not start the server on port ${port}:`, err.message);
+    process.exitCode = 1;
+  };
+
+  server.once("error", onError);
+  server.once("listening", onListening);
+  server.listen(port);
+}
+
+server.once("listening", () => {
+  const { port } = server.address();
+  console.log(`TIU Campus running on http://localhost:${port}`);
   iceServers().then((list) =>
     console.log(list.length > 1 ? "Voice relay (TURN) configured." : "No TURN server set: voice uses direct links only."),
   );
 });
+
+listen(PORT);

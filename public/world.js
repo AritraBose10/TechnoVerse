@@ -3,11 +3,17 @@
 // university building, its entrance, the railing and the street lamps follows reference photos.
 // Everything random uses a fixed seed, so every player gets exactly the same world.
 import * as THREE from "three";
+import { mergeGeometries } from "/vendor/jsm/utils/BufferGeometryUtils.js";
+import { makeTrees } from "/trees.js";
+import { buildTIU } from "/tiu.js";
+import { buildOpposite } from "/opposite.js";
+import { heritageLamps, streetLights } from "/street.js";
+import { Sky } from "/vendor/jsm/objects/Sky.js";
 
 const TIU_ID = 134101262; // the university building in OpenStreetMap
 const FLOOR = 3.7; // metres per storey
-const ROAD_WIDTH = { secondary: 7, secondary_link: 5.5, residential: 6, service: 4.2 };
-const WORLD_HALF = 245;
+const ROAD_WIDTH = { primary: 10.5, primary_link: 6, secondary: 7, secondary_link: 5.5, tertiary: 7, tertiary_link: 5.5, residential: 6, service: 4.2 };
+const WORLD_HALF = 615; // from the Sector V metro station (north) to Meen Bhavan (south)
 
 // ---------- small helpers ----------
 function seeded(seed) {
@@ -43,6 +49,52 @@ function distToPath(x, z, pts, closed = false) {
 const yawQuat = (a) => ({ x: 0, y: Math.sin(a / 2), z: 0, w: Math.cos(a / 2) });
 
 export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }) {
+  // Roads, paths and the metro line stop at the edge of the map: a way that leaves the square is
+  // cut where it crosses the edge (and may come back in as a second piece).
+  {
+    const E = WORLD_HALF + 8;
+    const inside = (p) => Math.abs(p[0]) <= E && Math.abs(p[1]) <= E;
+    // the part of a-b inside the square, or null
+    const cut = (a, b) => {
+      let t0 = 0;
+      let t1 = 1;
+      const d = [b[0] - a[0], b[1] - a[1]];
+      for (let k = 0; k < 2; k++) {
+        for (const sgn of [-1, 1]) {
+          const p = -sgn * d[k];
+          const q = E + sgn * a[k];
+          if (Math.abs(p) < 1e-9) {
+            if (q < 0) return null;
+          } else {
+            const t = q / p;
+            if (p < 0) t0 = Math.max(t0, t);
+            else t1 = Math.min(t1, t);
+          }
+        }
+      }
+      if (t0 > t1) return null;
+      return [[a[0] + d[0] * t0, a[1] + d[1] * t0], [a[0] + d[0] * t1, a[1] + d[1] * t1]];
+    };
+    const clip = (way) => {
+      if (way.pts.every(inside)) return [way];
+      const out = [];
+      let cur = null;
+      for (let i = 0; i < way.pts.length - 1; i++) {
+        const seg = cut(way.pts[i], way.pts[i + 1]);
+        if (!seg) {
+          cur = null;
+          continue;
+        }
+        if (!cur || Math.hypot(cur[cur.length - 1][0] - seg[0][0], cur[cur.length - 1][1] - seg[0][1]) > 0.01) {
+          cur = [seg[0]];
+          out.push({ ...way, pts: cur });
+        }
+        cur.push(seg[1]);
+      }
+      return out.filter((w) => w.pts.length > 1);
+    };
+    campus = { ...campus, roads: campus.roads.flatMap(clip), paths: (campus.paths || []).flatMap(clip), rail: (campus.rail || []).flatMap(clip) };
+  }
   const rand = seeded(20261114);
   const pick = (list) => list[Math.floor(rand() * list.length)];
   const range = (a, b) => a + rand() * (b - a);
@@ -299,7 +351,29 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
       g.fillRect(124, 64, 8, 104);
     }),
   };
-  const wallMat = (map, glassy) => new THREE.MeshStandardMaterial({ map, roughness: glassy ? 0.35 : 0.85, metalness: glassy ? 0.25 : 0, envMapIntensity: glassy ? 1.1 : 0.5 });
+  // Windows lit at night: a share of the window bays glow warm, picked by where they are on the
+  // building, so each facade has its own pattern of people working late.
+  const nightUniform = { value: 0 };
+  const lightWindows = (mat) => {
+    mat.onBeforeCompile = (sh) => {
+      sh.uniforms.uNight = nightUniform;
+      sh.vertexShader = sh.vertexShader.replace("#include <common>", "#include <common>\nvarying vec3 vWPos;").replace("#include <begin_vertex>", "#include <begin_vertex>\nvWPos = (modelMatrix * vec4(position, 1.0)).xyz;");
+      sh.fragmentShader = sh.fragmentShader
+        .replace("#include <common>", "#include <common>\nuniform float uNight;\nvarying vec3 vWPos;")
+        .replace(
+          "#include <emissivemap_fragment>",
+          `#include <emissivemap_fragment>
+          if (uNight > 0.01) {
+            vec2 cell = floor(vec2(vWPos.x * 0.7 + vWPos.z * 0.7, vWPos.y) / vec2(3.6, 3.3));
+            float pick = fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453);
+            float glassy = smoothstep(0.06, 0.22, diffuseColor.b - diffuseColor.r); // window glass is bluer than the walls
+            totalEmissiveRadiance += vec3(1.0, 0.8, 0.52) * step(0.6, pick) * (0.5 + pick) * glassy * uNight * 1.5;
+          }`
+        );
+    };
+    return mat;
+  };
+  const wallMat = (map, glassy) => lightWindows(new THREE.MeshStandardMaterial({ map, roughness: glassy ? 0.35 : 0.85, metalness: glassy ? 0.25 : 0, envMapIntensity: glassy ? 1.1 : 0.5 }));
   const mats = {
     tiuStrip: wallMat(facades.tiuStrip, true),
     tiuGlass: wallMat(facades.tiuGlass, true),
@@ -323,25 +397,60 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
   };
 
   // ---------- sky, haze and light from the sky ----------
-  const skyColors = { top: new THREE.Color("#6f9fd0"), horizon: new THREE.Color("#dfe7ea") };
-  const skyMat = new THREE.ShaderMaterial({
-    side: THREE.BackSide,
-    depthWrite: false,
-    fog: false,
-    uniforms: { top: { value: skyColors.top }, horizon: { value: skyColors.horizon } },
-    vertexShader: "varying vec3 vDir; void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }",
-    fragmentShader:
-      "uniform vec3 top; uniform vec3 horizon; varying vec3 vDir; void main(){ float t = pow(clamp(vDir.y,0.0,1.0),0.55); vec3 c = mix(horizon, top, t); if(vDir.y<0.0) c = mix(horizon, vec3(0.55,0.56,0.5), clamp(-vDir.y*4.0,0.0,1.0)); gl_FragColor = vec4(c,1.0); }",
-  });
-  const sky = new THREE.Mesh(new THREE.SphereGeometry(800, 32, 16), skyMat);
+  // A physically based sky (sunlight scattered by air and dust): deep blue overhead, pale and
+  // hazy toward the horizon, bright around the sun. The same sky lights the scene and is what
+  // glass and metal reflect, so everything sits in one consistent light.
+  const sky = new Sky();
+  sky.scale.setScalar(1500);
+  const sunDir = new THREE.Vector3(55, 85, 35).normalize(); // matches the sun light in main.js
+  Object.assign(sky.material.uniforms.turbidity, { value: 7.5 }); // Kolkata haze
+  Object.assign(sky.material.uniforms.rayleigh, { value: 1.5 });
+  Object.assign(sky.material.uniforms.mieCoefficient, { value: 0.008 });
+  Object.assign(sky.material.uniforms.mieDirectionalG, { value: 0.82 });
+  sky.material.uniforms.sunPosition.value.copy(sunDir);
   const pmrem = new THREE.PMREMGenerator(renderer);
   const skyScene = new THREE.Scene();
-  skyScene.add(sky.clone());
-  scene.environment = pmrem.fromScene(skyScene, 0, 0.1, 2000).texture;
-  pmrem.dispose();
-  scene.add(sky);
-  scene.background = skyColors.horizon;
-  scene.fog = new THREE.Fog(skyColors.horizon, 90, 520);
+  const skyCopy = sky.clone();
+  skyCopy.material = sky.material; // one sky, seen directly and as the light on everything
+  skyScene.add(skyCopy);
+  // the night sky: the city's glow near the horizon fading to deep blue overhead, laid over the
+  // (black) scattering sky as the sun goes down
+  const nightDome = new THREE.Mesh(
+    new THREE.SphereGeometry(1400, 24, 12),
+    new THREE.ShaderMaterial({
+      side: THREE.BackSide,
+      transparent: true,
+      depthWrite: false,
+      fog: false,
+      uniforms: { k: { value: 0 } },
+      vertexShader: "varying vec3 d; void main(){ d = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }",
+      fragmentShader: "uniform float k; varying vec3 d; void main(){ float h = clamp(d.y, 0.0, 1.0); vec3 c = mix(vec3(0.20, 0.155, 0.13), vec3(0.018, 0.028, 0.065), pow(h, 0.45)); gl_FragColor = vec4(c * 0.55, k); }",
+    })
+  );
+  nightDome.renderOrder = -1;
+  const domeCopy = nightDome.clone();
+  skyScene.add(domeCopy);
+  let skyTarget = pmrem.fromScene(skyScene, 0, 0.1, 4000);
+  scene.environment = skyTarget.texture;
+  scene.add(sky, nightDome);
+  const haze = new THREE.Color("#b9c6cf");
+  scene.background = haze;
+  scene.fog = new THREE.FogExp2(haze, 0.0026);
+  const skyControl = {
+    haze,
+    /** dir: unit vector to the sun; night: 0 by day .. 1 at night */
+    set(dir, night) {
+      sky.material.uniforms.sunPosition.value.copy(dir);
+      nightDome.material.uniforms.k.value = night;
+    },
+    /** the light the sky casts on everything, worked out again (do this only now and then) */
+    relight() {
+      const old = skyTarget;
+      skyTarget = pmrem.fromScene(skyScene, 0, 0.1, 4000);
+      scene.environment = skyTarget.texture;
+      old.dispose();
+    },
+  };
 
   // ---------- geometry helpers ----------
   const solidBox = (w, h, d, x, y, z, yaw = 0) => world.createCollider(RAPIER.ColliderDesc.cuboid(w / 2, h / 2, d / 2).setTranslation(x, y, z).setRotation(yawQuat(yaw)));
@@ -422,14 +531,14 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
   }
 
   // ---------- ground ----------
-  tex.ground.repeat.set(160, 160);
-  const ground = new THREE.Mesh(new THREE.PlaneGeometry(1600, 1600), new THREE.MeshStandardMaterial({ map: tex.ground, roughness: 1 }));
+  tex.ground.repeat.set(280, 280);
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(2800, 2800), new THREE.MeshStandardMaterial({ map: tex.ground, roughness: 1 }));
   ground.rotation.x = -Math.PI / 2;
   add(ground, { cast: false });
   // The walkable ground is a grid of slabs: one huge slab makes collision checks imprecise.
   const SLAB = 50;
   for (let gx = -WORLD_HALF - 5; gx < WORLD_HALF + 5; gx += SLAB) for (let gz = -WORLD_HALF - 5; gz < WORLD_HALF + 5; gz += SLAB) solidBox(SLAB, 2, SLAB, gx + SLAB / 2, -1, gz + SLAB / 2);
-  for (const [x, z, w, d] of [[0, -WORLD_HALF, 500, 2], [0, WORLD_HALF, 500, 2], [-WORLD_HALF, 0, 2, 500], [WORLD_HALF, 0, 2, 500]]) solidBox(w, 40, d, x, 20, z);
+  for (const [x, z, w, d] of [[0, -WORLD_HALF, WORLD_HALF * 2 + 10, 2], [0, WORLD_HALF, WORLD_HALF * 2 + 10, 2], [-WORLD_HALF, 0, 2, WORLD_HALF * 2 + 10], [WORLD_HALF, 0, 2, WORLD_HALF * 2 + 10]]) solidBox(w, 40, d, x, 20, z);
 
   const layer = (map, offset, extra = {}) => new THREE.MeshStandardMaterial({ map, roughness: 1, polygonOffset: true, polygonOffsetFactor: -offset, polygonOffsetUnits: -offset, ...extra });
   const grassMat = layer(tex.grass, 1);
@@ -447,25 +556,23 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
   }
 
   // ---------- roads ----------
-  const mainRoads = campus.roads.filter((r) => r.kind === "secondary" || r.kind === "secondary_link");
+  const mainRoads = campus.roads.filter((r) => ["primary", "secondary", "secondary_link", "tertiary"].includes(r.kind));
   const paverMat = layer(tex.paver, 3);
   const mainRoadMat = layer(tex.mainRoad, 6);
   const laneMat = layer(tex.asphalt, 5);
-  for (const r of mainRoads) if (r.pts.length > 1) ribbon(r.pts, ROAD_WIDTH[r.kind] + 4.4, 0.03, paverMat, 3);
+  for (const r of mainRoads) if (r.pts.length > 1) ribbon(r.pts, ROAD_WIDTH[r.kind] + 4.4, 0.006, paverMat, 3);
   for (const r of campus.roads) {
     if (r.pts.length < 2) continue;
     const width = ROAD_WIDTH[r.kind] || 3.5;
-    if (r.kind === "secondary") ribbon(r.pts, width, 0.06, mainRoadMat, 8);
-    else ribbon(r.pts, width, 0.045, laneMat, 6);
+    if (r.kind === "secondary" || r.kind === "primary" || r.kind === "tertiary") ribbon(r.pts, width, 0.014, mainRoadMat, 8);
+    else ribbon(r.pts, width, 0.01, laneMat, 6);
   }
   const roadClear = (x, z, margin) => campus.roads.every((r) => r.pts.length < 2 || distToPath(x, z, r.pts) > (ROAD_WIDTH[r.kind] || 3.5) / 2 + margin);
 
-  // ---------- the university building ----------
+  // ---------- the university complex (see tiu.js) ----------
   const tiu = campus.buildings.find((b) => b.id === TIU_ID);
   const tiuPts = outward(tiu.pts);
-  const tiuEdges = edgesOf(tiuPts);
-  const tiuHeight = 10 * FLOOR;
-  const front = tiuEdges.filter((e) => e.nx > 0.5).sort((a, b) => b.len - a.len)[0]; // the long face on the main road
+  const front = edgesOf(tiuPts).filter((e) => e.nx > 0.5).sort((a, b) => b.len - a.len)[0]; // the long face on the main road
   const mid = [(front.a[0] + front.b[0]) / 2, (front.a[1] + front.b[1]) / 2];
   const phi = Math.atan2(front.nx, front.nz); // turn that points local +z out of the entrance
   const cosP = Math.cos(phi);
@@ -473,207 +580,11 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
   // "Local" positions are measured from the middle of the street face: x along the face, z out toward the road.
   const local = (x, z) => [mid[0] + x * cosP + z * sinP, mid[1] - x * sinP + z * cosP];
   const toLocal = (wx, wz) => [(wx - mid[0]) * cosP - (wz - mid[1]) * sinP, (wx - mid[0]) * sinP + (wz - mid[1]) * cosP];
-  const PORCH = { half: 14, depth: 9, height: 7.6, floor: 0.45 };
-
-  for (const e of tiuEdges) {
-    const style = e === front || e.nz < -0.5 || e.len < 8 ? mats.tiuStrip : mats.tiuPlain;
-    const bay = style === mats.tiuStrip ? 4.2 : 4;
-    if (e === front) {
-      // leave an opening for the covered entrance
-      const dir = [(e.b[0] - e.a[0]) / e.len, (e.b[1] - e.a[1]) / e.len];
-      const at = (s) => [e.a[0] + dir[0] * s, e.a[1] + dir[1] * s];
-      const s0 = e.len / 2 - PORCH.half;
-      const s1 = e.len / 2 + PORCH.half;
-      wall(at(0), at(s0), 0, tiuHeight, style, bay, FLOOR, e.nx, e.nz);
-      wall(at(s1), at(e.len), 0, tiuHeight, style, bay, FLOOR, e.nx, e.nz);
-      wall(at(s0), at(s1), 2 * FLOOR, tiuHeight, style, bay, FLOOR, e.nx, e.nz);
-      for (const [p, q] of [[at(0), at(s0)], [at(s1), at(e.len)]]) edgeCollider({ ...e, a: p, b: q, len: Math.hypot(q[0] - p[0], q[1] - p[1]) }, tiuHeight);
-    } else {
-      wall(e.a, e.b, 0, tiuHeight, style, bay, FLOOR, e.nx, e.nz);
-      edgeCollider(e, tiuHeight);
-    }
-    wall(e.a, e.b, tiuHeight, tiuHeight + 1.4, mats.white, 4, 1.4, e.nx, e.nz); // parapet
-  }
-  flat(tiuPts, tiuHeight + 0.2, mats.roof, 4);
-
-  // Curved glass corner at the north end of the street face, with white bands and roof planting.
-  {
-    const corner = front.a[1] < front.b[1] ? front.a : front.b;
-    const c = centroid(tiuPts);
-    const dl = Math.hypot(c[0] - corner[0], c[1] - corner[1]);
-    const centre = [corner[0] + ((c[0] - corner[0]) / dl) * 7.5, corner[1] + ((c[1] - corner[1]) / dl) * 7.5];
-    const radius = 11;
-    facades.tiuGlass.repeat.set(1, 1);
-    const drumTex = facades.tiuGlass.clone();
-    drumTex.repeat.set(Math.round((2 * Math.PI * radius) / 3.2), 8);
-    drumTex.needsUpdate = true;
-    const drum = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, 8 * FLOOR, 48, 1, true), new THREE.MeshStandardMaterial({ map: drumTex, roughness: 0.3, metalness: 0.3, envMapIntensity: 1.2 }));
-    drum.position.set(centre[0], FLOOR + 4 * FLOOR, centre[1]);
-    add(drum);
-    for (const [y, h] of [[FLOOR / 2, FLOOR], [9 * FLOOR + 1.2, 2.4]]) {
-      const band = new THREE.Mesh(new THREE.CylinderGeometry(radius + 0.15, radius + 0.15, h, 48), mats.white);
-      band.position.set(centre[0], y, centre[1]);
-      add(band);
-    }
-    world.createCollider(RAPIER.ColliderDesc.cylinder(tiuHeight / 2, radius + 0.15).setTranslation(centre[0], tiuHeight / 2, centre[1]));
-    const shrubMat = new THREE.MeshStandardMaterial({ color: "#4f7f38", roughness: 1 });
-    for (let i = 0; i < 14; i++) {
-      const a = (i / 14) * Math.PI * 2;
-      const shrub = new THREE.Mesh(new THREE.IcosahedronGeometry(range(0.9, 1.6), 1), shrubMat);
-      shrub.position.set(centre[0] + Math.sin(a) * (radius - 1.4), 10 * FLOOR + 0.8, centre[1] + Math.cos(a) * (radius - 1.4));
-      add(shrub);
-    }
-    // taller white service tower at the back, as in the photos
-    const back = tiuEdges.filter((e) => e.nx < -0.5).sort((a, b) => b.len - a.len)[0];
-    const bx = (back.a[0] + back.b[0]) / 2 - back.nx * 7;
-    const bz = (back.a[1] + back.b[1]) / 2 - back.nz * 7;
-    const tower = new THREE.Mesh(new THREE.BoxGeometry(12, 7, 12), mats.white);
-    tower.position.set(bx, tiuHeight + 3.5, bz);
-    tower.rotation.y = phi;
-    add(tower);
-  }
-  const tiuLabel = makeLabel("Techno India University", { height: 3 });
-  tiuLabel.position.set(mid[0] - front.nx * 12, tiuHeight + 12, mid[1] - front.nz * 12);
-  scene.add(tiuLabel);
-
-  // ---------- the main entrance (covered porch cut into the street face) ----------
-  const porch = new THREE.Group();
-  porch.position.set(mid[0], 0, mid[1]);
-  porch.rotation.y = phi;
-  scene.add(porch);
-  // Box placed in local coordinates. `solid` also makes it block the player.
-  function pbox(w, h, d, x, y, z, material, { solid = false, cast = true } = {}) {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
-    m.position.set(x, y, z);
-    m.castShadow = cast;
-    m.receiveShadow = true;
-    porch.add(m);
-    if (solid) {
-      const [wx, wz] = local(x, z);
-      solidBox(w, h, d, wx, y, wz, phi);
-    }
-    return m;
-  }
-  {
-    const { half, depth, height, floor } = PORCH;
-    const W = half * 2;
-    const tileTex = tex.tile.clone();
-    tileTex.repeat.set(W / 1.4, (depth + 3) / 1.4);
-    tileTex.needsUpdate = true;
-    const tileMat = new THREE.MeshStandardMaterial({ map: tileTex, roughness: 0.35, metalness: 0.05 });
-    const stone = new THREE.MeshStandardMaterial({ color: "#aaa7a1", roughness: 0.6 });
-    pbox(W, floor, depth + 3, 0, floor / 2, -depth / 2 + 1.5, [stone, stone, tileMat, stone, stone, stone], { solid: true, cast: false });
-    pbox(W, 0.3, 0.4, 0, 0.15, 3.2, stone, { solid: true, cast: false });
-    pbox(W, 0.15, 0.4, 0, 0.075, 3.6, stone, { solid: true, cast: false });
-
-    const perf = (w, h) => {
-      const t = tex.perforated.clone();
-      t.repeat.set(w / 1.2, h / 1.2);
-      t.needsUpdate = true;
-      return new THREE.MeshStandardMaterial({ map: t, roughness: 0.8 });
-    };
-    // back wall: dimpled tiles, then the name band, then screens
-    const lowH = 4.2;
-    pbox(W, lowH, 0.4, 0, floor + lowH / 2, -depth + 0.2, perf(W, lowH), { solid: true });
-    pbox(9.5, 3.7, 0.2, 0, floor + 1.85, -depth + 0.5, mats.dark); // glass doors
-    for (const x of [-2.4, 0, 2.4]) pbox(0.08, 3.7, 0.24, x, floor + 1.85, -depth + 0.52, mats.white, { cast: false });
-    const sign = texture(2048, 128, (g, w, h) => {
-      g.fillStyle = "#d8d1bf";
-      g.fillRect(0, 0, w, h);
-      g.font = "700 62px Arial, Helvetica, sans-serif";
-      g.textBaseline = "middle";
-      g.fillStyle = "#3a2c08";
-      g.textAlign = "right";
-      g.fillText("TECHNO INDIA GROUP", w / 2 - 110 + 3, h / 2 + 5);
-      g.textAlign = "left";
-      g.fillText("TECHNO INDIA UNIVERSITY", w / 2 + 110 + 3, h / 2 + 5);
-      g.fillStyle = "#c79a1e";
-      g.textAlign = "right";
-      g.fillText("TECHNO INDIA GROUP", w / 2 - 110, h / 2 + 2);
-      g.textAlign = "left";
-      g.fillText("TECHNO INDIA UNIVERSITY", w / 2 + 110, h / 2 + 2);
-    }, { repeat: false });
-    const signMat = new THREE.MeshStandardMaterial({ map: sign, roughness: 0.7 });
-    const bandH = 1.75;
-    pbox(W, bandH, 0.5, 0, floor + lowH + bandH / 2, -depth + 0.25, [mats.beige, mats.beige, mats.beige, mats.beige, signMat, mats.beige]);
-    // the university's logo, from public/logo.png, in the middle of the name band and on the desk
-    const logoTex = new THREE.TextureLoader().load("/logo.png");
-    logoTex.colorSpace = THREE.SRGBColorSpace;
-    logoTex.anisotropy = maxAniso;
-    const logoMat = new THREE.MeshStandardMaterial({ map: logoTex, roughness: 0.55 });
-    const signLogo = new THREE.Mesh(new THREE.CircleGeometry(0.8, 48), logoMat);
-    signLogo.position.set(0, floor + lowH + bandH / 2, -depth + 0.52);
-    porch.add(signLogo);
-    const topH = height - floor - lowH - bandH;
-    pbox(W, topH, 0.4, 0, height - topH / 2, -depth + 0.2, mats.beige);
-    pbox(8, topH - 0.3, 0.1, 0, height - topH / 2, -depth + 0.45, new THREE.MeshStandardMaterial({ color: "#5c4a3c", roughness: 0.6 }));
-    const screenMat = new THREE.MeshStandardMaterial({ color: "#cfd6ff", emissive: "#8f9cff", emissiveIntensity: 0.5, roughness: 0.3 });
-    for (const x of [-9.6, 9.6]) pbox(3.4, topH - 0.25, 0.12, x, height - topH / 2, -depth + 0.46, screenMat, { cast: false });
-    // side walls, ceiling of dark red slats, white beams and columns
-    for (const x of [-half + 0.2, half - 0.2]) pbox(0.4, height - floor, depth, x, floor + (height - floor) / 2, -depth / 2, perf(depth, height), { solid: true });
-    const slat = tex.slats.clone();
-    slat.repeat.set(W / 0.8, 1);
-    slat.needsUpdate = true;
-    pbox(W, 0.25, depth, 0, height + 0.02, -depth / 2, new THREE.MeshStandardMaterial({ map: slat, roughness: 0.7 }));
-    for (const x of [-4.8, 4.8]) pbox(1, 0.5, depth, x, height - 0.35, -depth / 2, mats.white);
-    for (const x of [-9.3, 9.3]) pbox(0.7, height - floor, 0.7, x, floor + (height - floor) / 2, -0.6, mats.white, { solid: true });
-    // reception desk on the right, wooden table on the left
-    const desk = new THREE.Mesh(new THREE.CylinderGeometry(2.3, 2.3, 1.1, 32, 1, false, -Math.PI / 2, Math.PI), mats.white);
-    desk.position.set(9.2, floor + 0.55, -5.2);
-    desk.castShadow = true;
-    porch.add(desk);
-    const deskBand = new THREE.Mesh(new THREE.CylinderGeometry(2.33, 2.33, 0.25, 32, 1, true, -Math.PI / 2, Math.PI), new THREE.MeshStandardMaterial({ color: "#6b3f2a", roughness: 0.6 }));
-    deskBand.position.set(9.2, floor + 0.45, -5.2);
-    porch.add(deskBand);
-    const logo = new THREE.Mesh(new THREE.CircleGeometry(0.32, 32), logoMat);
-    logo.position.set(9.2, floor + 0.78, -5.2 + 2.34);
-    porch.add(logo);
-    {
-      const [wx, wz] = local(9.2, -4.1);
-      solidBox(4.6, 1.1, 2.4, wx, floor + 0.55, wz, phi);
-    }
-    pbox(6, 0.08, 1.3, -9, floor + 0.86, -3.6, mats.wood, { cast: true });
-    pbox(5.8, 0.82, 1.1, -9, floor + 0.41, -3.6, new THREE.MeshStandardMaterial({ color: "#8d5f2e", roughness: 0.8 }), { solid: true });
-    const potMat = new THREE.MeshStandardMaterial({ color: "#f0eee8", roughness: 0.6 });
-    const leafMat = new THREE.MeshStandardMaterial({ color: "#3f8a3a", roughness: 1 });
-    for (const x of [-5.6, 5.6]) {
-      const pot = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.24, 0.55, 14), potMat);
-      pot.position.set(x, floor + 0.28, -depth + 1);
-      const plant = new THREE.Mesh(new THREE.IcosahedronGeometry(0.55, 1), leafMat);
-      plant.position.set(x, floor + 1.05, -depth + 1);
-      plant.scale.y = 1.4;
-      pot.castShadow = plant.castShadow = true;
-      porch.add(pot, plant);
-    }
-    places.push({ name: "Main Entrance", x: local(0, 0)[0], z: local(0, 0)[1] });
-  }
-
-  // ---------- forecourt, railing, planting beds, gate ----------
-  const FENCE_Z = 6.3;
-  const stripEnd = 50;
-  flat([local(-stripEnd, 0), local(stripEnd, 0), local(stripEnd, FENCE_Z + 0.3), local(-stripEnd, FENCE_Z + 0.3)], 0.035, layer(tex.paver, 4), 3);
-  const fenceMat = new THREE.MeshStandardMaterial({ map: tex.fence, transparent: true, alphaTest: 0.5, side: THREE.DoubleSide, roughness: 0.6 });
-  function fenceRun(x0, x1) {
-    const len = x1 - x0;
-    const geo = new THREE.PlaneGeometry(len, 1.5);
-    const uv = geo.attributes.uv;
-    for (let i = 0; i < uv.count; i++) uv.setX(i, uv.getX(i) * Math.round(len / 3));
-    const rail = new THREE.Mesh(geo, fenceMat);
-    rail.position.set((x0 + x1) / 2, 1.05, FENCE_Z);
-    rail.castShadow = true;
-    porch.add(rail);
-    pbox(len, 0.3, 0.3, (x0 + x1) / 2, 0.15, FENCE_Z, mats.concrete, { cast: false });
-    const [wx, wz] = local((x0 + x1) / 2, FENCE_Z);
-    solidBox(len, 1.9, 0.25, wx, 0.95, wz, phi);
-  }
-  fenceRun(-stripEnd, -7.4);
-  fenceRun(7.4, stripEnd);
-  for (const x of [-7, 7]) {
-    pbox(0.8, 2.7, 0.8, x, 1.35, FENCE_Z, mats.white, { solid: true });
-    pbox(1, 0.25, 1, x, 2.82, FENCE_Z, mats.blue);
-  }
-  const beds = [[-46, -15], [15, 31]]; // planting beds either side of the entrance (local x from, to)
-  for (const [x0, x1] of beds) pbox(x1 - x0, 0.4, 4, (x0 + x1) / 2, 0.2, 3.2, mats.brick, { solid: true });
+  const tiuModel = buildTIU({ RAPIER, world, scene, renderer, mid, phi, places });
+  const tiuHeight = tiuModel.height;
+  const FENCE_Z = tiuModel.fenceZ;
+  const stripEnd = tiuModel.stripEnd;
+  const beds = tiuModel.beds;
 
   // ---------- other buildings ----------
   // Floors, facade and roof colour come from the map data where they are known (OpenStreetMap
@@ -780,7 +691,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     sign.rotation.y = Math.atan2(e.nx, e.nz);
     add(sign, { cast: false });
   }
-  const footprints = [tiuPts];
+  const footprints = [tiuPts, tiuModel.footprint];
   for (const b of campus.buildings) {
     if (b.id === TIU_ID) continue;
     const pts = outward(b.pts);
@@ -934,42 +845,35 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
   }
 
   // ---------- trees, palms and shrubs ----------
-  const trunks = [];
-  const crowns = [];
-  const fronds = [];
-  const greens = ["#3f7d33", "#4c8a3a", "#5a9641", "#356e2e", "#6a9a45"];
+  // Street trees of Salt Lake: rain trees and neem along the roads, gulmohar for colour, tall
+  // ashoka columns, coconut palms, and flowering hedges in the beds (see trees.js).
+  const forest = makeTrees({ scene, renderer });
   function broadleaf(x, z, y = 0, flowering = false, collide = true) {
-    const h = range(3.2, 5.2);
-    trunks.push({ x, y, z, h, r: range(0.22, 0.34) });
-    const n = 5 + Math.floor(rand() * 3);
-    for (let i = 0; i < n; i++) {
-      const a = rand() * Math.PI * 2;
-      const r = i === 0 ? 0 : range(1, 2.2);
-      crowns.push({ x: x + Math.sin(a) * r, y: y + h + range(0.4, 2.2), z: z + Math.cos(a) * r, s: range(1.7, 2.8), color: pick(greens) });
-    }
-    if (flowering) for (let i = 0; i < 5; i++) crowns.push({ x: x + range(-2.2, 2.2), y: y + h + range(2, 3.2), z: z + range(-2.2, 2.2), s: range(0.8, 1.3), color: pick(["#e8791f", "#f08c1f", "#e0561c", "#f2b21f"]) });
-    if (collide) world.createCollider(RAPIER.ColliderDesc.cylinder(h / 2, 0.35).setTranslation(x, y + h / 2, z));
+    const roll = rand();
+    const kind = flowering ? "gulmohar" : roll < 0.4 ? "rain" : roll < 0.78 ? "neem" : "ashoka";
+    const scale = range(0.8, 1.1);
+    const h = forest.add(kind, x, y, z, { yaw: rand() * Math.PI * 2, scale, variant: Math.floor(rand() * 2) });
+    if (collide) world.createCollider(RAPIER.ColliderDesc.cylinder(h / 2, kind === "ashoka" ? 0.25 : 0.4 * scale).setTranslation(x, y + h / 2, z));
   }
   function palm(x, z, y = 0, collide = true) {
-    const h = range(6.5, 9.5);
-    trunks.push({ x, y, z, h, r: 0.2, palm: true });
-    const n = 11;
-    for (let i = 0; i < n; i++) fronds.push({ x, y: y + h, z, yaw: (i / n) * Math.PI * 2 + rand(), tilt: range(-0.5, 0.25), s: range(0.85, 1.15) });
-    if (collide) world.createCollider(RAPIER.ColliderDesc.cylinder(h / 2, 0.3).setTranslation(x, y + h / 2, z));
+    const h = forest.add("palm", x, y, z, { yaw: rand() * Math.PI * 2, scale: range(0.9, 1.1), variant: Math.floor(rand() * 2) });
+    if (collide) world.createCollider(RAPIER.ColliderDesc.cylinder(Math.min(h, 3) / 2, 0.3).setTranslation(x, y + Math.min(h, 3) / 2, z));
   }
   function shrub(x, z, y, flowers) {
-    crowns.push({ x, y: y + 0.6, z, s: range(0.7, 1.1), color: pick(greens) });
-    if (flowers) for (let i = 0; i < 3; i++) crowns.push({ x: x + range(-0.6, 0.6), y: y + range(0.9, 1.4), z: z + range(-0.6, 0.6), s: 0.22, color: "#f6f4ee" });
+    forest.add(flowers ? (rand() < 0.5 ? "shrubRed" : "shrubWhite") : "shrub", x, y, z, { yaw: rand() * Math.PI * 2, scale: range(0.8, 1.2) });
   }
+  // the far side of the street, opposite the main gate (see opposite.js)
+  const opposite = buildOpposite({ RAPIER, world, scene, mid, phi, M: tiuModel.materials, forest, places });
+  footprints.push(opposite.footprint);
   const planted = [];
   const tryTree = (x, z, gap) => {
-    if (Math.hypot(x, z) > WORLD_HALF - 6 || !freeSpot(x, z, 1.6)) return;
+    if (Math.max(Math.abs(x), Math.abs(z)) > WORLD_HALF - 6 || !freeSpot(x, z, 1.6)) return;
     if (campus.pitches.some((p) => inPoly(x, z, p.pts))) return;
     if (planted.some((p) => Math.hypot(p[0] - x, p[1] - z) < gap)) return;
     planted.push([x, z]);
     const kind = rand();
     if (kind < 0.2) palm(x, z);
-    else broadleaf(x, z, 0, kind > 0.72);
+    else broadleaf(x, z, 0, kind > 0.9); // gulmohar is a splash of colour, not the rule
   };
   // along the main road
   for (const r of mainRoads) {
@@ -988,7 +892,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     }
   }
   // scattered around the neighbourhood
-  for (let i = 0; i < 520; i++) tryTree(range(-WORLD_HALF, WORLD_HALF), range(-WORLD_HALF, WORLD_HALF), 7);
+  for (let i = 0; i < 1500; i++) tryTree(range(-WORLD_HALF, WORLD_HALF), range(-WORLD_HALF, WORLD_HALF), 7);
   // lush planting in the beds behind the railing, as in the street photos
   for (const [x0, x1] of beds) {
     for (let x = x0 + 1.2; x < x1 - 0.8; x += 1.5) {
@@ -1003,65 +907,183 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
       else broadleaf(wx, wz, 0.4, rand() < 0.5, false);
     }
   }
+  forest.finish();
+
+  // ---------- medians on the other dual carriageways ----------
+  // Wherever two one-way main roads run side by side (Street No. 13 past Burger King and the
+  // Millennium City tower, for one), the strip between them gets what the street view shows there:
+  // a raised kerb painted in blue and white, and a white railing on blue posts.
   {
-    const crownGeo = new THREE.IcosahedronGeometry(1, 1);
-    const p = crownGeo.attributes.position;
-    for (let i = 0; i < p.count; i++) {
-      const k = 1 + (Math.sin(p.getX(i) * 5.1) + Math.sin(p.getY(i) * 6.3 + 1) + Math.sin(p.getZ(i) * 4.7 + 2)) * 0.07;
-      p.setXYZ(i, p.getX(i) * k, p.getY(i) * k * 0.82, p.getZ(i) * k);
+    const oneway = mainRoads.filter((r) => r.oneway && r.pts.length > 1);
+    const nearest = (x, z, pts) => {
+      let best = null;
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i];
+        const b = pts[i + 1];
+        const dx = b[0] - a[0];
+        const dz = b[1] - a[1];
+        const t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (z - a[1]) * dz) / (dx * dx + dz * dz || 1)));
+        const px = a[0] + dx * t;
+        const pz = a[1] + dz * t;
+        const d = Math.hypot(x - px, z - pz);
+        if (!best || d < best.d) best = { d, x: px, z: pz };
+      }
+      return best;
+    };
+    const seen = new Set();
+    const spots = [];
+    for (const r of oneway) {
+      for (let i = 0; i < r.pts.length - 1; i++) {
+        const a = r.pts[i];
+        const b = r.pts[i + 1];
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        for (let d = 1.1; d < len; d += 2.2) {
+          const x = a[0] + ((b[0] - a[0]) * d) / len;
+          const z = a[1] + ((b[1] - a[1]) * d) / len;
+          let other = null;
+          for (const o of oneway) {
+            if (o === r) continue;
+            const n = nearest(x, z, o.pts);
+            if (n && n.d > 8 && n.d < 15 && (!other || n.d < other.d)) other = n;
+          }
+          if (!other) continue;
+          const mx = (x + other.x) / 2;
+          const mz = (z + other.z) / 2;
+          const [lx, lz] = toLocal(mx, mz);
+          if (lx > -592 && lx < 133 && lz > 9 && lz < 26) continue; // the university's street has its own
+          if (Math.max(Math.abs(mx), Math.abs(mz)) > WORLD_HALF - 4) continue;
+          const key = Math.round(mx / 1.6) + ":" + Math.round(mz / 1.6);
+          if (seen.has(key)) continue;
+          // not across a junction: every road must be at least a lane away
+          if (!campus.roads.every((q) => q.pts.length < 2 || distToPath(mx, mz, q.pts) > (ROAD_WIDTH[q.kind] || 3.5) / 2 + 0.7)) continue;
+          seen.add(key);
+          spots.push({ x: mx, z: mz, yaw: Math.atan2(-(b[1] - a[1]), b[0] - a[0]), w: Math.min(2.6, other.d - 7.4) });
+        }
+      }
     }
-    crownGeo.computeVertexNormals();
-    const crownMesh = new THREE.InstancedMesh(crownGeo, new THREE.MeshStandardMaterial({ roughness: 1 }), crowns.length);
-    const trunkGeo = new THREE.CylinderGeometry(0.7, 1, 1, 8);
-    trunkGeo.translate(0, 0.5, 0);
-    const trunkMesh = new THREE.InstancedMesh(trunkGeo, new THREE.MeshStandardMaterial({ roughness: 1 }), trunks.length);
-    const dummy = new THREE.Object3D();
-    const color = new THREE.Color();
-    crowns.forEach((c, i) => {
-      dummy.position.set(c.x, c.y, c.z);
-      dummy.rotation.set(0, rand() * 6, 0);
-      dummy.scale.setScalar(c.s);
-      dummy.updateMatrix();
-      crownMesh.setMatrixAt(i, dummy.matrix);
-      crownMesh.setColorAt(i, color.set(c.color).multiplyScalar(range(0.85, 1.1)));
-    });
-    trunks.forEach((t, i) => {
-      dummy.position.set(t.x, t.y, t.z);
-      dummy.rotation.set(0, 0, 0);
-      dummy.scale.set(t.r, t.h, t.r);
-      dummy.updateMatrix();
-      trunkMesh.setMatrixAt(i, dummy.matrix);
-      trunkMesh.setColorAt(i, color.set(t.palm ? "#8a7a62" : "#6f5136"));
-    });
-    // palm frond: a long leaf that droops toward its tip
-    const frondGeo = new THREE.PlaneGeometry(0.9, 3.6, 1, 6);
-    frondGeo.translate(0, 1.8, 0);
-    const fp = frondGeo.attributes.position;
-    for (let i = 0; i < fp.count; i++) {
-      const t = fp.getY(i) / 3.6;
-      fp.setXYZ(i, fp.getX(i) * (1 - t * 0.85), t * 3.4 * Math.cos(t * 1.25), t * 3.4 * Math.sin(t * 1.25));
+    if (spots.length) {
+      const kerbTex = texture(128, 32, (g, w, h) => {
+        g.fillStyle = "#e9e7df";
+        g.fillRect(0, 0, w, h);
+        g.fillStyle = "#2b4fa3";
+        g.fillRect(0, 0, w / 2, h);
+        speckle(g, w, h, 500, ["rgba(90,80,70,0.35)", "rgba(255,255,255,0.25)", "rgba(40,40,40,0.25)"], 2);
+      });
+      const kerb = new THREE.BoxGeometry(2.25, 0.3, 1);
+      const posts = [];
+      for (const px of [-1.05, 0, 1.05]) {
+        const g = new THREE.BoxGeometry(0.07, 0.95, 0.07).toNonIndexed();
+        g.translate(px, 0.77, 0);
+        posts.push(g);
+      }
+      const rails = [];
+      for (const y of [0.55, 0.85, 1.15]) {
+        const g = new THREE.BoxGeometry(2.25, 0.045, 0.045).toNonIndexed();
+        g.translate(0, y, 0);
+        rails.push(g);
+      }
+      for (let px = -0.9; px < 1; px += 0.3) {
+        const g = new THREE.BoxGeometry(0.025, 0.6, 0.025).toNonIndexed();
+        g.translate(px, 0.85, 0);
+        rails.push(g);
+      }
+      const parts = [
+        [kerb, new THREE.MeshStandardMaterial({ map: kerbTex, roughness: 0.85 })],
+        [mergeGeometries(posts), new THREE.MeshStandardMaterial({ color: "#2b4fa3", roughness: 0.6, metalness: 0.3 })],
+        [mergeGeometries(rails), new THREE.MeshStandardMaterial({ color: "#e6e6e2", roughness: 0.55, metalness: 0.3 })],
+      ];
+      const dummy = new THREE.Object3D();
+      for (const [geo, mat] of parts) {
+        const im = new THREE.InstancedMesh(geo, mat, spots.length);
+        spots.forEach((sp, i) => {
+          dummy.position.set(sp.x, geo === kerb ? 0.15 : 0, sp.z);
+          dummy.rotation.set(0, sp.yaw, 0);
+          dummy.scale.set(1, 1, geo === kerb ? Math.max(0.6, sp.w) : 1);
+          dummy.updateMatrix();
+          im.setMatrixAt(i, dummy.matrix);
+        });
+        im.castShadow = im.receiveShadow = true;
+        scene.add(im);
+      }
+      for (const sp of spots) solidBox(2.25, 1.2, 0.5, sp.x, 0.6, sp.z, sp.yaw);
     }
-    frondGeo.rotateX(Math.PI / 2 - 0.9);
-    frondGeo.computeVertexNormals();
-    const frondMesh = new THREE.InstancedMesh(frondGeo, new THREE.MeshStandardMaterial({ color: "#4f8a35", roughness: 1, side: THREE.DoubleSide }), fronds.length);
-    fronds.forEach((f, i) => {
-      dummy.position.set(f.x, f.y, f.z);
-      dummy.rotation.set(f.tilt, f.yaw, 0, "YXZ");
-      dummy.scale.setScalar(f.s);
-      dummy.updateMatrix();
-      frondMesh.setMatrixAt(i, dummy.matrix);
-    });
-    for (const m of [crownMesh, trunkMesh, frondMesh]) {
-      m.castShadow = true;
-      m.receiveShadow = true;
+  }
+
+  // ---------- the metro viaduct (Green Line) ----------
+  // Concrete deck on single piers, about 9 m up, with parapet walls, along the mapped track.
+  {
+    // weathered concrete with its grain, the same material as the university's concrete
+    const conc = tiuModel.materials.concrete;
+    const dark = tiuModel.materials.concrete.clone();
+    dark.color.multiplyScalar(0.8);
+    const inside = (p) => Math.max(Math.abs(p[0]), Math.abs(p[1])) < WORLD_HALF - 4;
+    const concParts = [];
+    const darkParts = [];
+    for (const r of campus.rail || []) {
+      const pts = r.pts.filter(inside);
+      if (pts.length < 2) continue;
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i];
+        const b = pts[i + 1];
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        if (len < 0.5) continue;
+        const yaw = Math.atan2(-(b[1] - a[1]), b[0] - a[0]);
+        const cx = (a[0] + b[0]) / 2;
+        const cz = (a[1] + b[1]) / 2;
+        const part = (w, h, d, y, off, mat) => {
+          const g = new THREE.BoxGeometry(w, h, d);
+          const uv = g.attributes.uv; // the concrete's grain is sized in metres
+          for (let k = 0; k < uv.count; k++) uv.setXY(k, (uv.getX(k) * w) / 3, (uv.getY(k) * Math.max(h, d)) / 3);
+          g.rotateY(yaw);
+          g.translate(cx + Math.sin(yaw) * off, y, cz + Math.cos(yaw) * off);
+          (mat === conc ? concParts : darkParts).push(g);
+        };
+        part(len + 0.3, 1.5, 4.6, 8.6, 0, conc); // box girder
+        part(len + 0.3, 0.3, 5.4, 9.5, 0, conc); // deck
+        part(len + 0.3, 1.0, 0.18, 10.1, 2.6, dark); // parapets
+        part(len + 0.3, 1.0, 0.18, 10.1, -2.6, dark);
+      }
+      // piers every 25 m or so
+      let carry = 12;
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i];
+        const b = pts[i + 1];
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        for (let d = carry; d < len; d += 25) {
+          const x = a[0] + ((b[0] - a[0]) * d) / len;
+          const z = a[1] + ((b[1] - a[1]) * d) / len;
+          const pier = new THREE.CylinderGeometry(0.9, 0.9, 7.2, 14).toNonIndexed();
+          pier.translate(x, 3.6, z);
+          const cap = new THREE.BoxGeometry(4.2, 0.9, 2.2).toNonIndexed();
+          cap.rotateY(Math.atan2(-(b[1] - a[1]), b[0] - a[0]) + Math.PI / 2);
+          cap.translate(x, 7.5, z);
+          concParts.push(pier, cap);
+          world.createCollider(RAPIER.ColliderDesc.cylinder(3.6, 0.9).setTranslation(x, 3.6, z));
+        }
+        carry = (carry - len) % 25;
+        if (carry < 0) carry += 25;
+      }
+    }
+    for (const [list, mat] of [[concParts, conc], [darkParts, dark]]) {
+      if (!list.length) continue;
+      const m = new THREE.Mesh(mergeGeometries(list.map((g) => (g.index ? g.toNonIndexed() : g))), mat);
+      m.castShadow = m.receiveShadow = true;
       scene.add(m);
     }
   }
 
-  // ---------- street lamps with three globes ----------
+  // ---------- lamps (see street.js) ----------
+  const poles = []; // their feet in the street's frame, for people to walk round
+  const lamps = { materials: [], spots: [] }; // what lights up at night: [material, day glow, night glow], and where the light falls
   {
-    const spots = [];
-    for (const x of [-45, -27, -10.5, 10.5, 27, 45]) spots.push(local(x, FENCE_Z + 0.9));
+    // three-lantern posts along the university's railing
+    const posts = [-45, -27, -9, 4, 20, 31.5, 45].map((x) => {
+      const [wx, wz] = local(x, FENCE_Z + 0.9);
+      return { x: wx, z: wz, yaw: phi };
+    });
+    const lanternGlass = heritageLamps(scene, posts);
+    // tall street lights along the carriageways, arms reaching over the road
+    const tall = [];
     for (const r of mainRoads) {
       for (let i = 0; i < r.pts.length - 1; i++) {
         const a = r.pts[i];
@@ -1069,75 +1091,25 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
         const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
         for (let s = 14; s < len; s += 30) {
           const side = ROAD_WIDTH[r.kind] / 2 + 1.2;
-          const x = a[0] + ((b[0] - a[0]) * s) / len + (-(b[1] - a[1]) / len) * side;
-          const z = a[1] + ((b[1] - a[1]) * s) / len + ((b[0] - a[0]) / len) * side;
-          if (!nearEntrance(x, z, 4) && footprints.every((f) => !inPoly(x, z, f)) && Math.hypot(x, z) < WORLD_HALF) spots.push([x, z]);
+          const nxr = -(b[1] - a[1]) / len;
+          const nzr = (b[0] - a[0]) / len;
+          const x = a[0] + ((b[0] - a[0]) * s) / len + nxr * side;
+          const z = a[1] + ((b[1] - a[1]) * s) / len + nzr * side;
+          if (!nearEntrance(x, z, 4) && footprints.every((f) => !inPoly(x, z, f)) && Math.max(Math.abs(x), Math.abs(z)) < WORLD_HALF) tall.push({ x, z, yaw: Math.atan2(nzr, -nxr) });
         }
       }
     }
-    const poleGeo = new THREE.CylinderGeometry(0.07, 0.1, 6, 8);
-    poleGeo.translate(0, 3, 0);
-    const poles = new THREE.InstancedMesh(poleGeo, new THREE.MeshStandardMaterial({ color: "#e9e9e6", roughness: 0.5, metalness: 0.3 }), spots.length);
-    const globes = new THREE.InstancedMesh(new THREE.SphereGeometry(0.26, 12, 10), new THREE.MeshStandardMaterial({ color: "#ffffff", emissive: "#fff6dc", emissiveIntensity: 0.35, roughness: 0.3 }), spots.length * 3);
-    const caps = new THREE.InstancedMesh(new THREE.ConeGeometry(0.34, 0.22, 12), new THREE.MeshStandardMaterial({ color: "#4a4d52", roughness: 0.6 }), spots.length * 3);
-    const dummy = new THREE.Object3D();
-    spots.forEach(([x, z], i) => {
-      dummy.position.set(x, 0, z);
-      dummy.rotation.set(0, 0, 0);
-      dummy.scale.setScalar(1);
-      dummy.updateMatrix();
-      poles.setMatrixAt(i, dummy.matrix);
-      for (let k = 0; k < 3; k++) {
-        const a = (k / 3) * Math.PI * 2 + i;
-        const gy = k === 0 ? 6.3 : 5.5;
-        const gr = k === 0 ? 0 : 0.75;
-        dummy.position.set(x + Math.sin(a) * gr, gy, z + Math.cos(a) * gr);
-        dummy.updateMatrix();
-        globes.setMatrixAt(i * 3 + k, dummy.matrix);
-        dummy.position.y = gy + 0.32;
-        dummy.updateMatrix();
-        caps.setMatrixAt(i * 3 + k, dummy.matrix);
-      }
-      world.createCollider(RAPIER.ColliderDesc.cylinder(3, 0.12).setTranslation(x, 3, z));
-    });
-    poles.castShadow = true;
-    scene.add(poles, globes, caps);
+    const ledLens = streetLights(scene, tall);
+    lamps.materials.push([lanternGlass, 0.3, 5], [ledLens, 0.25, 7]);
+    for (const s of posts) lamps.spots.push({ x: s.x, y: 4.6, z: s.z, r: 5.5, warm: true });
+    for (const s of tall) lamps.spots.push({ x: s.x + Math.cos(s.yaw) * 2.4, y: 9.2, z: s.z - Math.sin(s.yaw) * 2.4, r: 13, warm: false });
+    for (const s of [...posts, ...tall]) {
+      world.createCollider(RAPIER.ColliderDesc.cylinder(3, 0.13).setTranslation(s.x, 3, s.z));
+      poles.push(toLocal(s.x, s.z));
+    }
   }
 
-  // ---------- parked cars, a yellow taxi and a no-parking sign ----------
-  function car(lx, lz, bodyColor, taxi = false) {
-    const g = new THREE.Group();
-    const [x, z] = local(lx, lz);
-    g.position.set(x, 0, z);
-    g.rotation.y = phi;
-    const paint = new THREE.MeshStandardMaterial({ color: bodyColor, roughness: 0.35, metalness: 0.4, envMapIntensity: 1 });
-    const glass = new THREE.MeshStandardMaterial({ color: "#1e2a33", roughness: 0.15, metalness: 0.7 });
-    const tyre = new THREE.MeshStandardMaterial({ color: "#161616", roughness: 0.9 });
-    const part = (geo, mat, px, py, pz) => {
-      const m = new THREE.Mesh(geo, mat);
-      m.position.set(px, py, pz);
-      m.castShadow = true;
-      g.add(m);
-      return m;
-    };
-    part(new THREE.BoxGeometry(4.2, 0.62, 1.7), paint, 0, 0.62, 0);
-    part(new THREE.BoxGeometry(2.2, 0.58, 1.56), paint, -0.15, 1.2, 0);
-    part(new THREE.BoxGeometry(2.24, 0.4, 1.6), glass, -0.15, 1.17, 0);
-    part(new THREE.BoxGeometry(2.0, 0.08, 1.5), paint, -0.15, 1.5, 0);
-    for (const wx of [-1.3, 1.3])
-      for (const wz of [-0.82, 0.82]) {
-        const wheel = part(new THREE.CylinderGeometry(0.33, 0.33, 0.24, 16), tyre, wx, 0.33, wz);
-        wheel.rotation.x = Math.PI / 2;
-      }
-    if (taxi) part(new THREE.BoxGeometry(0.5, 0.16, 0.24), new THREE.MeshStandardMaterial({ color: "#111" }), -0.15, 1.62, 0);
-    scene.add(g);
-    solidBox(4.2, 1.5, 1.7, x, 0.75, z, phi);
-  }
-  const kerb = FENCE_Z + 3.2;
-  car(19, kerb, "#f2c31b", true);
-  car(25.5, kerb, "#e9e9ea");
-  car(-17, kerb, "#a02a26");
-  car(-36, kerb, "#2f4d7a");
+  // Cars, parked and moving, are in traffic.js.
   {
     const [x, z] = local(-22, FENCE_Z + 0.8);
     const signTex = texture(128, 128, (g) => {
@@ -1170,7 +1142,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     scene.add(mesh);
     props.push({ mesh, body: rigid, home: { x, y, z } });
   }
-  const ballSpots = [local(-10.5, 4.8)];
+  const ballSpots = [local(2.5, 5.4)];
   if (campus.pitches.length) {
     const c = centroid(campus.pitches[campus.pitches.length - 1].pts);
     ballSpots.push([c[0], c[1]], [c[0] + 4, c[1] - 3], [c[0] - 5, c[1] + 4]);
@@ -1180,7 +1152,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     prop(ball, RAPIER.ColliderDesc.ball(0.35).setRestitution(0.7).setFriction(0.6).setDensity(0.4), x, 0.4, z);
   }
   const crateMat = new THREE.MeshStandardMaterial({ color: "#b98646", roughness: 1 });
-  for (const [lx, y, lz] of [[-11.5, 0.4, 5.3], [-12.4, 0.4, 5.3], [-11.95, 1.2, 5.3]]) {
+  for (const [lx, y, lz] of [[22.6, 0.4, 5.6], [23.5, 0.4, 5.6], [23.05, 1.2, 5.6]]) {
     const [x, z] = local(lx, lz);
     prop(new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.8, 0.8), crateMat), RAPIER.ColliderDesc.cuboid(0.4, 0.4, 0.4).setFriction(0.8).setDensity(0.5), x, y, z);
   }
@@ -1193,6 +1165,31 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     // where the fly-over camera looks, and which way a new arrival faces (toward the entrance)
     focus: { x: mid[0], z: mid[1], height: tiuHeight },
     entranceYaw: phi,
+    entrance: { x: local(tiuModel.porchX, 0)[0], z: local(tiuModel.porchX, 0)[1] },
+    // Glass and metal on the university building reflect the real surroundings (street, trees,
+    // the buildings opposite), captured once from in front of it with the building itself hidden.
+    captureReflections() {
+      const target = new THREE.WebGLCubeRenderTarget(256, { type: THREE.HalfFloatType, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter });
+      const cube = new THREE.CubeCamera(0.5, 900, target);
+      const [x, z] = local(26, 9);
+      cube.position.set(x, 11, z);
+      tiuModel.group.visible = false;
+      cube.update(renderer, scene);
+      tiuModel.group.visible = true;
+      for (const m of tiuModel.reflective) {
+        m.envMap = target.texture;
+        m.needsUpdate = true;
+      }
+    },
+    tiu: tiuModel,
+    animate: (seconds) => forest.animate(seconds),
     local,
+    toLocal,
+    phi,
+    sky: skyControl,
+    lamps,
+    nightUniform,
+    // where people stand, sit, walk round and go in (see people.js)
+    spots: { ...opposite.spots, poles: [...poles, [-22, FENCE_Z + 0.8]], fenceZ: FENCE_Z, porchX: tiuModel.porchX },
   };
 }

@@ -1,4 +1,4 @@
-// The main player's character: a detailed rigged human.
+// People: a detailed rigged human, shared by the player, other players and everyone on the street.
 //  - Motion-captured idle, walk and run, blended by ground speed with the stride matched to the
 //    speed so the feet do not slide.
 //  - Feet are placed on the real ground (steps, kerbs) with leg IK; knees bend only as a hinge.
@@ -9,6 +9,7 @@
 // bones in a different resting pose, so each animation is converted when it loads.
 import * as THREE from "three";
 import { GLTFLoader } from "/vendor/jsm/loaders/GLTFLoader.js";
+import { clone as cloneSkinned } from "/vendor/jsm/utils/SkeletonUtils.js";
 
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const smoothstep = (a, b, v) => {
@@ -75,12 +76,400 @@ function dressInUniform(model) {
   });
 }
 
-export async function loadHero(renderer) {
-  const loader = new GLTFLoader();
-  const [avatar, anims] = await Promise.all([loader.loadAsync("/models/avatar.glb"), loader.loadAsync("/models/anims.glb")]);
+// Hair colours: base, then the light, middle and dark strand colours drawn over it.
+const HAIR_TONES = {
+  black: ["#14100d", "rgba(92,74,58,0.55)", "rgba(48,37,29,0.6)", "rgba(8,6,5,0.6)"],
+  brown: ["#2a1d14", "rgba(120,90,62,0.55)", "rgba(70,50,34,0.6)", "rgba(18,12,8,0.6)"],
+  grey: ["#6d6a66", "rgba(200,198,194,0.6)", "rgba(140,137,132,0.6)", "rgba(40,38,36,0.55)"],
+  pepper: ["#2b2826", "rgba(190,188,184,0.6)", "rgba(90,86,82,0.6)", "rgba(12,11,10,0.6)"],
+};
+function hairTexture(tone = "black") {
+  const [base, lightC, midC, darkC] = HAIR_TONES[tone] || HAIR_TONES.black;
+  const c = document.createElement("canvas");
+  c.width = 256;
+  c.height = 256;
+  const g = c.getContext("2d");
+  g.fillStyle = base;
+  g.fillRect(0, 0, 256, 256);
+  // fine strands running along v (the direction the hair is combed), with a few lighter ones
+  for (let i = 0; i < 2600; i++) {
+    const x = Math.random() * 256;
+    const y = Math.random() * 256;
+    const len = 10 + Math.random() * 26;
+    const light = Math.random();
+    g.strokeStyle = light < (tone === "pepper" ? 0.3 : 0.08) ? lightC : light < 0.4 ? midC : darkC;
+    g.lineWidth = 0.6 + Math.random() * 0.8;
+    g.beginPath();
+    g.moveTo(x, y);
+    g.quadraticCurveTo(x + (Math.random() - 0.5) * 3, y + len / 2, x + (Math.random() - 0.5) * 4, y + len);
+    g.stroke();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+// Rest-pose hairline height for a point on the head (metres, the model stands 1.85 m tall).
+// Front: high on the forehead; temples recede slightly; sideburns come down in front of the ears;
+// behind the ears it drops to the nape.
+function hairlineAt(x, z) {
+  const ax = Math.abs(x);
+  if (z > 0.055) return 1.776 + Math.max(0, ax - 0.04) * 0.3; // forehead
+  if (z > 0.02) return THREE.MathUtils.lerp(1.705, 1.785, (z - 0.02) / 0.035); // temple to sideburn
+  if (z > -0.045) return ax > 0.075 ? 1.755 : 1.7; // above the ear (the ear itself stays clear)
+  return THREE.MathUtils.lerp(1.7, 1.625, Math.min(1, (-0.045 - z) / 0.05)); // back of the head to the nape
+}
+function makeHair(head) {
+  const src = head.geometry;
+  const P = src.attributes.position;
+  const N = src.attributes.normal;
+  const idx = src.index ? src.index.array : [...Array(P.count).keys()];
+  const smooth = (a, b, v) => {
+    const t = Math.min(1, Math.max(0, (v - a) / (b - a)));
+    return t * t * (3 - 2 * t);
+  };
+  // how far above the hairline each vertex sits
+  const above = new Float32Array(P.count);
+  for (let i = 0; i < P.count; i++) above[i] = P.getY(i) - hairlineAt(P.getX(i), P.getZ(i));
+  const keep = [];
+  for (let f = 0; f < idx.length; f += 3) {
+    const a = idx[f];
+    const b = idx[f + 1];
+    const c = idx[f + 2];
+    // whole faces only, and not the inside of the mouth or the ears' fronts
+    if (Math.max(above[a], above[b], above[c]) > -0.004 && Math.min(above[a], above[b], above[c]) > -0.012) keep.push(a, b, c);
+  }
+  const used = [...new Set(keep)];
+  const remap = new Map(used.map((v, i) => [v, i]));
+  const pos = new Float32Array(used.length * 3);
+  const nor = new Float32Array(used.length * 3);
+  const uv = new Float32Array(used.length * 2);
+  const col = new Float32Array(used.length * 4);
+  const si = new Float32Array(used.length * 4);
+  const sw = new Float32Array(used.length * 4);
+  const crown = new THREE.Vector3(0.008, 1.84, -0.035); // where the hair whorls
+  const v = new THREE.Vector3();
+  const n = new THREE.Vector3();
+  used.forEach((o, i) => {
+    v.fromBufferAttribute(P, o);
+    n.fromBufferAttribute(N, o);
+    const up = above[o];
+    // fuller on top, close-cropped at the sides and the back, thinning to nothing at the hairline
+    const topness = smooth(1.74, 1.83, v.y);
+    const thick = (0.004 + 0.015 * topness) * smooth(-0.003, 0.014, up);
+    v.addScaledVector(n, thick + 0.0008);
+    pos.set([v.x, v.y, v.z], i * 3);
+    nor.set([n.x, n.y, n.z], i * 3);
+    // strands comb back from the forehead and fall from the crown: u around the crown, v away from it
+    const d = v.clone().sub(crown);
+    uv[i * 2] = (Math.atan2(d.x, d.z) / (Math.PI * 2)) * 6;
+    uv[i * 2 + 1] = d.length() * 9;
+    // the hairline is soft and broken: alpha rises over the first centimetre or so
+    const alpha = smooth(-0.004, 0.005, up);
+    col.set([1, 1, 1, alpha], i * 4);
+    const sI = src.attributes.skinIndex;
+    const sW = src.attributes.skinWeight;
+    si.set([sI.getX(o), sI.getY(o), sI.getZ(o), sI.getW(o)], i * 4);
+    sw.set([sW.getX(o), sW.getY(o), sW.getZ(o), sW.getW(o)], i * 4);
+  });
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute("normal", new THREE.BufferAttribute(nor, 3));
+  geo.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+  geo.setAttribute("color", new THREE.BufferAttribute(col, 4));
+  geo.setAttribute("skinIndex", new THREE.BufferAttribute(si, 4));
+  geo.setAttribute("skinWeight", new THREE.BufferAttribute(sw, 4));
+  geo.setIndex(keep.map((k) => remap.get(k)));
+  const mat = new THREE.MeshStandardMaterial({
+    map: hairTexture(),
+    color: "#ffffff",
+    roughness: 0.55,
+    metalness: 0,
+    vertexColors: true,
+    alphaHash: true, // dithered soft edge: no sorting problems against the skin
+  });
+  mat.name = "Hair";
+  const hair = new THREE.SkinnedMesh(geo, mat);
+  hair.name = "Hair";
+  hair.bind(head.skeleton, head.bindMatrix);
+  hair.castShadow = true;
+  hair.frustumCulled = false;
+  hair.renderOrder = 1;
+  return hair;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Everyone in the world, players and passers-by, is a copy of the same rigged body. The model and
+// its animations are loaded and converted once (the "kit"); each person is a cheap copy with their
+// own skeleton, clothes, hair, skin tone, height and build, accessories, and animation state.
+// ---------------------------------------------------------------------------------------------
+
+// Clothes on everyone else: colours and weaves drawn on the outfit from where each point sits on
+// the body in its resting pose, so patterns stay put while the person moves.
+//   top.pattern: solid | stripes | checks | tee | kurta | polo
+//   bottom.pattern: solid | jeans | checks (lungi) | cargo
+function dressInLook(model, look) {
+  const top = look.top || {};
+  const bottom = look.bottom || {};
+  const fabric = (m, spec, isTop) => {
+    m.map = null;
+    m.normalMap = m.normalMap || null;
+    m.color.set("#ffffff");
+    m.roughness = spec.rough ?? 0.88;
+    m.metalness = 0;
+    const c1 = new THREE.Color(spec.color || "#cccccc");
+    const c2 = new THREE.Color(spec.color2 || spec.color || "#999999");
+    const pattern = { solid: 0, stripes: 1, checks: 2, tee: 3, kurta: 4, polo: 5, jeans: 6, cargo: 7 }[spec.pattern || "solid"] ?? 0;
+    const hem = isTop ? (spec.pattern === "kurta" ? -1 : spec.untucked ? 0.86 : 0.9) : -1;
+    m.onBeforeCompile = (shader) => {
+      shader.uniforms.uC1 = { value: c1 };
+      shader.uniforms.uC2 = { value: c2 };
+      shader.uniforms.uPat = { value: pattern };
+      shader.uniforms.uScale = { value: spec.scale || 1 };
+      shader.uniforms.uHem = { value: hem };
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", "#include <common>\nvarying vec3 vRestPos;")
+        .replace("#include <begin_vertex>", "#include <begin_vertex>\nvRestPos = position;");
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", "#include <common>\nvarying vec3 vRestPos;\nuniform vec3 uC1; uniform vec3 uC2; uniform int uPat; uniform float uScale; uniform float uHem;\nfloat hsh(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}")
+        .replace(
+          "#include <map_fragment>",
+          `
+          if (uHem > 0.0 && vRestPos.y < uHem && abs(vRestPos.x) < 0.3) discard;
+          vec3 p = vRestPos * uScale;
+          vec3 col = uC1;
+          // a fine weave so no cloth is a flat colour
+          float weave = (hsh(floor(p.xy * 900.0)) - 0.5) * 0.05 + sin(p.x * 1400.0) * sin(p.y * 1400.0) * 0.02;
+          if (uPat == 1) { // shirt stripes: thin vertical lines
+            float s = abs(fract(p.x * 22.0) - 0.5);
+            col = mix(uC1, uC2, smoothstep(0.42, 0.46, s));
+          } else if (uPat == 2) { // checks (madras shirt, lungi)
+            float a = step(0.5, fract(p.x * 9.0 + p.z * 9.0));
+            float b = step(0.5, fract(p.y * 9.0));
+            col = mix(uC1, uC2, 0.5 * a + 0.5 * b);
+            col = mix(col, uC1 * 0.55, step(0.92, fract(p.y * 18.0)) * 0.6);
+          } else if (uPat == 3) { // T-shirt: a print on the chest
+            vec2 q = vRestPos.xy - vec2(0.0, 1.32);
+            if (vRestPos.z > 0.04 && abs(q.x) < 0.085 && abs(q.y) < 0.07) {
+              col = mix(uC2, uC1, step(0.5, fract((q.x + q.y) * 18.0)) * 0.35);
+            }
+          } else if (uPat == 4) { // kurta: a darker placket and a soft sheen
+            if (vRestPos.z > 0.05 && abs(vRestPos.x) < 0.018 && vRestPos.y > 1.25 && vRestPos.y < 1.5) col = uC2;
+          } else if (uPat == 5) { // collared polo with a contrasting band
+            col = mix(uC1, uC2, step(1.40, vRestPos.y) * step(vRestPos.y, 1.44));
+          } else if (uPat == 6) { // denim: diagonal twill, paler down the thighs
+            float tw = step(0.5, fract((p.x + p.y) * 160.0)) * 0.06;
+            float fade = smoothstep(0.35, 0.0, abs(vRestPos.x) - 0.09) * smoothstep(0.55, 0.8, vRestPos.y) * smoothstep(1.0, 0.8, vRestPos.y);
+            col = uC1 * (1.0 - tw) + vec3(0.14, 0.16, 0.2) * fade * 0.6;
+          } else if (uPat == 7) { // cargo: side pockets
+            if (abs(abs(vRestPos.x) - 0.16) < 0.05 && vRestPos.y > 0.45 && vRestPos.y < 0.6) col = uC1 * 0.82;
+          }
+          diffuseColor.rgb = col * (1.0 + weave);
+          `,
+        );
+    };
+    m.customProgramCacheKey = () => `look-${pattern}-${hem}`;
+    m.needsUpdate = true;
+  };
+  model.traverse((o) => {
+    if (!o.isMesh) return;
+    const name = o.material.name;
+    if (name === "Wolf3D_Outfit_Top") fabric(o.material, top, true);
+    else if (name === "Wolf3D_Outfit_Bottom") fabric(o.material, bottom, false);
+    else if (name === "Wolf3D_Outfit_Footwear") {
+      o.material.map = null;
+      o.material.color.set(look.shoes || "#2a2622");
+      o.material.roughness = look.shoesRough ?? 0.6;
+    } else if ((name === "Wolf3D_Skin" || name === "Wolf3D_Body") && look.skin) {
+      o.material.color.setScalar(1).multiplyScalar(look.skin);
+    } else if (name === "Wolf3D_Beard") {
+      o.visible = Boolean(look.beard);
+      if (look.beard) o.material.color.set(look.beard);
+    }
+  });
+}
+
+// Small things people carry and wear, fixed to a bone so they move with the body.
+const gear = {};
+function gearMat(key, make) {
+  if (!gear[key]) gear[key] = make();
+  return gear[key];
+}
+function addAccessories(model, list = []) {
+  model.updateMatrixWorld(true);
+  const bone = (n) => model.getObjectByName(n);
+  let current = "";
+  const at = (b, mesh, offset) => {
+    const p = bone(b).getWorldPosition(new THREE.Vector3()).add(offset);
+    mesh.position.copy(p);
+    mesh.castShadow = true;
+    if (!mesh.name) mesh.name = "gear-" + current;
+    bone(b).attach(mesh);
+    return mesh;
+  };
+  const std = (hex, rough = 0.7, extra = {}) => gearMat(hex + rough, () => new THREE.MeshStandardMaterial({ color: hex, roughness: rough, ...extra }));
+  for (const item of list) {
+    const kind = typeof item === "string" ? item : item.kind;
+    const color = item.color;
+    current = kind;
+    if (kind === "backpack") {
+      const g = new THREE.Group();
+      const body = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.4, 0.14), std(color || "#24324a", 0.85));
+      const pocket = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.16, 0.05), std(color || "#24324a", 0.9));
+      pocket.position.set(0, -0.09, -0.08);
+      const top = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.3, 10, 1, false, 0, Math.PI), std(color || "#24324a", 0.85));
+      top.rotation.z = Math.PI / 2;
+      top.position.y = 0.2;
+      g.add(body, pocket, top);
+      for (const sx of [-0.1, 0.1]) {
+        const strap = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.42, 0.015), std("#15181d", 0.8));
+        strap.position.set(sx, 0.02, 0.17);
+        strap.rotation.x = 0.12;
+        g.add(strap);
+      }
+      g.traverse((m) => (m.castShadow = true));
+      at("Spine2", g, new THREE.Vector3(0, -0.12, -0.17));
+    } else if (kind === "sling") {
+      // office bag on a strap across the chest, resting on the hip
+      const bag = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.26, 0.34), std(color || "#2a201a", 0.6));
+      at("Hips", bag, new THREE.Vector3(-0.2, 0.02, 0.02));
+      const strap = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.75, 0.012), std("#1a1a1a", 0.7));
+      strap.rotation.z = 0.62;
+      at("Spine2", strap, new THREE.Vector3(0.0, -0.05, 0.13));
+    } else if (kind === "glasses") {
+      const m = gearMat("frame", () => new THREE.MeshStandardMaterial({ color: "#151515", roughness: 0.3, metalness: 0.4 }));
+      const g = new THREE.Group();
+      for (const sx of [-0.033, 0.033]) {
+        const ring = new THREE.Mesh(new THREE.TorusGeometry(0.022, 0.0035, 6, 18), m);
+        ring.position.x = sx;
+        g.add(ring);
+      }
+      const bridge = new THREE.Mesh(new THREE.BoxGeometry(0.022, 0.004, 0.004), m);
+      g.add(bridge);
+      for (const sx of [-0.056, 0.056]) {
+        const arm = new THREE.Mesh(new THREE.BoxGeometry(0.004, 0.004, 0.1), m);
+        arm.position.set(sx, 0, -0.05);
+        g.add(arm);
+      }
+      at("Head", g, new THREE.Vector3(0, 0.085, 0.092));
+    } else if (kind === "helmet") {
+      const shell = new THREE.Mesh(new THREE.SphereGeometry(0.135, 18, 12, 0, Math.PI * 2, 0, Math.PI * 0.58), std(color || "#1b1d22", 0.35, { metalness: 0.2 }));
+      shell.scale.set(1, 0.95, 1.12);
+      at("Head", shell, new THREE.Vector3(0, 0.1, -0.005));
+      const visor = new THREE.Mesh(new THREE.SphereGeometry(0.138, 18, 8, -0.9, 1.8, 1.0, 0.75), gearMat("visor", () => new THREE.MeshStandardMaterial({ color: "#0b0d10", roughness: 0.05, metalness: 0.7, transparent: true, opacity: 0.85 })));
+      visor.scale.set(1, 0.95, 1.12);
+      at("Head", visor, new THREE.Vector3(0, 0.1, -0.005));
+    } else if (kind === "cap") {
+      const crown = new THREE.Mesh(new THREE.SphereGeometry(0.115, 16, 8, 0, Math.PI * 2, 0, Math.PI * 0.5), std(color || "#a52a22", 0.8));
+      crown.scale.set(1, 0.7, 1.08);
+      at("Head", crown, new THREE.Vector3(0, 0.135, -0.005));
+      const peak = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.012, 16, 1, false, -Math.PI / 2, Math.PI), std(color || "#a52a22", 0.8));
+      peak.scale.set(1, 1, 0.75);
+      at("Head", peak, new THREE.Vector3(0, 0.13, 0.08));
+    } else if (kind === "lanyard") {
+      const card = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.085, 0.004), std("#f2f2f2", 0.5));
+      at("Spine2", card, new THREE.Vector3(0, -0.12, 0.15));
+      const tape = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.012, 0.004), std(color || "#1e5fb4", 0.6));
+      at("Spine2", tape, new THREE.Vector3(0, -0.06, 0.145));
+    } else if (kind === "cup") {
+      // a small clay or paper tea cup in the right hand
+      const cup = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.022, 0.07, 10), std(item.clay ? "#a4552e" : "#f1ece2", 0.8));
+      cup.rotation.z = Math.PI / 2;
+      at("RightHand", cup, new THREE.Vector3(-0.06, -0.035, 0.03));
+    } else if (kind === "phone") {
+      const ph = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.009, 0.15), std("#101114", 0.25, { metalness: 0.5 }));
+      at("RightHand", ph, new THREE.Vector3(-0.08, -0.03, 0.02));
+    } else if (kind === "glass") {
+      // the small tea glass of a street stall, half full
+      const gl = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.02, 0.08, 10), gearMat("teaglass", () => new THREE.MeshPhysicalMaterial({ color: "#b0703a", roughness: 0.1, transmission: 0.5, thickness: 0.02, transparent: true, opacity: 0.85 })));
+      gl.rotation.z = Math.PI / 2;
+      at("RightHand", gl, new THREE.Vector3(-0.06, -0.035, 0.03));
+    } else if (kind === "packet") {
+      // a packet of crisps or biscuits
+      const pk = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.15, 0.11), std(color || "#d8262c", 0.35));
+      at("RightHand", pk, new THREE.Vector3(-0.07, -0.05, 0.03));
+    } else if (kind === "softdrink") {
+      const bt = new THREE.Group();
+      const body = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.15, 10), gearMat("cola", () => new THREE.MeshStandardMaterial({ color: "#2a1208", roughness: 0.15 })));
+      const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.028, 0.07, 8), gearMat("cola", () => null));
+      neck.position.y = 0.11;
+      const label = new THREE.Mesh(new THREE.CylinderGeometry(0.031, 0.031, 0.05, 10), std(color || "#c8151b", 0.5));
+      bt.add(body, neck, label);
+      bt.rotation.z = Math.PI / 2;
+      at("RightHand", bt, new THREE.Vector3(-0.08, -0.04, 0.03));
+    } else if (kind === "note") {
+      // a folded currency note
+      const nt = new THREE.Mesh(new THREE.BoxGeometry(0.004, 0.07, 0.13), std(color || "#c58aa0", 0.8));
+      at("RightHand", nt, new THREE.Vector3(-0.09, -0.03, 0.02));
+    } else if (kind === "carrybag") {
+      // cloth shopping bag in the left hand
+      const bag = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.3, 0.1), std(color || "#d9c28a", 0.95));
+      at("LeftHand", bag, new THREE.Vector3(0.12, -0.22, 0.0));
+    } else if (kind === "folder") {
+      const f = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.02, 0.32), std(color || "#2a5aa0", 0.6));
+      at("LeftHand", f, new THREE.Vector3(0.1, -0.03, 0.0));
+    } else if (kind === "towel") {
+      // the cloth over a shopkeeper's shoulder
+      const t = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.42, 0.02), std(color || "#d24a3a", 0.95));
+      at("Spine2", t, new THREE.Vector3(0.14, 0.02, 0.06));
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Facial expressions for bodies with face bones. Values are millimetres of movement from rest
+// (jaw: radians, lids: 0 open .. 1 shut, negative = eyes wide).
+//   cornerOut/Up: mouth corners; upperLip/lowerLip: lips apart; pucker/pout: lips forward;
+//   cheek: cheeks raised; puff; browIn/browOut: inner and outer brows up; browPinch: drawn together;
+//   browL/browR, cornerUpL/R, cornerOutL/R: one side only; nose: wrinkled up; sneer; squint: lower lid up.
+const FACE_KEYS = ["cornerOut", "cornerUp", "cornerOutL", "cornerOutR", "cornerUpL", "cornerUpR", "upperLip", "lowerLip", "pucker", "pout", "cheek", "puff", "browIn", "browOut", "browPinch", "browL", "browR", "nose", "sneer", "squint", "lids", "jaw"];
+export const EXPRESSIONS = {
+  neutral: {},
+  softSmile: { cornerOut: 2.2, cornerUp: 1.6, cheek: 1.2, squint: 0.4 },
+  smile: { cornerOut: 3.6, cornerUp: 2.8, cheek: 2.4, squint: 0.9, upperLip: 0.5 },
+  grin: { cornerOut: 4.6, cornerUp: 3.4, cheek: 3, squint: 1.3, upperLip: 1.4, lowerLip: 1.2, jaw: 0.03 },
+  laugh: { cornerOut: 4.8, cornerUp: 3.8, cheek: 3.4, squint: 1.8, upperLip: 1.8, lowerLip: 2, jaw: 0.13, browOut: 1, lids: 0.35 },
+  smirkLeft: { cornerOutL: 3, cornerUpL: 2.6, cheek: 0.6, browL: 1 },
+  smirkRight: { cornerOutR: 3, cornerUpR: 2.6, cheek: 0.6, browR: 1 },
+  amused: { cornerOut: 2.6, cornerUp: 2, cheek: 1.6, browIn: 1.2, browOut: 1.6, squint: 0.5 },
+  polite: { cornerOut: 1.6, cornerUp: 1, browIn: 0.8, browOut: 0.8 },
+  surprised: { browIn: 4, browOut: 4.2, lids: -0.3, jaw: 0.1, lowerLip: 1.2 },
+  curious: { browL: 3.2, browIn: 0.6, cornerUpR: 0.6, lids: -0.1 },
+  skeptical: { browR: 3.4, browPinch: 1, cornerOutL: 1.2, cornerUp: -0.6, squint: 0.6 },
+  frown: { cornerUp: -2.2, cornerOut: -0.6, browIn: -1.6, browPinch: 1.6, pout: 0.8 },
+  annoyed: { browIn: -2.4, browOut: 0.4, browPinch: 2.2, cornerUp: -1.2, squint: 1, nose: 0.6 },
+  angry: { browIn: -3.2, browOut: 0.8, browPinch: 2.8, cornerUp: -1.6, upperLip: 0.8, nose: 1.2, squint: 1.2, lids: -0.1 },
+  sad: { browIn: 2.6, browOut: -1, browPinch: 1.4, cornerUp: -2.4, pout: 1.2, lids: 0.2 },
+  worried: { browIn: 2.8, browPinch: 1.8, cornerUp: -1, cornerOut: 0.8, lids: -0.12 },
+  tired: { lids: 0.42, browIn: -0.4, browOut: -0.8, cornerUp: -0.6, jaw: 0.015 },
+  yawn: { jaw: 0.24, lowerLip: 2.4, upperLip: 1.4, lids: 0.8, browIn: 1.6, browOut: 1, cornerOut: -1 },
+  bored: { lids: 0.3, cornerUp: -0.8, cornerOutL: 0.8, browOut: -0.5, puff: 0.6 },
+  concentrating: { browIn: -1.4, browPinch: 2, squint: 1.2, pucker: 0.8, cornerOut: -0.6 },
+  thinking: { browL: 1.8, browPinch: 0.8, cornerOutR: 1.8, cornerUpR: 0.6, pucker: 0.6, squint: 0.4 },
+  squinting: { squint: 2.2, lids: 0.3, browIn: -1.2, browPinch: 1.2, cheek: 1.4, cornerOut: 1 },
+  disgust: { nose: 2.2, sneer: 1.6, upperLip: 1.4, browIn: -1.6, browPinch: 1.4, cornerUp: -1.2, squint: 1 },
+  blowing: { pucker: 3.2, cornerOut: -1.8, puff: 1.6, browIn: 0.6 },
+  relief: { cornerOut: 1.6, cornerUp: 1, lids: 0.5, browIn: 1.2, browOut: 0.8, jaw: 0.03, lowerLip: 0.6 },
+  pleading: { browIn: 3, browPinch: 1, cornerOut: 1.4, cornerUp: 0.6, lids: -0.1 },
+  proud: { cornerOut: 1.8, cornerUp: 1.4, browOut: 1.2, lids: 0.15, pout: 0.5 },
+};
+export const EXPRESSION_NAMES = Object.keys(EXPRESSIONS);
+
+let kitPromise = null;
+/** Loads the body and its animations once. */
+export function loadCharacterKit(renderer) {
+  if (!kitPromise) kitPromise = buildKit(renderer);
+  return kitPromise;
+}
+
+const gltfLoader = new GLTFLoader();
+let animsPromise = null;
+const loadAnims = () => (animsPromise ||= gltfLoader.loadAsync("/models/anims.glb"));
+
+async function buildKit(renderer) {
+  const [avatar, anims] = await Promise.all([gltfLoader.loadAsync("/models/avatar.glb"), loadAnims()]);
   const model = avatar.scene;
   const maxAniso = renderer.capabilities.getMaxAnisotropy();
-  const faces = []; // meshes that carry the face controls
   model.traverse((o) => {
     if (!o.isMesh) return;
     o.castShadow = true;
@@ -88,27 +477,79 @@ export async function loadHero(renderer) {
     o.frustumCulled = false; // animated meshes move outside their resting bounds
     for (const key of ["map", "normalMap", "roughnessMap", "metalnessMap"]) if (o.material[key]) o.material[key].anisotropy = maxAniso;
     o.material.envMapIntensity = 0.8;
-    if (o.morphTargetDictionary && "mouthSmile" in o.morphTargetDictionary) faces.push(o);
+    if (o.material.name === "Wolf3D_Headwear" || o.material.name === "Wolf3D_Beard") o.visible = false; // the model wears a cowboy hat
+    if (o.material.name === "Wolf3D_Teeth") o.castShadow = false;
   });
-  dressInUniform(model);
+  return prepareBody(model, anims, { hair: true, kind: "rpm" });
+}
 
-  // A holder around the model lets the whole figure lean without disturbing the skeleton. It is
-  // turned around further down, after the animations are converted (the model faces +z, the game's
-  // "forward" is -z). Check in the browser with __tiu.facingCheck(): dot should be near +1.
-  const holder = new THREE.Group();
-  holder.add(model);
+// Rocketbox bodies (3ds Max "Biped" rig) renamed to the animation's (Mixamo) names.
+const RB_NAMES = { "Bip01 Pelvis": "Hips", "Bip01 Spine": "Spine", "Bip01 Spine1": "Spine1", "Bip01 Spine2": "Spine2", "Bip01 Neck": "Neck", "Bip01 Head": "Head", "Bip01 LEye": "LeftEye", "Bip01 REye": "RightEye" };
+for (const [side, S] of [["L", "Left"], ["R", "Right"]]) {
+  Object.assign(RB_NAMES, {
+    [`Bip01 ${side} Clavicle`]: `${S}Shoulder`,
+    [`Bip01 ${side} UpperArm`]: `${S}Arm`,
+    [`Bip01 ${side} Forearm`]: `${S}ForeArm`,
+    [`Bip01 ${side} Hand`]: `${S}Hand`,
+    [`Bip01 ${side} Thigh`]: `${S}UpLeg`,
+    [`Bip01 ${side} Calf`]: `${S}Leg`,
+    [`Bip01 ${side} Foot`]: `${S}Foot`,
+    [`Bip01 ${side} Toe0`]: `${S}ToeBase`,
+  });
+  ["Thumb", "Index", "Middle", "Ring", "Pinky"].forEach((finger, i) => {
+    RB_NAMES[`Bip01 ${side} Finger${i}`] = `${S}Hand${finger}1`;
+    RB_NAMES[`Bip01 ${side} Finger${i}1`] = `${S}Hand${finger}2`;
+    RB_NAMES[`Bip01 ${side} Finger${i}2`] = `${S}Hand${finger}3`;
+  });
+}
+/**
+ * One of the crowd's bodies: a Microsoft Rocketbox avatar (photographic textures, eyelid and jaw
+ * bones), prepared by tools/rocketbox/convert.py. Bones are renamed and the legs and shoulders
+ * re-hung from the hips and upper chest, as in the animations, keeping the bind pose exactly.
+ */
+export async function loadCrowdBody(renderer, url) {
+  const [g, anims] = await Promise.all([gltfLoader.loadAsync(url), loadAnims()]);
+  const model = g.scene;
+  const maxAniso = renderer.capabilities.getMaxAnisotropy();
+  model.traverse((o) => {
+    const n = o.name.replace(/_/g, " "); // the loader writes "Bip01_Pelvis" for "Bip01 Pelvis"
+    if (RB_NAMES[n]) o.name = RB_NAMES[n];
+    if (!o.isMesh) return;
+    o.castShadow = true;
+    o.receiveShadow = true;
+    o.frustumCulled = false;
+    for (const key of ["map", "normalMap", "roughnessMap"]) if (o.material[key]) o.material[key].anisotropy = maxAniso;
+    o.material.envMapIntensity = 0.7;
+    if (o.material.name === "hair") {
+      o.material.alphaTest = 0.4;
+      o.material.side = THREE.DoubleSide;
+      o.castShadow = false;
+    }
+  });
+  const by = (n) => model.getObjectByName(n);
+  model.updateMatrixWorld(true);
+  for (const [child, parent] of [["LeftUpLeg", "Hips"], ["RightUpLeg", "Hips"], ["LeftShoulder", "Spine2"], ["RightShoulder", "Spine2"]]) by(parent).attach(by(child));
+  // face +z like the other body
+  model.updateMatrixWorld(true);
+  const head = by("Head").getWorldPosition(new THREE.Vector3());
+  const eyes = by("LeftEye").getWorldPosition(new THREE.Vector3()).add(by("RightEye").getWorldPosition(new THREE.Vector3())).multiplyScalar(0.5);
+  model.rotation.y = -Math.atan2(eyes.x - head.x, eyes.z - head.z);
+  model.updateMatrixWorld(true);
+  return prepareBody(model, anims, { hair: false, kind: "rocketbox" });
+}
 
+function prepareBody(model, anims, { hair, kind }) {
   // ---------- convert the animations to this skeleton ----------
   model.updateMatrixWorld(true);
   anims.scene.updateMatrixWorld(true);
   const sourceBones = new Map();
   anims.scene.traverse((o) => sourceBones.set(cleanName(o.name), o));
   // Resting position and rotation of every bone, from the skin's bind pose.
-  function restPose(root) {
+  function restPose(root, fromNodes = false) {
     const pos = new Map();
     const rot = new Map();
     root.traverse((o) => {
-      if (!o.isSkinnedMesh) return;
+      if (!o.isSkinnedMesh || fromNodes) return;
       o.skeleton.bones.forEach((bone, i) => {
         if (pos.has(bone)) return;
         const p = new THREE.Vector3();
@@ -124,7 +565,9 @@ export async function loadHero(renderer) {
     };
   }
   const src = restPose(anims.scene);
-  const dst = restPose(model);
+  // the crowd's bodies keep their skin in a z-up space of their own; their bones as they stand in
+  // the scene are the true resting pose
+  const dst = restPose(model, kind === "rocketbox");
   const childToward = (bone, lookup) => {
     const want = POINTS_AT[cleanName(bone.name)];
     const kids = bone.children.filter((c) => c.isBone);
@@ -152,7 +595,7 @@ export async function loadHero(renderer) {
   const hipsRest = hips.position.clone();
   const clips = {};
   for (const clip of anims.animations) {
-    if (!["idle", "walk", "run"].includes(clip.name)) continue;
+    if (!["idle", "walk", "run", "agree", "headShake"].includes(clip.name)) continue;
     const tracks = [];
     for (const track of clip.tracks) {
       const [boneName, prop] = track.name.split(".");
@@ -179,58 +622,52 @@ export async function loadHero(renderer) {
         mean.multiplyScalar(3 / track.values.length);
         const v = new THREE.Vector3();
         const values = new Float32Array(track.values.length);
+        const toParent = hips.parent.getWorldQuaternion(new THREE.Quaternion()).invert();
+        const parentSize = hips.parent.getWorldScale(new THREE.Vector3());
+        const modelTurn = model.getWorldQuaternion(new THREE.Quaternion());
+        const fromModel = modelTurn.clone().invert();
         for (let i = 0; i < values.length; i += 3) {
           v.fromArray(track.values, i).sub(mean).multiply(parentScale).applyQuaternion(parentQuat);
+          v.applyQuaternion(fromModel); // in the body's own frame: x sideways, y up, z forward
+          v.z = 0;
+          v.y -= 0.02;
+          v.applyQuaternion(modelTurn).applyQuaternion(toParent).divide(parentSize);
           values[i] = hipsRest.x + v.x;
-          values[i + 1] = hipsRest.y + v.y - 0.02;
-          values[i + 2] = hipsRest.z;
+          values[i + 1] = hipsRest.y + v.y;
+          values[i + 2] = hipsRest.z + v.z;
         }
         tracks.push(new THREE.VectorKeyframeTrack("Hips.position", track.times, values));
       }
     }
     clips[clip.name] = new THREE.AnimationClip(clip.name, clip.duration, tracks);
   }
-
-  // Short dark hair (the model's own headwear is hidden), fixed to the head bone.
-  {
-    const headBone = model.getObjectByName("Head");
-    const geo = new THREE.SphereGeometry(0.106, 28, 18, 0, Math.PI * 2, 0, Math.PI * 0.56);
-    const hair = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: "#17120f", roughness: 0.95 }));
-    hair.scale.set(1.0, 0.94, 1.14);
-    hair.castShadow = true;
-    const inv = dst.rot(headBone).invert();
-    hair.position.copy(new THREE.Vector3(0, 1.728, 0.012).sub(dst.pos(headBone)).applyQuaternion(inv));
-    hair.quaternion.copy(inv).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -0.68));
-    headBone.add(hair);
+  // Talking gestures (a nod, a shake of the head) should move the head and shoulders, not the legs.
+  for (const name of ["agree", "headShake"]) {
+    if (!clips[name]) continue;
+    clips[name].tracks = clips[name].tracks.filter((t) => /^(Spine|Spine1|Spine2|Neck|Head)\./.test(t.name));
   }
 
-  holder.rotation.y = Math.PI; // must come after the conversion above, which measures world rotations
+  // Hair: the model ships with a cap instead of hair (hidden above). This grows a short, natural
+  // cut from the scalp itself: the head's own surface above a real hairline (forehead, temples,
+  // sideburns, round the ears, down to the nape) is lifted off the skin by a few millimetres, fuller
+  // on top and close-cropped at the sides and back, and textured with fine strands that run back
+  // from the forehead and down from the crown. The hair moves with the head because it uses the
+  // same skin and bones.
+  if (hair) {
+    const headMesh = model.getObjectByName("Wolf3D_Head");
+    if (headMesh) headMesh.parent.add(makeHair(headMesh));
+  }
 
+  // How fast each clip "walks": the speed at which the planted foot travels backward under the body.
+  const saved = [];
+  model.traverse((o) => o.isBone && saved.push([o, o.position.clone(), o.quaternion.clone()]));
   const mixer = new THREE.AnimationMixer(model);
   const actions = {};
   for (const [name, clip] of Object.entries(clips)) {
     actions[name] = mixer.clipAction(clip);
     actions[name].play();
-    actions[name].setEffectiveWeight(name === "idle" ? 1 : 0);
   }
-  actions.walk.timeScale = actions.run.timeScale = 0; // their timing is driven by ground speed below
-
-  const bone = (n) => model.getObjectByName(n);
-  const legs = [
-    { up: bone("LeftUpLeg"), knee: bone("LeftLeg"), foot: bone("LeftFoot"), lift: 0 },
-    { up: bone("RightUpLeg"), knee: bone("RightLeg"), foot: bone("RightFoot"), lift: 0 },
-  ];
-  const spine = bone("Spine");
-  const chest = bone("Spine1");
-  const arms = [bone("LeftArm"), bone("RightArm")];
-  const forearms = [bone("LeftForeArm"), bone("RightForeArm")];
-  const hands = [bone("LeftHand"), bone("RightHand")];
-  const neck = bone("Neck");
-  const head = bone("Head");
-  const eyes = [bone("LeftEye"), bone("RightEye")].filter(Boolean);
-  const eyeRest = eyes.map((e) => e.quaternion.clone());
-
-  // How fast each clip "walks": the speed at which the planted foot travels backward under the body.
+  const legs = ["LeftFoot", "RightFoot"].map((n) => model.getObjectByName(n));
   function strideSpeed(name) {
     const clip = clips[name];
     const action = actions[name];
@@ -243,8 +680,8 @@ export async function loadHero(renderer) {
       action.time = step * i;
       mixer.update(0);
       model.updateMatrixWorld(true);
-      legs.forEach((leg, k) => {
-        leg.foot.getWorldPosition(p);
+      legs.forEach((foot, k) => {
+        foot.getWorldPosition(p);
         track[k].push([p.y, p.z]);
       });
     }
@@ -262,11 +699,141 @@ export async function loadHero(renderer) {
   }
   const walkSpeed = strideSpeed("walk");
   const runSpeed = strideSpeed("run");
-  for (const [name, a] of Object.entries(actions)) a.setEffectiveWeight(name === "idle" ? 1 : 0);
-  actions.walk.time = actions.run.time = 0;
+  mixer.stopAllAction();
+  mixer.uncacheRoot(model);
+  for (const [b, p, q] of saved) {
+    b.position.copy(p);
+    b.quaternion.copy(q);
+  }
+  model.updateMatrixWorld(true);
+  return { template: model, clips, walkSpeed, runSpeed, hairTex: {}, kind };
+}
 
+/** The main player's character (and every other player's): the TIU polo uniform. */
+export async function loadHero(renderer) {
+  const kit = await loadCharacterKit(renderer);
+  return makeCharacter(kit, { uniform: true });
+}
+
+/**
+ * One person.
+ * opts.uniform: the TIU polo (players). Otherwise opts.look:
+ *   { top: {pattern, color, color2, untucked}, bottom: {pattern, color, color2}, shoes, skin (0.6..1.1),
+ *     hair: black|brown|grey|pepper|none, beard: colour or null }
+ * opts.gear: accessories ("backpack", "sling", "glasses", "helmet", "cap", "lanyard", "cup", "phone",
+ *   "carrybag", "folder", "towel" or {kind, color}).
+ * opts.height: 1 = 1.85 m tall, opts.build: width (1 = as modelled).
+ * opts.lite: skips placing the feet on uneven ground (people on flat pavements).
+ */
+export function makeCharacter(kit, opts = {}) {
+  const model = cloneSkinned(kit.template);
+  const faces = []; // meshes that carry the face controls
+  model.traverse((o) => {
+    if (!o.isMesh) return;
+    o.material = o.material.clone();
+    if (o.morphTargetDictionary && "mouthSmile" in o.morphTargetDictionary) faces.push(o);
+  });
+  const look = opts.look || {};
+  const rocketbox = kit.kind === "rocketbox";
+  if (opts.uniform) dressInUniform(model);
+  else if (!rocketbox) dressInLook(model, look);
+  // hair colour, or none
+  const hairMesh = rocketbox ? null : model.getObjectByName("Hair");
+  if (hairMesh) {
+    const tone = opts.uniform ? "black" : look.hair || "black";
+    if (tone === "none") hairMesh.visible = false;
+    else if (tone !== "black") {
+      if (!kit.hairTex[tone]) kit.hairTex[tone] = hairTexture(tone);
+      hairMesh.material.map = kit.hairTex[tone];
+    }
+  }
+  addAccessories(model, opts.gear);
+  const height = opts.height || 1;
+  const build = opts.build || 1;
+  model.scale.set(height * build, height, height * Math.sqrt(build));
+
+  // A holder around the model lets the whole figure lean without disturbing the skeleton. The model
+  // faces +z, the game's "forward" is -z, so the holder is turned around.
+  const holder = new THREE.Group();
+  holder.add(model);
+  holder.rotation.y = Math.PI;
+
+  const clips = kit.clips;
+  const mixer = new THREE.AnimationMixer(model);
+  const actions = {};
+  for (const [name, clip] of Object.entries(clips)) {
+    actions[name] = mixer.clipAction(clip);
+    actions[name].play();
+    actions[name].setEffectiveWeight(name === "idle" ? 1 : 0);
+  }
+  actions.walk.timeScale = actions.run.timeScale = 0; // their timing is driven by ground speed below
+  // nobody idles in step with anyone else
+  actions.idle.time = Math.random() * clips.idle.duration;
+  actions.idle.timeScale = 0.85 + Math.random() * 0.3;
+  if (actions.agree) actions.agree.time = Math.random() * clips.agree.duration;
+  if (actions.headShake) actions.headShake.time = Math.random() * clips.headShake.duration;
+  const walkSpeed = kit.walkSpeed * height;
+  const runSpeed = kit.runSpeed * height;
+
+  const bone = (n) => model.getObjectByName(n);
+  const hips = bone("Hips");
+  const legs = [
+    { up: bone("LeftUpLeg"), knee: bone("LeftLeg"), foot: bone("LeftFoot"), lift: 0 },
+    { up: bone("RightUpLeg"), knee: bone("RightLeg"), foot: bone("RightFoot"), lift: 0 },
+  ];
+  const spine = bone("Spine");
+  const chest = bone("Spine1");
+  const arms = [bone("LeftArm"), bone("RightArm")];
+  const forearms = [bone("LeftForeArm"), bone("RightForeArm")];
+  const hands = [bone("LeftHand"), bone("RightHand")];
+  const neck = bone("Neck");
+  const head = bone("Head");
+  const eyes = [bone("LeftEye"), bone("RightEye")].filter(Boolean);
+  const eyeRest = eyes.map((e) => e.quaternion.clone());
+  // eyelids and jaw, where the body has bones for them (the crowd's bodies do)
+  const lids = [["Bip01_LEyeBlinkTop", "Bip01_LEyeBlinkBottom"], ["Bip01_REyeBlinkTop", "Bip01_REyeBlinkBottom"]]
+    .map(([t, b]) => [bone(t), bone(b)])
+    .filter(([t, b]) => t && b)
+    .map(([t, b]) => ({ top: t, rest: t.position.clone(), shut: b.position.clone().lerp(t.position, 0.3) }));
+  const jaw = bone("Bip01_MJaw");
+  let jawAxis = null;
+  const jawRest = jaw ? jaw.quaternion.clone() : null;
+  if (jaw && eyes.length === 2) {
+    model.updateMatrixWorld(true);
+    const left = eyes[0].getWorldPosition(new THREE.Vector3()).sub(eyes[1].getWorldPosition(new THREE.Vector3())).normalize();
+    jawAxis = left.applyQuaternion(jaw.getWorldQuaternion(new THREE.Quaternion()).invert()).normalize();
+  }
+  let blinkT = 1 + Math.random() * 4;
+  let blinkAge = 1;
+  // Face bones: corners of the mouth, lips, cheeks, brows, nose. An expression moves them by a
+  // few millimetres from rest, in the head's own directions (out to the side, up, forward).
+  const face = {};
+  const faceAxes = {};
+  if (jaw && eyes.length === 2) {
+    const inv = head.getWorldQuaternion(new THREE.Quaternion()).invert();
+    const left = eyes[0].getWorldPosition(new THREE.Vector3()).sub(eyes[1].getWorldPosition(new THREE.Vector3())).normalize();
+    const up = new THREE.Vector3(0, 1, 0);
+    const fwd = new THREE.Vector3().crossVectors(left, up).normalize();
+    const size = head.getWorldScale(new THREE.Vector3()).x || 1;
+    faceAxes.left = left.clone().applyQuaternion(inv).divideScalar(size);
+    faceAxes.up = up.clone().applyQuaternion(inv).divideScalar(size);
+    faceAxes.fwd = fwd.clone().applyQuaternion(inv).divideScalar(size);
+    for (const n of ["LMouthCorner", "RMouthCorner", "MUpperLip", "LUpperlip", "RUpperlip", "MBottomLip", "LMouthBottom", "RMouthBottom", "LCheek", "RCheek", "LInnerEyebrow", "RInnerEyebrow", "MMiddleEyebrow", "LOuterEyebrow", "ROuterEyebrow", "MNose", "LEyeBlinkBottom", "REyeBlinkBottom"]) {
+      const bn = bone("Bip01_" + n);
+      if (bn) face[n] = { bone: bn, rest: bn.position.clone() };
+    }
+  }
+  const fx = Object.fromEntries(FACE_KEYS.map((key) => [key, 0])); // the face as it is now
+  let exprName = "neutral";
+  let exprBias = FACE_KEYS.map(() => (Math.random() - 0.5) * 0.25); // nobody's face is quite symmetrical or quite like another's
+  const moveFace = (name, out, up, fwd = 0) => {
+    const f = face[name];
+    if (!f) return;
+    const side = name[0] === "L" ? 1 : name[0] === "R" ? -1 : 0;
+    f.bone.position.copy(f.rest).addScaledVector(faceAxes.left, out * side * 0.002).addScaledVector(faceAxes.up, up * 0.002).addScaledVector(faceAxes.fwd, fwd * 0.002);
+  };
   // ---------- per-frame state ----------
-  let phase = 0; // position in the stride, 0..1
+  let phase = Math.random(); // position in the stride, 0..1
   let pelvisDrop = 0;
   let lean = 0;
   let lookYaw = 0;
@@ -278,6 +845,10 @@ export async function loadHero(renderer) {
   // jump pose, eased toward its targets each frame (radians, except crouch)
   const jp = { spine: 0, arms: 0, elbows: 0, thigh: 0, knee: 0, toes: 0 };
   let leapPhase = null; // stride position frozen at take-off for running leaps
+  let sitting = false;
+  let nodW = 0;
+  let shakeW = 0;
+  const gw = { sip: 0, hold: 0, phone: 0, text: 0, stir: 0, wipe: 0, serve: 0, behind: 0, crossed: 0, knees: 0, scan: 0, pocket: 0, take: 0, pour: 0, wave: 0, point: 0, scratch: 0, brow: 0, eat: 0, hip: 0, watch: 0, strap: 0, chin: 0, count: 0, show: 0, namaste: 0, stretch: 0, salute: 0, bottle: 0, lean: 0, handshake: 0 };
 
   const v1 = new THREE.Vector3();
   const v2 = new THREE.Vector3();
@@ -362,11 +933,19 @@ export async function loadHero(renderer) {
       if (Math.abs(angle) > 1e-4) turnInWorld(b, qc.setFromAxisAngle(axis, angle));
     };
     // trunk forward over the bars; a sprinting rider gets lower
-    const bend = 0.42 + 0.2 * r.effort;
+    // trunk forward over the bars (a sprinting rider gets lower); walking the bike back, the rider
+    // sits up and looks back over the right shoulder
+    const back = r.backing || 0;
+    const bend = (0.42 + 0.2 * r.effort) * (1 - 0.55 * back) * (r.posture ?? 1); // posture: upright on a roadster or a motorcycle
     turn(spine, -bend * 0.55);
     turn(chest, -bend * 0.45);
     turn(neck, bend * 0.5);
     turn(head, bend * 0.35 + 0.05);
+    if (back > 0.01) {
+      turn(chest, -0.35 * back, r.up); // shoulders turn a little
+      turn(neck, -0.45 * back, r.up);
+      turn(head, -0.5 * back, r.up);
+    }
     // arms: reach forward with a soft elbow, then the wrists go to the grips
     arms.forEach((arm, i) => {
       turn(arm, 1.05);
@@ -380,7 +959,13 @@ export async function loadHero(renderer) {
       turn(leg.knee, -1.5);
       const pedal = i === 0 ? r.pedalL : r.pedalR;
       const onPedal = v3.copy(pedal).addScaledVector(r.up, 0.075).addScaledVector(r.back, 0.07);
-      if (i === 0 && r.footDown > 0.01) onPedal.lerp(r.groundL, r.footDown);
+      if (back > 0.01) {
+        // walking it back: feet on the ground either side, stepping in turn
+        const ph = (r.backDist || 0) * 5.5 + (i === 0 ? 0 : Math.PI);
+        const g = (i === 0 ? r.groundL : r.groundR).clone().addScaledVector(r.back, 0.14 * Math.sin(ph));
+        g.addScaledVector(r.up, 0.07 * Math.max(0, Math.cos(ph)));
+        onPedal.lerp(g, back);
+      } else if (i === 0 && r.footDown > 0.01) onPedal.lerp(r.groundL, r.footDown);
       solveChain(leg.up, leg.knee, leg.foot, onPedal);
       // foot angle: flat, with the toes dipping a little through the down-stroke (ankling)
       leg.foot.quaternion.copy(leg.knee.getWorldQuaternion(qa).invert()).multiply(footFlat[i]);
@@ -392,8 +977,142 @@ export async function loadHero(renderer) {
     for (const f of faces) f.morphTargetInfluences[f.morphTargetDictionary.mouthSmile] = clamp(smile, 0, 1);
   }
 
+  // ---------- sitting on a bench or stool ----------
+  const fwdW = new THREE.Vector3();
+  const rightW = new THREE.Vector3();
+  function sitDown(sit) {
+    holder.rotation.set(0, Math.PI, 0);
+    holder.position.set(0, 0, 0);
+    holder.parent.updateMatrixWorld(true);
+    legs.forEach((leg, i) => leg.foot.getWorldQuaternion(footFlat[i]));
+    model.getWorldDirection(fwdW);
+    fwdW.y = 0;
+    fwdW.normalize();
+    rightW.crossVectors(fwdW, UP);
+    // lower the pelvis onto the seat, a little back from its front edge
+    hips.getWorldPosition(v1);
+    const want = v2.copy(sit.seat).addScaledVector(UP, 0.1 * height).addScaledVector(fwdW, -0.05);
+    const parent = holder.parent;
+    holder.position.add(parent.worldToLocal(want.clone()).sub(parent.worldToLocal(v1.clone())));
+    holder.updateMatrixWorld(true);
+    const turn = (b, angle) => turnInWorld(b, qc.setFromAxisAngle(rightW, angle));
+    turn(spine, -0.08);
+    legs.forEach((leg, i) => {
+      turn(leg.up, 1.35);
+      turn(leg.knee, -1.45);
+      const foot = v3.copy(sit.seat).addScaledVector(fwdW, (sit.reach || 0.42) * height).addScaledVector(rightW, (i === 0 ? -1 : 1) * 0.12);
+      foot.y = sit.floor + 0.085 * height;
+      solveChain(leg.up, leg.knee, leg.foot, foot);
+      leg.foot.quaternion.copy(leg.knee.getWorldQuaternion(qa).invert()).multiply(footFlat[i]);
+      leg.foot.updateMatrixWorld(true);
+    });
+  }
+
+  // ---------- hands: sipping tea, a phone at the ear, stirring a pot, arms folded ----------
+  // Each gesture is a place for the wrist relative to the body; the arm reaches it with the same
+  // two-bone solver, so it works at any height and while walking.
+  const H = new THREE.Vector3();
+  const C = new THREE.Vector3();
+  const P = new THREE.Vector3();
+  const hand = new THREE.Vector3();
+  const tgt = new THREE.Vector3();
+  const sum = new THREE.Vector3();
+  function gestures(dt, g) {
+    let any = false;
+    for (const k in gw) {
+      gw[k] += ((g[k] || 0) - gw[k]) * ease(dt, 4);
+      if (gw[k] > 0.01) any = true;
+    }
+    if (!any) return;
+    model.getWorldDirection(fwdW);
+    fwdW.y = 0;
+    fwdW.normalize();
+    rightW.crossVectors(fwdW, UP);
+    head.getWorldPosition(H);
+    chest.getWorldPosition(C);
+    hips.getWorldPosition(P);
+    const t = clock;
+    const k = height;
+    const reach = (side, pairs) => {
+      let total = 0;
+      sum.set(0, 0, 0);
+      for (const [w, fill] of pairs) {
+        if (w < 0.01) continue;
+        fill(tgt);
+        sum.addScaledVector(tgt, w);
+        total += w;
+      }
+      if (total < 0.01) return;
+      hands[side].getWorldPosition(hand);
+      const blend = Math.min(1, total);
+      tgt.copy(sum).multiplyScalar(1 / total);
+      hand.lerp(tgt, blend);
+      solveChain(arms[side], forearms[side], hands[side], hand);
+    };
+    const at = g.at || P;
+    const sin = Math.sin;
+    const S = (o, base, f, u, r) => o.copy(base).addScaledVector(fwdW, f * k).addScaledVector(UP, u * k).addScaledVector(rightW, r * k);
+    // right hand: each entry is where the wrist goes for that action
+    reach(1, [
+      [gw.sip, (o) => S(o, H, 0.11, -0.13, 0.05)], // cup to the lips
+      [gw.bottle, (o) => S(o, H, 0.13, -0.06, 0.05)], // bottle tipped above the mouth
+      [gw.eat, (o) => S(o, H, 0.1, -0.14 - 0.1 * Math.max(0, sin(t * 2.2)), 0.03)], // snack to the mouth and back
+      [gw.hold, (o) => S(o, P, 0.3, 0.24, 0.1)], // holding something at waist height
+      [gw.phone, (o) => S(o, H, 0.02, -0.1, 0.1)], // phone at the ear
+      [gw.text, (o) => S(o, C, 0.3, -0.12, 0.06)], // phone held to read
+      [gw.show, (o) => S(o, C, 0.42, 0.02, 0.08)], // screen turned to show someone
+      [gw.scan, (o) => o.copy(at).addScaledVector(UP, 0.2 + 0.015 * sin(t * 3)).addScaledVector(fwdW, -0.1)], // phone over the QR code
+      [gw.pocket, (o) => S(o, P, 0.02, -0.02, 0.19)], // hand into the trouser pocket
+      [gw.take, (o) => o.copy(at)], // reaching for something
+      [gw.pour, (o) => o.copy(at).addScaledVector(UP, 0.26 + 0.02 * sin(t * 5)).addScaledVector(rightW, 0.03)], // kettle tipped over the glass
+      [gw.stir, (o) => o.copy(at).addScaledVector(fwdW, Math.cos(t * 4.5) * 0.06).addScaledVector(rightW, sin(t * 4.5) * 0.06).addScaledVector(UP, 0.16)],
+      [gw.wipe, (o) => o.copy(at).addScaledVector(rightW, sin(t * 2.3) * 0.22).addScaledVector(fwdW, Math.cos(t * 1.7) * 0.06).addScaledVector(UP, 0.06)],
+      [gw.serve, (o) => S(o, C, 0.48, -0.12, 0.1)], // handing something across
+      [gw.count, (o) => S(o, C, 0.27, -0.2 + 0.015 * sin(t * 7), 0.03)], // thumbing through notes
+      [gw.wave, (o) => S(o, H, 0.08, 0.1, 0.3 + 0.09 * sin(t * 9))],
+      [gw.point, (o) => (g.at ? o.copy(C).lerp(at, 0.5).addScaledVector(UP, 0.05) : S(o, C, 0.55, 0.05, 0.2))],
+      [gw.scratch, (o) => S(o, H, -0.09, 0.07 + 0.012 * sin(t * 11), 0.07)], // back of the head
+      [gw.brow, (o) => S(o, H, 0.11, 0.07, 0.07 * sin(t * 2.6))], // wiping the forehead
+      [gw.chin, (o) => S(o, H, 0.1, -0.2, 0.02)], // hand at the chin, thinking
+      [gw.hip, (o) => S(o, P, -0.02, 0.06, 0.21)],
+      [gw.strap, (o) => S(o, C, 0.13, 0.12, -0.12)], // shifting the bag strap on the left shoulder
+      [gw.salute, (o) => S(o, H, 0.07, 0.03, 0.14)],
+      [gw.namaste, (o) => S(o, C, 0.2, 0.02, 0.012)],
+      // a handshake: the hand goes out to meet the other person's (g.at, between the two) and pumps gently
+      [gw.handshake, (o) => (g.at ? o.copy(at).addScaledVector(rightW, 0.02).addScaledVector(UP, 0.03 * sin(t * 8.5)) : S(o, C, 0.42, -0.2 + 0.03 * sin(t * 8.5), 0.06))],
+      [gw.stretch, (o) => S(o, H, -0.02, 0.28, 0.2)],
+      [gw.lean, (o) => o.copy(at).addScaledVector(rightW, 0.18)],
+      [gw.behind, (o) => S(o, P, -0.17, 0, 0.04)],
+      [gw.crossed, (o) => S(o, C, 0.2, -0.13, -0.1)],
+      [gw.knees, (o) => legs[1].knee.getWorldPosition(o).addScaledVector(UP, 0.07).addScaledVector(fwdW, -0.12)],
+    ]);
+    // left hand
+    reach(0, [
+      [gw.watch, (o) => S(o, C, 0.26, -0.02, -0.02)], // wrist turned up to read the time
+      [gw.count, (o) => S(o, C, 0.27, -0.22, -0.05)], // the notes are held in the left hand
+      [gw.pour, (o) => o.copy(at).addScaledVector(UP, 0.05).addScaledVector(rightW, -0.02)], // steadying the glass
+      [gw.hip, (o) => S(o, P, -0.02, 0.06, -0.21)],
+      [gw.namaste, (o) => S(o, C, 0.2, 0.02, -0.012)],
+      [gw.stretch, (o) => S(o, H, -0.02, 0.28, -0.2)],
+      [gw.lean, (o) => o.copy(at).addScaledVector(rightW, -0.18)],
+      [gw.behind, (o) => S(o, P, -0.17, 0, -0.03)],
+      [gw.crossed, (o) => S(o, C, 0.22, -0.09, 0.11)],
+      [gw.knees, (o) => legs[0].knee.getWorldPosition(o).addScaledVector(UP, 0.07).addScaledVector(fwdW, -0.12)],
+      [gw.text * 0.8, (o) => S(o, C, 0.3, -0.15, -0.02)],
+    ]);
+  }
+
+  const gearOf = (kind) => model.getObjectByName("gear-" + kind);
   return {
     model: holder,
+    height,
+    hasFace: Boolean(jawAxis),
+    /** show or hide something carried (added with opts.gear) */
+    showGear(kind, on) {
+      model.traverse((o) => {
+        if (o.name === "gear-" + kind) o.visible = on;
+      });
+    },
     stride: { walkSpeed, runSpeed },
     /**
      * @param dt seconds since the last frame
@@ -407,8 +1126,9 @@ export async function loadHero(renderer) {
         ride(dt, s);
         return;
       }
-      if (riding) {
+      if (riding || (sitting && !s.sit)) {
         riding = false;
+        sitting = false;
         holder.position.set(0, 0, 0);
       }
       const jump = s.jump || {};
@@ -419,6 +1139,10 @@ export async function loadHero(renderer) {
       const together = jump.phase && jump.phase !== "land" ? 1 - (jump.run || 0) : 0;
       const stride = moving * (1 - together);
       actions.idle.setEffectiveWeight(1 - stride);
+      nodW += ((s.nod || 0) - nodW) * ease(dt, 3);
+      shakeW += ((s.shake || 0) - shakeW) * ease(dt, 3);
+      if (actions.agree) actions.agree.setEffectiveWeight(nodW * (1 - stride));
+      if (actions.headShake) actions.headShake.setEffectiveWeight(shakeW * (1 - stride));
       actions.walk.setEffectiveWeight(stride * (1 - running));
       actions.run.setEffectiveWeight(stride * running);
       const metresPerStride = THREE.MathUtils.lerp(walkSpeed * clips.walk.duration, runSpeed * clips.run.duration, running);
@@ -440,6 +1164,10 @@ export async function loadHero(renderer) {
       holder.rotation.z = lean;
       holder.rotation.x = -0.04 * running;
       holder.parent?.updateMatrixWorld(true);
+      if (s.sit) {
+        sitting = true;
+        sitDown(s.sit);
+      }
 
       // ---- jumping, as a person does it ----
       // Rotations are about the body's left-right axis. Positive swings a hanging arm or thigh
@@ -529,15 +1257,58 @@ export async function loadHero(renderer) {
         turnInWorld(eye, qc);
       }
 
+      if (s.gesture) gestures(dt, s.gesture);
+      else if (Object.values(gw).some((w) => w > 0.01)) gestures(dt, {});
+
       // ---- face ----
       smile += ((s.friendly ? 0.75 : 0.12) + Math.sin(clock * 0.7) * 0.04 - smile) * ease(dt, 3);
-      mouth += (clamp(s.talk, 0, 1) - mouth) * ease(dt, 22);
+      mouth += (clamp(s.talk || 0, 0, 1) - mouth) * ease(dt, 22);
       for (const f of faces) {
         f.morphTargetInfluences[f.morphTargetDictionary.mouthSmile] = clamp(smile, 0, 1);
         f.morphTargetInfluences[f.morphTargetDictionary.mouthOpen] = clamp(mouth, 0, 1);
       }
+      // ---- expression, blinking, and the jaw moving with speech ----
+      if (jawAxis) {
+        exprName = EXPRESSIONS[s.expr] ? s.expr : s.friendly ? "softSmile" : "neutral";
+        const want = EXPRESSIONS[exprName];
+        const kf = ease(dt, 5);
+        FACE_KEYS.forEach((key, i) => {
+          const target = (want[key] || 0) * (1 + exprBias[i]);
+          fx[key] += (target - fx[key]) * kf;
+        });
+        const talkOpen = clamp(mouth, 0, 1);
+        moveFace("LMouthCorner", fx.cornerOut + fx.cornerOutL, fx.cornerUp + fx.cornerUpL, -fx.cornerOut * 0.4);
+        moveFace("RMouthCorner", fx.cornerOut + fx.cornerOutR, fx.cornerUp + fx.cornerUpR, -fx.cornerOut * 0.4);
+        moveFace("MUpperLip", 0, fx.upperLip, fx.pucker);
+        moveFace("LUpperlip", -fx.pucker * 0.6, fx.upperLip + fx.sneer * 1.2, fx.pucker * 0.5);
+        moveFace("RUpperlip", -fx.pucker * 0.6, fx.upperLip, fx.pucker * 0.5);
+        moveFace("MBottomLip", 0, -fx.lowerLip - talkOpen * 1.5, fx.pucker + fx.pout);
+        moveFace("LMouthBottom", -fx.pucker * 0.6, -fx.lowerLip, fx.pout * 0.6);
+        moveFace("RMouthBottom", -fx.pucker * 0.6, -fx.lowerLip, fx.pout * 0.6);
+        moveFace("LCheek", fx.cheek * 0.4, fx.cheek, fx.puff);
+        moveFace("RCheek", fx.cheek * 0.4, fx.cheek, fx.puff);
+        moveFace("LInnerEyebrow", -fx.browPinch, fx.browIn + fx.browL, 0);
+        moveFace("RInnerEyebrow", -fx.browPinch, fx.browIn + fx.browR, 0);
+        moveFace("MMiddleEyebrow", 0, fx.browIn * 0.7 - fx.browPinch * 0.5, 0);
+        moveFace("LOuterEyebrow", 0, fx.browOut + fx.browL, 0);
+        moveFace("ROuterEyebrow", 0, fx.browOut + fx.browR, 0);
+        moveFace("MNose", 0, fx.nose, 0);
+        moveFace("LEyeBlinkBottom", 0, fx.squint, 0);
+        moveFace("REyeBlinkBottom", 0, fx.squint, 0);
+        blinkT -= dt;
+        blinkAge += dt;
+        if (blinkT < 0) {
+          blinkAge = 0;
+          blinkT = Math.random() < 0.15 ? 0.35 : 1.8 + Math.random() * 4.5;
+        }
+        const blink = blinkAge < 0.07 ? blinkAge / 0.07 : blinkAge < 0.2 ? 1 - (blinkAge - 0.07) / 0.13 : 0;
+        const shut = clamp(Math.max(blink, fx.lids), -0.35, 1); // negative: eyes wide
+        for (const l of lids) l.top.position.lerpVectors(l.rest, l.shut, shut);
+        jaw.quaternion.copy(jawRest).multiply(qc.setFromAxisAngle(jawAxis, talkOpen * 0.2 + fx.jaw));
+      }
 
       // ---- plant the feet on the real ground ----
+      if (sitting) return;
       if (!s.grounded || !s.groundAt) {
         pelvisDrop += (0 - pelvisDrop) * ease(dt, 10);
         for (const leg of legs) leg.lift += (0 - leg.lift) * ease(dt, 10);
