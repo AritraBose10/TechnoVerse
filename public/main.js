@@ -311,7 +311,7 @@ const playerKitLoading = loadCrowdBody(renderer, "/models/people/Male_Adult_09.g
 async function attachCharacter(a, mine = false) {
   const kit = (await playerKitLoading) || (await kitLoading);
   if (!kit || a.removed) return;
-  const c = makeCharacter(kit, { uniform: true, shirt: a.shirt, gear: [{ kind: "helmet", color: mine ? "#1b1d22" : ["#1b1d22", "#c41e24", "#e8e8e8", "#1e3a8a"][a.id.length % 4] }] });
+  const c = makeCharacter(kit, { uniform: true, shirt: a.shirt, gear: [{ kind: "polocollar", color: a.shirt === "reboot" ? "#141416" : "#14203f" }, { kind: "helmet", color: mine ? "#1b1d22" : ["#1b1d22", "#c41e24", "#e8e8e8", "#1e3a8a"][a.id.length % 4] }] });
   c.showGear("helmet", false); // worn on a motorcycle
   a.char = c;
   if (mine) {

@@ -409,6 +409,58 @@ function addAccessories(model, list = []) {
       h.group.name = "gear-helmet";
       h.group.userData.helmet = h;
       at("Head", h.group, new THREE.Vector3(0, 0.072, 0.004));
+    } else if (kind === "polocollar") {
+      // A polo T-shirt's knitted collar, folded down over a short stand, open at the front over a
+      // two-button placket. Built round the base of the neck in the resting pose and carried by
+      // the upper chest.
+      const mat = std(color || "#141416", 0.9, { side: THREE.DoubleSide });
+      const neck = bone("Neck").getWorldPosition(new THREE.Vector3());
+      const chest = bone("Spine2").getWorldPosition(new THREE.Vector3());
+      const base = neck.clone().lerp(chest, 0.18); // where the collar sits on the neck
+      const g = new THREE.Group();
+      const ring = (r, y, a) => new THREE.Vector3(Math.sin(a) * r * 1.05, y, Math.cos(a) * r * 0.95);
+      const strip = (rows) => {
+        const pos = [];
+        const idx = [];
+        const N = 28;
+        for (let i = 0; i <= N; i++) {
+          // from the front left round the back to the front right, leaving the opening at the front
+          const a = 0.38 + (i / N) * (Math.PI * 2 - 0.76);
+          rows.forEach(([r, y], j) => {
+            // the collar points: the fall comes forward and down at the front
+            const front = Math.max(0, Math.cos(a)) ** 3;
+            const p = ring(r + (j > 1 ? 0.012 * front : 0), y - (j > 1 ? 0.018 * front : 0), a);
+            pos.push(p.x, p.y, p.z);
+          });
+        }
+        const R = rows.length;
+        for (let i = 0; i < N; i++) for (let j = 0; j < R - 1; j++) {
+          const q = i * R + j;
+          idx.push(q, q + R, q + 1, q + 1, q + R, q + R + 1);
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+        geo.setIndex(idx);
+        geo.computeVertexNormals();
+        return new THREE.Mesh(geo, mat);
+      };
+      // stand: up the neck 3 cm; fall: folded back down and out to rest on the shirt
+      g.add(strip([[0.079, -0.01], [0.081, 0.03], [0.088, 0.035], [0.125, -0.012]]));
+      // placket: a strip down the front with two buttons
+      const placket = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.12, 0.004), mat);
+      placket.position.set(0, -0.07, 0.097);
+      placket.rotation.x = -0.18;
+      g.add(placket);
+      const btn = std("#e8e6e0", 0.4);
+      for (const y of [-0.045, -0.095]) {
+        const b = new THREE.Mesh(new THREE.CylinderGeometry(0.0055, 0.0055, 0.003, 10).rotateX(Math.PI / 2), btn);
+        b.position.set(0, y + 0.005, 0.1 - (y + 0.045) * 0.18);
+        g.add(b);
+      }
+      g.traverse((m) => (m.castShadow = true));
+      g.position.copy(base);
+      g.name = "gear-polocollar";
+      bone("Spine2").attach(g);
     } else if (kind === "cap") {
       const crown = new THREE.Mesh(new THREE.SphereGeometry(0.115, 16, 8, 0, Math.PI * 2, 0, Math.PI * 0.5), std(color || "#a52a22", 0.8));
       crown.scale.set(1, 0.7, 1.08);
