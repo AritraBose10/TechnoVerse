@@ -118,6 +118,13 @@ world.timestep = STEP;
 const campus = await (await fetch("/campus.json")).json();
 const worldInfo = buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel });
 const { places, props, focus, entranceYaw, animate: animateWorld, captureReflections } = worldInfo;
+// ?nav=1: build the walking navmesh and show it (debug view); handle on __tiu.nav
+let nav = null;
+if (new URLSearchParams(location.search).get("nav") === "1") {
+  const { buildNav } = await import("/nav.js");
+  nav = await buildNav({ RAPIER, world, local: worldInfo.local, toLocal: worldInfo.toLocal, scene, debug: true });
+  scene.add(nav.debugMesh);
+}
 if (HIGH) {
   composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(innerWidth, innerHeight, { type: THREE.HalfFloatType, samples: 4 }));
   composer.setPixelRatio(renderer.getPixelRatio());
@@ -1821,6 +1828,7 @@ frame();
 
 // Small handle for automated tests and debugging in the console.
 window.__tiu = {
+  nav,
   // free camera for screenshots: __tiu.cam(x, y, z, lookX, lookY, lookZ); __tiu.cam() to go back
   bikes: () => bikes.map((b) => ({ x: b.x, y: b.y, z: b.z, heading: b.heading, kind: b.model.kind, design: b.model.design })),
   // move a parked machine somewhere (street frame), for testing: __tiu.moveBike(i, lx, lz, turn)

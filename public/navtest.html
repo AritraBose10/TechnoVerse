@@ -1,0 +1,155 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>navtest</title>
+<style>html,body{margin:0;background:#000}canvas{display:block;width:100vw;height:100vh}</style>
+<script type="importmap">{ "imports": { "three": "/vendor/three.module.js" } }</script>
+</head><body><canvas id="c"></canvas>
+<script type="module">
+import * as THREE from "three";
+import RAPIER from "/vendor/rapier.es.js";
+import { buildWorld } from "/world.js";
+import { buildNav } from "/nav.js";
+
+await RAPIER.init();
+const canvas = document.getElementById("c");
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setSize(innerWidth, innerHeight, false);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color("#9fb4c8");
+scene.add(new THREE.HemisphereLight("#ffffff", "#8a8470", 1.6));
+const sun = new THREE.DirectionalLight("#fff1dc", 2.5);
+sun.position.set(40, 90, 30);
+scene.add(sun);
+const world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
+const campus = await (await fetch("/campus.json")).json();
+const makeLabel = () => new THREE.Sprite();
+const info = buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel });
+const { local, toLocal } = info;
+world.step();
+
+const nav = await buildNav({ RAPIER, world, local, toLocal, scene, debug: true });
+scene.add(nav.debugMesh);
+
+// ---- crossing check ----
+const P = nav.path(-20, 7.5, 40, 27.5);
+let pathLen = 0;
+if (P) for (let i = 1; i < P.length; i++) pathLen += Math.hypot(P[i].x - P[i - 1].x, P[i].z - P[i - 1].z);
+const P2 = nav.path(0, 7.5, 0, 27);
+const dense = (path) => { const out = []; for (let i = 1; i < path.length; i++) { const a = path[i - 1], b = path[i]; const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / 0.1)); for (let k = 0; k <= n; k++) out.push({ x: a.x + (b.x - a.x) * k / n, z: a.z + (b.z - a.z) * k / n }); } return out; };
+const inRoad = (p) => (p.z > 8.5 && p.z < 15.3) || (p.z > 19.5 && p.z < 25.5);
+const viaCrossing = !!P2 && dense(P2).filter(inRoad).every((p) => p.x >= 6.5 && p.x <= 11.5) && dense(P2).some((p) => p.z > 12 && p.z < 22 && p.x >= 6.5 && p.x <= 11.5);
+const roadWalk = P2 ? dense(P2).filter((p) => inRoad(p) && !(p.x >= 6.5 && p.x <= 11.5)).length : -1;
+
+// ---- crowd ----
+const N = 40;
+let seed = 12345;
+const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+function randPoint() {
+  for (let k = 0; k < 50; k++) {
+    const x = -30 + rnd() * 90, z = -8 + rnd() * 38;
+    const c = nav.closest(x, z);
+    if (c && Math.hypot(c.x - x, c.z - z) < 2.5 && nav.connected(c.x, c.z)) return c;
+  }
+  return nav.closest(10, 7.5);
+}
+const ag = [];
+for (let i = 0; i < N; i++) {
+  const p = randPoint();
+  const id = nav.addAgent(p.x, p.z, { radius: 0.27, maxSpeed: 1.2 + rnd() * 0.6 });
+  const t = randPoint();
+  nav.setTarget(id, t.x, t.z);
+  ag.push({ id, target: t, hist: [], overlapped: false });
+}
+const ball = new RAPIER.Ball(0.25);
+const rotI = { x: 0, y: 0, z: 0, w: 1 };
+let overlapEvents = 0;
+const DT = 1 / 30;
+const STEPS = 20 / DT;
+const overlapAt = [];
+const stepOnce = (s) => {
+  nav.update(DT);
+  for (const a of ag) {
+    const st = nav.agentState(a.id);
+    a.last = st;
+    a.hist.push([st.x, st.z]);
+    if (Math.hypot(st.x - a.target.x, st.z - a.target.z) < 1.0) {
+      a.target = randPoint();
+      nav.setTarget(a.id, a.target.x, a.target.z);
+    }
+    // world position of the agent, ball at hip height; hits on anything fixed count
+    const [wx, wz] = local(st.x, st.z);
+    let hit = false;
+    world.intersectionsWithShape({ x: wx, y: st.y + 0.45, z: wz }, rotI, ball, (c) => {
+      const p = c.parent();
+      if (p && !p.isFixed()) return true;
+      hit = true;
+      return false;
+    });
+    if (hit) { overlapEvents++; if (!a.overlapped) overlapAt.push([+st.x.toFixed(1), +st.z.toFixed(1), +st.y.toFixed(2), s]); a.overlapped = true; }
+  }
+};
+for (let s = 0; s < STEPS; s++) {
+  stepOnce(s);
+  if (s % 60 === 0) await new Promise((r) => setTimeout(r, 0));
+}
+const last5 = Math.round(5 / DT);
+let stuck = 0;
+const stuckAt = [];
+for (const a of ag) {
+  const h = a.hist;
+  const a0 = h[h.length - last5], a1 = h[h.length - 1];
+  if (Math.hypot(a1[0] - a0[0], a1[1] - a0[1]) < 0.3) { stuck++; stuckAt.push({ at: [+a1[0].toFixed(1), +a1[1].toFixed(1)], target: [+a.target.x.toFixed(1), +a.target.z.toFixed(1)] }); }
+}
+const overlapAgents = ag.filter((a) => a.overlapped).length;
+
+// ---- picture: top-down, x runs left to right ----
+const o = local(0, 0);
+const cx = local(15, 10);
+const W = 90;
+const aspect = innerWidth / innerHeight;
+const cam = new THREE.OrthographicCamera(W / 2, -W / 2, W / 2 / aspect, -W / 2 / aspect, 1, 400);
+const ax = local(1, 0);
+const az = local(0, 1);
+cam.position.set(cx[0], 150, cx[1]);
+cam.up.set(az[0] - o[0], 0, az[1] - o[1]); // street +z is "up" on screen
+cam.lookAt(cx[0], 0, cx[1]);
+cam.updateProjectionMatrix();
+// test path
+const lineGeo = new THREE.BufferGeometry();
+const lp = [];
+const mk = (p) => { const w = local(p.x, p.z); return [w[0], 1.2, w[1]]; };
+for (const p of P || []) lp.push(...mk(p));
+lineGeo.setAttribute("position", new THREE.Float32BufferAttribute(lp, 3));
+const line = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0xff2020, depthTest: false }));
+line.renderOrder = 30;
+scene.add(line);
+const dotGeo = new THREE.CylinderGeometry(0.4, 0.4, 0.2, 12);
+for (const a of ag) {
+  const m = new THREE.Mesh(dotGeo, new THREE.MeshBasicMaterial({ color: a.overlapped ? 0xff00ff : 0x1060ff, depthTest: false }));
+  const w = local(a.last.x, a.last.z);
+  m.position.set(w[0], 1.4, w[1]);
+  m.renderOrder = 40;
+  scene.add(m);
+}
+renderer.render(scene, cam);
+
+const stats = {
+  polygons: nav.stats.polyCount,
+  inputTriangles: nav.stats.inputTriangles,
+  buildMs: Math.round(nav.stats.buildMs),
+  pathPoints: P ? P.length : null,
+  pathLength: +pathLen.toFixed(1),
+  pathViaCrossing: viaCrossing,
+  pathPointsOnRoad: roadWalk,
+  agents: N,
+  overlappingAgents: overlapAgents,
+  overlapEvents,
+  stuck,
+  colliders: { box: nav.stats.box, cylinder: nav.stats.cylinder, ball: nav.stats.ball, trimesh: nav.stats.trimesh, skipped: nav.stats.skipped },
+  stuckAt,
+  overlapAt: overlapAt.slice(0, 12),
+};
+window.__stats = stats;
+window.__nav = nav; window.__world = world; window.__toLocal = toLocal; window.__R = RAPIER;
+window.__local = local;
+window.__done = [JSON.stringify(stats)];
+</script></body></html>
