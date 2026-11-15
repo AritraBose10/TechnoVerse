@@ -429,18 +429,20 @@ export function buildBicycle({ design = "city", color, rimColor, detail = true }
     saddle: saddleMark,
     bb,
     size: { L: L + 2 * R, W: 0.6, H: 1.1 },
-    /** steerAngle (rad, + turns right), roll (m travelled this frame), crankAngle (rad), kickstand (bool) */
+    kick, // the stand, for the rider's foot when getting on and off
+    /** steerAngle (rad, + turns right), roll (m travelled this frame), crankAngle (rad), kickstand (bool, or 0..1 part way) */
     pose({ steerAngle = 0, roll = 0, crankAngle = 0, kickstand = false }) {
+      const k = +kickstand;
       steer.rotation.y = -steerAngle;
       wheelAngle -= roll / R;
       rearWheel.rotation.x = wheelAngle;
       frontWheel.rotation.x = wheelAngle;
       crank.rotation.x = -crankAngle;
       for (const p of pedals) p.rotation.x = crankAngle; // pedals stay level
-      if (centre) kick.rotation.x = kickstand ? 0.1 : -1.4;
+      if (centre) kick.rotation.x = -1.4 + 1.5 * k;
       else {
-        kick.rotation.x = kickstand ? -0.55 : -1.45;
-        kick.rotation.z = kickstand ? -0.25 : 0;
+        kick.rotation.x = -1.45 + 0.9 * k;
+        kick.rotation.z = -0.25 * k;
       }
     },
   };

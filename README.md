@@ -130,3 +130,13 @@ On start the server logs either "Voice relay (TURN) configured." or "No TURN ser
 - **Greetings between players**: `1` nomoshkar, `2` wave, `3` handshake (or the buttons on the right). A handshake needs someone within arm's reach; their character takes your hand.
 - **Real time** (`public/daylight.js`): the clock is Indian Standard Time. The sun and moon are where they really are over Salt Lake (worked out from the date), and drive the sunlight, sky, haze and exposure; after sunset the street lamps, lit windows, headlamps and tail lamps come on, with the moon at its real phase. Traffic follows the hour (rush hours busy, small hours nearly empty). `?time=19:30` fixes the clock; `__tiu.time("06:10")` in the console.
 - Roads, paths and the metro line are cut at the edge of the map square.
+
+
+## Getting on and off, transit, crowd variety (15 Nov, third pass)
+
+- Getting on a motorcycle plays out in full: take the helmet off the handlebar, lift it over the head, pull it on and fasten the strap; hands on the grips, lift the bike off its side stand, swing the right leg over, kick the stand up, turn the key, press the starter (the 350 is kick-started). Getting off reverses it and the helmet goes back on the bar. Bicycles: hands on the bars, stand up, leg over. `__tiu.advance(seconds)` runs a sequence ahead for testing.
+- `public/helmet.js`: an open-face ISI helmet with a smoked flip visor and chin strap; `/helmet.html` shows it.
+- No cars are parked on the street; the flow is heavy 9:00–10:30 and 17:30–19:30 and light otherwise.
+- Bus and auto stops: people wait, board when their vehicle stops (up the bus step, ducking into the auto), passengers get off and auto passengers pay the driver. The vehicle waits for them.
+- No two crowd people dress alike (`varyBody` in `character.js`: shirt and trouser colours per person, skin untouched); `/bodies.html?from=0&n=7&vary=1` shows one body dressed seven ways.
+- People are pushed out of anything they would overlap (posts, parked bikes, players, each other); stall flaps are tied up above head height.

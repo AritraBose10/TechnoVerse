@@ -8,6 +8,7 @@
 // The body is models/avatar.glb. The animations come from models/anims.glb, which has the same
 // bones in a different resting pose, so each animation is converted when it loads.
 import * as THREE from "three";
+import { makeHelmet } from "/helmet.js";
 import { GLTFLoader } from "/vendor/jsm/loaders/GLTFLoader.js";
 import { clone as cloneSkinned } from "/vendor/jsm/utils/SkeletonUtils.js";
 
@@ -353,12 +354,12 @@ function addAccessories(model, list = []) {
       }
       at("Head", g, new THREE.Vector3(0, 0.085, 0.092));
     } else if (kind === "helmet") {
-      const shell = new THREE.Mesh(new THREE.SphereGeometry(0.135, 18, 12, 0, Math.PI * 2, 0, Math.PI * 0.58), std(color || "#1b1d22", 0.35, { metalness: 0.2 }));
-      shell.scale.set(1, 0.95, 1.12);
-      at("Head", shell, new THREE.Vector3(0, 0.1, -0.005));
-      const visor = new THREE.Mesh(new THREE.SphereGeometry(0.138, 18, 8, -0.9, 1.8, 1.0, 0.75), gearMat("visor", () => new THREE.MeshStandardMaterial({ color: "#0b0d10", roughness: 0.05, metalness: 0.7, transparent: true, opacity: 0.85 })));
-      visor.scale.set(1, 0.95, 1.12);
-      at("Head", visor, new THREE.Vector3(0, 0.1, -0.005));
+      // the open-face helmet (helmet.js), worn with the strap fastened under the chin
+      const h = makeHelmet({ color: color || "#1b1d22", accent: item.accent || "#c8202a", detail: !item.lite });
+      h.strap(true);
+      h.group.name = "gear-helmet";
+      h.group.userData.helmet = h;
+      at("Head", h.group, new THREE.Vector3(0, 0.072, 0.004));
     } else if (kind === "cap") {
       const crown = new THREE.Mesh(new THREE.SphereGeometry(0.115, 16, 8, 0, Math.PI * 2, 0, Math.PI * 0.5), std(color || "#a52a22", 0.8));
       crown.scale.set(1, 0.7, 1.08);
@@ -536,6 +537,79 @@ export async function loadCrowdBody(renderer, url) {
   model.rotation.y = -Math.atan2(eyes.x - head.x, eyes.z - head.z);
   model.updateMatrixWorld(true);
   return prepareBody(model, anims, { hair: false, kind: "rocketbox" });
+}
+
+/**
+ * Makes one crowd person's clothes their own, so no two people in the street look the same even
+ * when they share a body: the shirt or top is re-coloured (its hue turned and tinted, folds and
+ * print kept), the trousers or skirt tinted separately, and skin is left untouched (skin is found
+ * by its colour). v: { hue (radians), sat, top: [r, g, b], bottom: [r, g, b] }.
+ */
+export function varyBody(c, v) {
+  const model = c.model;
+  model.traverse((o) => {
+    if (!o.isSkinnedMesh || o.material.name !== "body") return;
+    // the waist, in the mesh's own (bind) space, which may not be y-up (the Rocketbox bodies come
+    // from 3ds Max): the long axis of the body, pointing toward the head; the belt sits at about
+    // 57% of the height
+    if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+    const bb = o.geometry.boundingBox;
+    const size = bb.getSize(new THREE.Vector3());
+    const ax = size.x >= size.y && size.x >= size.z ? "x" : size.y >= size.z ? "y" : "z";
+    const hi = o.skeleton.bones.findIndex((b) => b.name === "Head");
+    const headAt = new THREE.Vector3();
+    if (hi >= 0) new THREE.Matrix4().copy(o.skeleton.boneInverses[hi]).invert().decompose(headAt, new THREE.Quaternion(), new THREE.Vector3());
+    const mid = (bb.min[ax] + bb.max[ax]) / 2;
+    const sign = headAt[ax] >= mid ? 1 : -1;
+    const axis = new THREE.Vector3();
+    axis[ax] = sign;
+    const H = size[ax];
+    const waist = sign > 0 ? bb.min[ax] + 0.57 * H : -(bb.max[ax] - 0.57 * H);
+    // turning the hue: a rotation about the grey axis, with the saturation scaled
+    const k = Math.cos(v.hue);
+    const sn = Math.sin(v.hue);
+    const third = 1 / 3;
+    const r3 = Math.sqrt(third);
+    const rot = new THREE.Matrix3().set(
+      k + (1 - k) * third, third * (1 - k) - r3 * sn, third * (1 - k) + r3 * sn,
+      third * (1 - k) + r3 * sn, k + third * (1 - k), third * (1 - k) - r3 * sn,
+      third * (1 - k) - r3 * sn, third * (1 - k) + r3 * sn, k + third * (1 - k),
+    );
+    const m = o.material.clone();
+    m.onBeforeCompile = (sh) => {
+      sh.uniforms.uRot = { value: rot };
+      sh.uniforms.uSat = { value: v.sat ?? 1 };
+      sh.uniforms.uTop = { value: new THREE.Vector3(...v.top) };
+      sh.uniforms.uBot = { value: new THREE.Vector3(...v.bottom) };
+      sh.uniforms.uWaist = { value: waist };
+      sh.uniforms.uAxis = { value: axis };
+      sh.uniforms.uBand = { value: H * 0.012 };
+      sh.vertexShader = sh.vertexShader.replace("#include <common>", "#include <common>\nvarying float vRestY;\nuniform vec3 uAxis;").replace("#include <begin_vertex>", "#include <begin_vertex>\nvRestY = dot(position, uAxis);");
+      sh.fragmentShader = sh.fragmentShader
+        .replace("#include <common>", "#include <common>\nvarying float vRestY;\nuniform mat3 uRot; uniform float uSat; uniform vec3 uTop; uniform vec3 uBot; uniform float uWaist; uniform float uBand;")
+        .replace(
+          "#include <map_fragment>",
+          `#include <map_fragment>
+          {
+            vec3 c = diffuseColor.rgb;
+            vec3 s = pow(max(c, vec3(0.0)), vec3(0.4545));
+            float Y = dot(s, vec3(0.299, 0.587, 0.114));
+            float cb = 0.5 - 0.169 * s.r - 0.331 * s.g + 0.5 * s.b;
+            float cr = 0.5 + 0.5 * s.r - 0.419 * s.g - 0.081 * s.b;
+            // skin: warm and moderately saturated (Cb 0.30-0.50, Cr 0.53-0.68 in YCbCr)
+            float skin = smoothstep(0.29, 0.33, cb) * (1.0 - smoothstep(0.48, 0.52, cb)) * smoothstep(0.52, 0.55, cr) * (1.0 - smoothstep(0.66, 0.7, cr)) * smoothstep(0.12, 0.2, Y);
+            float grey = dot(c, vec3(0.3333));
+            vec3 turned = max(vec3(0.0), uRot * c);
+            turned = mix(vec3(grey), turned, uSat);
+            float upper = smoothstep(uWaist - uBand, uWaist + uBand, vRestY);
+            vec3 cloth = mix(c * uBot, turned * uTop, upper);
+            diffuseColor.rgb = mix(cloth, c, skin);
+          }`,
+        );
+    };
+    m.customProgramCacheKey = () => "varied-body";
+    o.material = m;
+  });
 }
 
 function prepareBody(model, anims, { hair, kind }) {
@@ -853,6 +927,7 @@ export function makeCharacter(kit, opts = {}) {
   const v1 = new THREE.Vector3();
   const v2 = new THREE.Vector3();
   const v3 = new THREE.Vector3();
+  const v4 = new THREE.Vector3();
   const qa = new THREE.Quaternion();
   const qb = new THREE.Quaternion();
   const qc = new THREE.Quaternion();
@@ -910,6 +985,7 @@ export function makeCharacter(kit, opts = {}) {
   // inclined forward (more when sprinting), head up to see the road. At a stop the left foot comes
   // down to the ground.
   let riding = false;
+  let standHipH = null;
   const footFlat = legs.map(() => new THREE.Quaternion());
   function ride(dt, s) {
     const r = s.ride;
@@ -923,9 +999,17 @@ export function makeCharacter(kit, opts = {}) {
     holder.parent.updateMatrixWorld(true);
     // standing pose's feet: flat, pointing forward; kept to give the feet their angle on the pedals
     legs.forEach((leg, i) => leg.foot.getWorldQuaternion(footFlat[i]));
-    // sit: move the whole figure so the pelvis rests on the saddle
+    // how high the pelvis is when standing (measured once from the standing pose)
     hips.getWorldPosition(v1);
+    if (standHipH === null) standHipH = v1.y - holder.getWorldPosition(v3).y;
+    // Getting on or off: r.stand (1 standing beside the machine .. 0 seated) and r.at (the point
+    // on the ground under the standing pelvis) move the pelvis between standing beside it and the
+    // saddle, rising over the seat on the way (r.lift, metres).
+    const standK = r.stand || 0;
+    // sit: move the whole figure so the pelvis rests on the saddle
     const seat = v2.copy(r.saddle).addScaledVector(r.up, 0.085).addScaledVector(r.back, 0.03);
+    if (standK > 0 && r.at) seat.lerp(v4.copy(r.at).addScaledVector(UP, standHipH), standK);
+    if (r.lift) seat.addScaledVector(UP, r.lift);
     const parent = holder.parent;
     holder.position.add(parent.worldToLocal(seat.clone()).sub(parent.worldToLocal(v1.clone())));
     holder.updateMatrixWorld(true);
@@ -936,7 +1020,7 @@ export function makeCharacter(kit, opts = {}) {
     // trunk forward over the bars (a sprinting rider gets lower); walking the bike back, the rider
     // sits up and looks back over the right shoulder
     const back = r.backing || 0;
-    const bend = (0.42 + 0.2 * r.effort) * (1 - 0.55 * back) * (r.posture ?? 1); // posture: upright on a roadster or a motorcycle
+    const bend = (0.42 + 0.2 * r.effort) * (1 - 0.55 * back) * (r.posture ?? 1) * (1 - standK) + (r.stoop || 0); // posture: upright on a roadster or a motorcycle; stoop: bending to reach
     turn(spine, -bend * 0.55);
     turn(chest, -bend * 0.45);
     turn(neck, bend * 0.5);
@@ -947,17 +1031,27 @@ export function makeCharacter(kit, opts = {}) {
       turn(head, -0.5 * back, r.up);
     }
     // arms: reach forward with a soft elbow, then the wrists go to the grips
+    // a hand given as `false` hangs relaxed; a point puts the wrist there (taking a helmet, the key)
     arms.forEach((arm, i) => {
+      const want = i === 0 ? r.handL : r.handR;
+      if (want === false) return;
       turn(arm, 1.05);
       turn(forearms[i], 0.45);
-      const grip = i === 0 ? r.gripL : r.gripR;
-      solveChain(arm, forearms[i], hands[i], v3.copy(grip).addScaledVector(r.back, 0.05).addScaledVector(r.up, 0.02));
+      if (want) solveChain(arm, forearms[i], hands[i], want);
+      else solveChain(arm, forearms[i], hands[i], v3.copy(i === 0 ? r.gripL : r.gripR).addScaledVector(r.back, 0.05).addScaledVector(r.up, 0.02));
     });
     // legs: knees forward, ankles over the pedals (ball of the foot on the pedal)
     legs.forEach((leg, i) => {
-      turn(leg.up, 1.25);
-      turn(leg.knee, -1.5);
+      turn(leg.up, 1.25 * (1 - standK) + 0.15);
+      turn(leg.knee, -1.5 * (1 - standK) - 0.15);
       const pedal = i === 0 ? r.pedalL : r.pedalR;
+      const given = i === 0 ? r.footL : r.footR; // a foot placed by the getting-on sequence
+      if (given) {
+        solveChain(leg.up, leg.knee, leg.foot, given);
+        leg.foot.quaternion.copy(leg.knee.getWorldQuaternion(qa).invert()).multiply(footFlat[i]);
+        leg.foot.updateMatrixWorld(true);
+        return;
+      }
       const onPedal = v3.copy(pedal).addScaledVector(r.up, 0.075).addScaledVector(r.back, 0.07);
       if (back > 0.01) {
         // walking it back: feet on the ground either side, stepping in turn

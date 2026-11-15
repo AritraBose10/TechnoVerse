@@ -60,7 +60,9 @@ const smooth = (a, b, x) => {
   return t * t * (3 - 2 * t);
 };
 // traffic through the day (1 = an ordinary daytime flow): [hour, flow]
-const FLOW = [[0, 0.15], [4.5, 0.1], [6, 0.35], [8, 0.95], [9.5, 1.3], [11.5, 1], [14, 0.85], [16.5, 1.05], [18.5, 1.35], [20.5, 0.9], [22, 0.5], [24, 0.15]];
+// Sector V is an office district: the street fills from about 9 to 10:30 in the morning and from
+// 5:30 to 7:30 in the evening, and is light the rest of the day.
+const FLOW = [[0, 0.08], [5, 0.06], [7, 0.25], [8.5, 0.9], [9.25, 1.5], [10.5, 1.45], [11.5, 0.6], [13, 0.55], [14, 0.6], [16.5, 0.65], [17.5, 1.3], [18.5, 1.55], [19.5, 1.35], [20.5, 0.7], [22, 0.3], [24, 0.08]];
 function flowAt(hour) {
   for (let i = 0; i < FLOW.length - 1; i++) {
     const [h0, f0] = FLOW[i];

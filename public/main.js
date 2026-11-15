@@ -4,7 +4,7 @@ import { buildWorld } from "/world.js";
 import { loadCharacterKit, makeCharacter } from "/character.js";
 import { buildBicycle, newRide, stepBike, BICYCLE_KINDS } from "/bicycle.js";
 import { buildDaylight } from "/daylight.js";
-import { buildMotorcycle, MOTORCYCLE_KINDS, MOTORCYCLE_DESIGNS, makeEngineSound } from "/motorcycle.js";
+import { buildMotorcycle, MOTORCYCLE_KINDS, MOTORCYCLE_DESIGNS, makeEngineSound, setMotorcycleNight } from "/motorcycle.js";
 import { buildTraffic } from "/traffic.js";
 import { buildPeople } from "/people.js";
 import { loadCrowdBodies, crowdBodies } from "/crowdbodies.js";
@@ -243,6 +243,15 @@ function updateStreet(dt, pos) {
   for (const a of players.values()) {
     const [ax, az] = worldInfo.toLocal(a.group.position.x, a.group.position.z);
     extra.push({ x: ax, z: az, r: a.bikeOn ? 0.7 : 0.35, vx: 0, vz: 0 });
+  }
+  // parked bicycles and motorcycles: people walk round them (a circle at each wheel)
+  for (const b of bikes) {
+    if (riding?.bike === b) continue;
+    const half = b.model.size.L / 2 - 0.35;
+    for (const s of [-1, 1]) {
+      const [bx, bz] = worldInfo.toLocal(b.x - Math.sin(b.heading) * half * s, b.z - Math.cos(b.heading) * half * s);
+      extra.push({ x: bx, z: bz, r: 0.42, vx: 0, vz: 0 });
+    }
   }
   const onRoad = crowd.onRoad();
   for (const e of extra) if ((e.z > 8.4 && e.z < 15.4) || (e.z > 19.4 && e.z < 25.6)) onRoad.push({ x: e.x, z: e.z, vx: e.vx, w: e.r > 0.5 ? 0.9 : 0.7 });
@@ -1023,27 +1032,362 @@ function nearestBike() {
   }
   return best?.b || null;
 }
+// ---------- Getting on and off ----------
+// Getting on is a sequence, as it is in life. On a motorcycle: stand on its left, take the helmet
+// off the handlebar, lift it over your head, pull it down and fasten the strap; hands on the
+// grips, lift the bike upright off its side stand, swing the right leg over the seat and sit,
+// flick the side stand up with the left foot, put the key in and turn it, then press the starter
+// (or, on the 350, unfold the kick lever and kick it through). Getting off runs it backwards: key
+// off, side stand down, lean the bike onto it, leg back over, strap undone, helmet off and hung
+// back on the bar. A bicycle: hands on the bars, lift it upright and knock the stand up, leg over.
+let seq = null; // { bike, steps, i, t, then }
+const ss = (k) => {
+  const t = Math.max(0, Math.min(1, k));
+  return t * t * (3 - 2 * t);
+};
+const span = (k, a, b) => ss((k - a) / (b - a)); // 0 before a, 1 after b, smooth between
+const _m = { saddle: new THREE.Vector3(), gripL: new THREE.Vector3(), gripR: new THREE.Vector3(), pedalL: new THREE.Vector3(), pedalR: new THREE.Vector3(), groundL: new THREE.Vector3(), groundR: new THREE.Vector3(), right: new THREE.Vector3(), up: new THREE.Vector3(), back: new THREE.Vector3(), fwd: new THREE.Vector3(), at: new THREE.Vector3(), key: new THREE.Vector3(), kick: new THREE.Vector3(), head: new THREE.Vector3() };
+const _h = { pos: new THREE.Vector3(), quat: new THREE.Quaternion(), p0: new THREE.Vector3(), q0: new THREE.Quaternion(), p1: new THREE.Vector3(), q1: new THREE.Quaternion(), mtx: new THREE.Matrix4(), s: new THREE.Vector3() };
+const V = () => new THREE.Vector3();
+const bez = (a, b, c, k, out) => out.copy(a).multiplyScalar((1 - k) * (1 - k)).addScaledVector(b, 2 * k * (1 - k)).addScaledVector(c, k * k);
+// where things are this frame, in the world
+function markers(bike) {
+  const m = bike.model;
+  me.group.updateMatrixWorld(true);
+  m.saddle.getWorldPosition(_m.saddle);
+  m.grips[0].getWorldPosition(_m.gripL);
+  m.grips[1].getWorldPosition(_m.gripR);
+  m.pedals[1].getWorldPosition(_m.pedalL);
+  m.pedals[0].getWorldPosition(_m.pedalR);
+  const q = rideRig.getWorldQuaternion(new THREE.Quaternion());
+  _m.right.set(1, 0, 0).applyQuaternion(q);
+  _m.up.set(0, 1, 0).applyQuaternion(q);
+  _m.back.set(0, 0, 1).applyQuaternion(q);
+  _m.fwd.set(0, 0, -1).applyQuaternion(me.group.quaternion);
+  me.group.localToWorld(_m.groundL.set(-0.36, 0.09, 0.12));
+  me.group.localToWorld(_m.groundR.set(0.36, 0.09, 0.12));
+  // standing beside it on the left, level with the seat
+  const sl = me.group.worldToLocal(_m.saddle.clone());
+  me.group.localToWorld(_m.at.set(-0.52, 0, sl.z - 0.05));
+  if (m.key) m.key.getWorldPosition(_m.key);
+  m.kick.getWorldPosition(_m.kick);
+  hero.model.getObjectByName("Head").getWorldPosition(_m.head);
+}
+// the helmet's world place when worn (from the reference helmet on the character's head) and
+// when hanging on the handlebar
+function helmetWorn(pos, quat) {
+  const ref = hero.model.getObjectByName("gear-helmet");
+  ref.updateWorldMatrix(true, false);
+  ref.matrixWorld.decompose(pos, quat, _h.s);
+}
+function helmetHung(hung, pos, quat) {
+  hung.hang.updateWorldMatrix(true, false);
+  _h.mtx.compose(hung.home.position, hung.home.quaternion, _h.s.set(1, 1, 1));
+  _h.mtx.premultiply(hung.hang.matrixWorld).decompose(pos, quat, _h.s);
+}
+function placeHelmet(h, pos, quat) {
+  if (h.group.parent !== scene) scene.attach(h.group);
+  h.group.position.copy(pos);
+  h.group.quaternion.copy(quat);
+}
+// where the feet stand beside the machine
+const footSpot = (side, out) => out.copy(_m.at).addScaledVector(_m.right, side * 0.11).addScaledVector(_m.fwd, side > 0 ? 0.05 : -0.02).setY(_m.at.y + 0.085);
+
+function stepsOn(bike) {
+  const m = bike.model;
+  const motor = m.spec.motor;
+  const lean0 = m.spec.parkLean;
+  const hung = m.hung;
+  const steps = [];
+  const P = {}; // the pose being built this frame (see seqFrame)
+  const relaxed = (side) => false;
+  if (motor && hung) {
+    steps.push({
+      name: "take the helmet", dur: 0.75,
+      run(k) {
+        helmetHung(hung, _h.pos, _h.quat);
+        P.handL = V().copy(_m.at).addScaledVector(UPV, 0.86).addScaledVector(_m.right, -0.22).lerp(V().copy(_h.pos).addScaledVector(UPV, 0.13), ss(k * 1.2));
+        P.handR = relaxed(1);
+        P.stoop = 0.12 * Math.sin(Math.PI * k);
+      },
+    });
+    steps.push({
+      name: "lift it up", dur: 0.8,
+      start() {
+        helmetHung(hung, _h.p0, _h.q0);
+      },
+      run(k) {
+        helmetWorn(_h.p1, _h.q1);
+        const front = V().copy(_m.head).addScaledVector(_m.fwd, 0.34).addScaledVector(UPV, 0.08);
+        bez(_h.p0, V().copy(_h.p0).lerp(front, 0.5).addScaledVector(UPV, 0.25), front, ss(k), _h.pos);
+        _h.quat.slerpQuaternions(_h.q0, _h.q1, ss(k));
+        placeHelmet(hung.helmet, _h.pos, _h.quat);
+        P.handL = V().copy(_h.pos).addScaledVector(_m.right, -0.15).addScaledVector(UPV, -0.03);
+        P.handR = k < 0.35 ? relaxed(1) : V().copy(_h.pos).addScaledVector(_m.right, 0.15).addScaledVector(UPV, -0.03);
+      },
+    });
+    steps.push({
+      name: "put it on", dur: 0.7,
+      start() {
+        _h.p0.copy(hung.helmet.group.position);
+      },
+      run(k) {
+        helmetWorn(_h.p1, _h.q1);
+        // over the head first, then pulled down onto it
+        const over = V().copy(_h.p1).addScaledVector(UPV, 0.12).addScaledVector(_m.fwd, 0.05);
+        bez(_h.p0, over, _h.p1, ss(k), _h.pos);
+        placeHelmet(hung.helmet, _h.pos, _h.q1);
+        P.handL = V().copy(_h.pos).addScaledVector(_m.right, -0.16).addScaledVector(UPV, -0.06);
+        P.handR = V().copy(_h.pos).addScaledVector(_m.right, 0.16).addScaledVector(UPV, -0.06);
+      },
+      end() {
+        // now it sits on the head and moves with it
+        hero.model.getObjectByName("Head").attach(hung.helmet.group);
+        const ref = hero.model.getObjectByName("gear-helmet");
+        hung.helmet.group.position.copy(ref.position);
+        hung.helmet.group.quaternion.copy(ref.quaternion);
+        hung.strap.visible = false;
+      },
+    });
+    steps.push({
+      name: "fasten the strap", dur: 0.7,
+      run(k) {
+        const chin = V().copy(_m.head).addScaledVector(UPV, -0.1).addScaledVector(_m.fwd, 0.1);
+        const w = Math.sin(Math.PI * Math.min(1, k * 1.1));
+        P.handL = V().copy(_m.at).addScaledVector(UPV, 0.86).addScaledVector(_m.right, -0.22).lerp(V().copy(chin).addScaledVector(_m.right, -0.025), w);
+        P.handR = V().copy(_m.at).addScaledVector(UPV, 0.86).addScaledVector(_m.right, 0.0).lerp(V().copy(chin).addScaledVector(_m.right, 0.025), w);
+        if (k > 0.5) hung.helmet.strap(true);
+      },
+    });
+  }
+  steps.push({
+    name: "hands on the bars", dur: 0.55,
+    run(k) {
+      const rest = (side) => V().copy(_m.at).addScaledVector(UPV, 0.86).addScaledVector(_m.right, side * 0.22);
+      P.handL = rest(-1).lerp(V().copy(_m.gripL).addScaledVector(_m.back, 0.05), ss(k));
+      P.handR = rest(1).lerp(V().copy(_m.gripR).addScaledVector(_m.back, 0.05), ss(k));
+      P.stoop = 0.15 * ss(k);
+    },
+  });
+  if (lean0) {
+    steps.push({
+      name: "lift it upright", dur: motor ? 0.75 : 0.45,
+      run(k) {
+        P.lean = lean0 * (1 - ss(k));
+        P.stoop = 0.15 + (motor ? 0.1 : 0.04) * Math.sin(Math.PI * k); // a heavy bike takes some effort
+      },
+    });
+  }
+  steps.push({
+    name: "leg over", dur: motor ? 1.0 : 0.85,
+    run(k) {
+      P.stand = 1 - span(k, 0.25, 0.9);
+      P.lift = 0.07 * Math.sin(Math.PI * span(k, 0.1, 0.85));
+      // the right foot lifts behind, swings over the back of the seat and comes down on the far side
+      const from = footSpot(1, V());
+      const top = V().copy(_m.saddle).addScaledVector(_m.back, m.kind === "bicycle" && m.design === "ladies" ? -0.25 : 0.32).addScaledVector(UPV, m.kind === "bicycle" && m.design === "ladies" ? -0.25 : 0.2);
+      const to = motor ? V().copy(_m.pedalR) : V().copy(_m.groundR);
+      P.footR = bez(from, top, to, span(k, 0.05, 0.85), V());
+      P.footL = footSpot(-1, V()).lerp(V().copy(_m.groundL), span(k, 0.55, 1));
+      P.stoop = 0.15 * (1 - k);
+    },
+  });
+  // the stand goes up: kicked back with the left foot
+  if (!m.centreStand && !(m.kind === "bicycle" && m.design === "roadster")) {
+    steps.push({
+      name: "stand up", dur: 0.55,
+      run(k) {
+        const onIt = V().copy(_m.kick).addScaledVector(UPV, -0.05).addScaledVector(_m.right, -0.05);
+        P.footL = bez(V().copy(_m.groundL), onIt, V().copy(_m.groundL), ss(k), V());
+        P.kick = 1 - span(k, 0.35, 0.75);
+        if (motor) P.footR = V().copy(_m.pedalR);
+      },
+    });
+  } else {
+    steps.push({
+      name: "roll off the stand", dur: 0.6,
+      run(k) {
+        P.roll = 0.25 * span(k, 0, 0.8); // pushed forward off the centre stand
+        P.kick = 1 - span(k, 0.1, 0.6);
+        if (motor) P.footR = V().copy(_m.pedalR);
+      },
+    });
+  }
+  if (motor) {
+    steps.push({
+      name: "key", dur: 1.0,
+      run(k) {
+        const w = span(k, 0, 0.35) * (1 - span(k, 0.7, 1));
+        P.handR = V().copy(_m.gripR).addScaledVector(_m.back, 0.05).lerp(V().copy(_m.key).addScaledVector(_m.back, 0.04).addScaledVector(UPV, 0.02), w);
+        if (k > 0.5 && !this.done) {
+          this.done = true;
+          setMotorcycleNight(Math.max(daylight.state.night, 0.35)); // dash and headlamp come on with the ignition
+          engine.click();
+        }
+        P.footR = V().copy(_m.pedalR);
+      },
+    });
+    if (m.kickLever) {
+      steps.push({
+        name: "kick start", dur: 1.5,
+        run(k) {
+          // unfold the lever with the right foot, then stand on the left peg and kick it through
+          const lever = m.kickLever;
+          lever.rotation.x = -1.2 + 1.2 * span(k, 0.05, 0.3) + 0.35 * span(k, 0.45, 0.65) - 1.55 * span(k, 0.8, 0.98);
+          const pad = lever.localToWorld(V().set(0.04, 0.22, 0));
+          P.footR = V().copy(_m.pedalR).lerp(pad.addScaledVector(UPV, 0.07), span(k, 0, 0.12) * (1 - span(k, 0.75, 0.95)));
+          P.lift = 0.09 * span(k, 0.35, 0.45) * (1 - span(k, 0.55, 0.7)); // rises a little to put weight into the kick
+          if (k > 0.6 && !this.done) {
+            this.done = true;
+            engine.start();
+          }
+        },
+      });
+    } else {
+      steps.push({
+        name: "starter", dur: 0.9,
+        run(k) {
+          if (k > 0.1 && !this.done) {
+            this.done = true;
+            engine.start();
+          }
+          P.footR = V().copy(_m.pedalR);
+        },
+      });
+    }
+  }
+  return { steps, P };
+}
+function stepsOff(bike) {
+  const m = bike.model;
+  const motor = m.spec.motor;
+  const lean0 = m.spec.parkLean;
+  const hung = m.hung;
+  const steps = [];
+  const P = {};
+  if (motor) {
+    steps.push({
+      name: "key off", dur: 0.9,
+      run(k) {
+        const w = span(k, 0, 0.35) * (1 - span(k, 0.7, 1));
+        P.handR = V().copy(_m.gripR).addScaledVector(_m.back, 0.05).lerp(V().copy(_m.key).addScaledVector(_m.back, 0.04).addScaledVector(UPV, 0.02), w);
+        if (k > 0.5 && !this.done) {
+          this.done = true;
+          engine.stop();
+          setMotorcycleNight(daylight.state.night);
+        }
+        P.footR = V().copy(_m.pedalR);
+        P.footL = V().copy(_m.groundL);
+      },
+    });
+  }
+  if (!m.centreStand && !(m.kind === "bicycle" && m.design === "roadster")) {
+    steps.push({
+      name: "stand down", dur: 0.55,
+      run(k) {
+        const onIt = V().copy(_m.kick).addScaledVector(UPV, -0.04).addScaledVector(_m.right, -0.08);
+        P.footL = bez(V().copy(_m.groundL), onIt, V().copy(_m.groundL), ss(k), V());
+        P.kick = span(k, 0.25, 0.7);
+        if (motor) P.footR = V().copy(_m.pedalR);
+      },
+    });
+  } else {
+    steps.push({
+      name: "onto the stand", dur: 0.6,
+      run(k) {
+        P.kick = span(k, 0, 0.5);
+        P.roll = -0.2 * span(k, 0.3, 1); // pulled back up onto the centre stand
+        if (motor) P.footR = V().copy(_m.pedalR);
+        P.footL = V().copy(_m.groundL);
+      },
+    });
+  }
+  steps.push({
+    name: "leg back over", dur: motor ? 1.0 : 0.85,
+    run(k) {
+      P.kick = 1;
+      P.lean = lean0 * span(k, 0.6, 1);
+      P.stand = span(k, 0.1, 0.75);
+      P.lift = 0.07 * Math.sin(Math.PI * span(k, 0.15, 0.9));
+      const from = motor ? V().copy(_m.pedalR) : V().copy(_m.groundR);
+      const top = V().copy(_m.saddle).addScaledVector(_m.back, m.kind === "bicycle" && m.design === "ladies" ? -0.25 : 0.32).addScaledVector(UPV, m.kind === "bicycle" && m.design === "ladies" ? -0.25 : 0.2);
+      P.footR = bez(from, top, footSpot(1, V()), span(k, 0.15, 0.95), V());
+      P.footL = V().copy(_m.groundL).lerp(footSpot(-1, V()), span(k, 0, 0.45));
+    },
+  });
+  if (motor && hung) {
+    steps.push({
+      name: "undo the strap", dur: 0.6,
+      run(k) {
+        P.kick = 1;
+        P.lean = lean0;
+        const chin = V().copy(_m.head).addScaledVector(UPV, -0.1).addScaledVector(_m.fwd, 0.1);
+        const w = Math.sin(Math.PI * k);
+        P.handL = V().copy(_m.gripL).lerp(V().copy(chin).addScaledVector(_m.right, -0.025), w);
+        P.handR = V().copy(_m.gripR).lerp(V().copy(chin).addScaledVector(_m.right, 0.025), w);
+        if (k > 0.5) hung.helmet.strap(false);
+      },
+    });
+    steps.push({
+      name: "helmet off", dur: 0.75,
+      start() {
+        helmetWorn(_h.p0, _h.q0);
+        scene.attach(hung.helmet.group);
+      },
+      run(k) {
+        P.kick = 1;
+        P.lean = lean0;
+        helmetHung(hung, _h.p1, _h.q1);
+        const front = V().copy(_m.head).addScaledVector(_m.fwd, 0.3).addScaledVector(UPV, 0.0);
+        bez(_h.p0, V().copy(_h.p0).addScaledVector(UPV, 0.15), front, ss(k), _h.pos);
+        placeHelmet(hung.helmet, _h.pos, _h.q0);
+        P.handL = V().copy(_h.pos).addScaledVector(_m.right, -0.16).addScaledVector(UPV, -0.05);
+        P.handR = V().copy(_h.pos).addScaledVector(_m.right, 0.16).addScaledVector(UPV, -0.05);
+      },
+    });
+    steps.push({
+      name: "hang it up", dur: 0.7,
+      start() {
+        _h.p0.copy(hung.helmet.group.position);
+        _h.q0.copy(hung.helmet.group.quaternion);
+      },
+      run(k) {
+        P.kick = 1;
+        P.lean = lean0;
+        helmetHung(hung, _h.p1, _h.q1);
+        bez(_h.p0, V().copy(_h.p0).lerp(_h.p1, 0.5).addScaledVector(UPV, 0.12), _h.p1, ss(k), _h.pos);
+        _h.quat.slerpQuaternions(_h.q0, _h.q1, ss(k));
+        placeHelmet(hung.helmet, _h.pos, _h.quat);
+        P.handL = V().copy(_h.pos).addScaledVector(UPV, 0.13).addScaledVector(_m.right, -0.02);
+        P.handR = k < 0.4 ? V().copy(_h.pos).addScaledVector(_m.right, 0.15) : false;
+      },
+      end() {
+        hung.hang.attach(hung.helmet.group);
+        hung.helmet.group.position.copy(hung.home.position);
+        hung.helmet.group.quaternion.copy(hung.home.quaternion);
+        hung.strap.visible = true;
+      },
+    });
+  } else {
+    steps.push({ name: "step back", dur: 0.35, run() { P.kick = 1; P.lean = lean0; P.handL = false; P.handR = false; } });
+  }
+  return { steps, P };
+}
+const UPV = new THREE.Vector3(0, 1, 0);
+
 function toggleRide() {
-  if (!me || !hero) return;
+  if (!me || !hero || seq) return;
   if (riding) {
     const { bike, r } = riding;
-    if (Math.abs(r.v) > 1.5) {
-      logLine("Slow down to get off.", true);
+    if (Math.abs(r.v) > 0.6) {
+      logLine("Stop first to get off.", true);
       return;
     }
     if (!body.grounded) return;
-    const p = me.group.position;
-    rideRig.remove(bike.model.group);
-    parkBike(bike, p.x, p.y, p.z, r.heading);
-    engine.set(1300, 0, false);
-    engine.horn(false);
-    hero.showGear("helmet", false);
-    me.group.add(hero.model);
-    me.group.remove(rideRig);
-    // step off to the left of the bike
-    placeBody(p.x - Math.cos(r.heading) * 0.75, p.y, p.z + Math.sin(r.heading) * 0.75);
-    vel.x = vel.z = 0;
-    riding = null;
+    r.v = 0;
+    const { steps, P } = stepsOff(bike);
+    seq = { bike, steps, P, i: -1, t: 0, off: true, lean: r.lean, kickK: 0 };
+    me.group.add(hero.model); // standing up beside it, the body no longer leans with the bike
     return;
   }
   const b = nearestBike();
@@ -1053,16 +1397,85 @@ function toggleRide() {
   b.stand.remove(b.model.group);
   b.model.group.rotation.set(0, 0, 0);
   me.group.add(rideRig);
-  rideRig.add(b.model.group, hero.model);
+  rideRig.add(b.model.group);
+  me.group.add(hero.model);
   placeBody(b.x, b.y, b.z);
   me.group.position.set(b.x, b.y, b.z);
   me.group.rotation.y = b.heading;
   vel.x = vel.z = 0;
-  riding = { bike: b, r: newRide(b.heading) };
-  hero.showGear("helmet", Boolean(b.model.spec.motor)); // helmet on for anything with an engine
   myGreet.code = 0;
   jumpState.phase = null;
   camYaw = b.heading;
+  const { steps, P } = stepsOn(b);
+  seq = { bike: b, steps, P, i: -1, t: 0, off: false, lean: b.model.spec.parkLean, kickK: 1 };
+}
+function seqFrame(dt) {
+  const q = seq;
+  const m = q.bike.model;
+  // next step when this one is done
+  if (q.i < 0 || q.t >= q.steps[q.i].dur) {
+    if (q.i >= 0) q.steps[q.i].end?.call(q.steps[q.i]);
+    q.i++;
+    q.t = 0;
+    if (q.i >= q.steps.length) return finishSeq();
+    q.steps[q.i].start?.call(q.steps[q.i]);
+  }
+  q.t += dt;
+  const step = q.steps[q.i];
+  const P = q.P;
+  // what holds unless the step says otherwise
+  for (const key of ["handL", "handR", "footL", "footR", "lift", "stoop", "roll"]) delete P[key];
+  P.lean = q.lean;
+  P.kick = q.kickK;
+  P.stand = q.off ? 0 : 1;
+  if (q.off) P.stand = q.standNow ?? 0;
+  markers(q.bike);
+  step.run.call(step, Math.min(1, q.t / step.dur));
+  q.lean = P.lean;
+  q.kickK = P.kick;
+  q.standNow = P.stand;
+  // the machine: leaning on its stand or held upright, the stand, a little roll off a centre stand
+  rideRig.rotation.z = P.lean;
+  if (P.roll !== undefined) rideRig.position.z = -P.roll;
+  m.pose({ steerAngle: 0, roll: 0, crankAngle: 0, kickstand: P.kick });
+  // the person: standing beside it or seated, hands and feet where the step puts them
+  if (P.stand > 0.5 && P.footL === undefined) P.footL = footSpot(-1, V());
+  if (P.stand > 0.5 && P.footR === undefined) P.footR = footSpot(1, V());
+  if (P.stand <= 0.5 && P.footL === undefined) P.footL = V().copy(_m.groundL);
+  if (P.stand <= 0.5 && P.footR === undefined && m.spec.motor) P.footR = V().copy(_m.pedalR);
+  hero.update(dt, {
+    speed: 0,
+    grounded: true,
+    turnRate: 0,
+    facing: me.group.rotation.y,
+    lookAt: null,
+    talk: 0,
+    ride: { ..._m, crank: m.spec.motor ? 0.6 : 0, effort: 0, footDown: 0, backing: 0, backDist: 0, posture: m.spec.posture, stand: P.stand, at: _m.at, lift: P.lift || 0, stoop: P.stoop || 0, handL: P.handL, handR: P.handR, footL: P.footL, footR: P.footR },
+  });
+}
+function finishSeq() {
+  const { bike, off } = seq;
+  seq = null;
+  rideRig.position.set(0, 0, 0);
+  if (!off) {
+    rideRig.rotation.z = 0;
+    rideRig.add(hero.model);
+    riding = { bike, r: newRide(me.group.rotation.y) };
+    riding.r.footDown = 1;
+    return;
+  }
+  const p = me.group.position;
+  const heading = riding.r.heading;
+  rideRig.remove(bike.model.group);
+  parkBike(bike, p.x, p.y, p.z, heading);
+  engine.set(1300, 0, false);
+  engine.horn(false);
+  me.group.add(hero.model);
+  me.group.remove(rideRig);
+  // the body steps to where the person is standing, on the left of the machine
+  placeBody(p.x - Math.cos(heading) * 0.55, p.y, p.z + Math.sin(heading) * 0.55);
+  vel.x = vel.z = 0;
+  riding = null;
 }
 const _w = { saddle: new THREE.Vector3(), gripL: new THREE.Vector3(), gripR: new THREE.Vector3(), pedalL: new THREE.Vector3(), pedalR: new THREE.Vector3(), groundL: new THREE.Vector3(), groundR: new THREE.Vector3(), right: new THREE.Vector3(), up: new THREE.Vector3(), back: new THREE.Vector3() };
 function rideFrame(dt) {
@@ -1179,7 +1592,8 @@ function frame() {
   }
 
   const pos = me.group.position;
-  if (riding && hero) rideFrame(dt);
+  if (seq && hero) seqFrame(dt);
+  else if (riding && hero) rideFrame(dt);
   else walkFrame(dt, now);
   updateRideHint();
   daylight.update(dt / (timeScale || 1), pos);
@@ -1191,6 +1605,14 @@ function updateRideHint() {
   const hint = $("#rideHint");
   const btn = $("#ride");
   let text = "";
+  if (seq) {
+    // what the character is doing while getting on or off
+    const name = seq.steps[Math.max(0, seq.i)]?.name || "";
+    hint.textContent = name.charAt(0).toUpperCase() + name.slice(1) + "…";
+    hint.hidden = false;
+    btn.hidden = true;
+    return;
+  }
   const near = riding ? null : nearestBike();
   if (riding && riding.bike.model.spec.motor) {
     const r = riding.r;
@@ -1379,7 +1801,16 @@ frame();
 window.__tiu = {
   // free camera for screenshots: __tiu.cam(x, y, z, lookX, lookY, lookZ); __tiu.cam() to go back
   bikes: () => bikes.map((b) => ({ x: b.x, y: b.y, z: b.z, heading: b.heading, kind: b.model.kind, design: b.model.design })),
-  ride: () => riding && { v: +riding.r.v.toFixed(2), kmh: +(riding.r.v * 3.6).toFixed(1), rpm: Math.round(riding.r.rpm), gear: riding.r.gearNo, design: riding.bike.model.design, heading: riding.r.heading, steer: +riding.r.steer.toFixed(3), lean: +riding.r.lean.toFixed(3), footDown: +riding.r.footDown.toFixed(2), grade: +rideGrade.toFixed(3) },
+  // move a parked machine somewhere (street frame), for testing: __tiu.moveBike(i, lx, lz, turn)
+  moveBike(i, lx, lz, turn = Math.PI / 2) {
+    const b = bikes[i];
+    world.removeCollider(b.collider, true);
+    scene.remove(b.stand);
+    const [x, z] = worldInfo.local(lx, lz);
+    parkBike(b, x, 0, z, entranceYaw + turn);
+    return { x: b.x, z: b.z, heading: b.heading };
+  },
+  rideInfo: () => riding && { v: +riding.r.v.toFixed(2), kmh: +(riding.r.v * 3.6).toFixed(1), rpm: Math.round(riding.r.rpm), gear: riding.r.gearNo, design: riding.bike.model.design, heading: riding.r.heading, steer: +riding.r.steer.toFixed(3), lean: +riding.r.lean.toFixed(3), footDown: +riding.r.footDown.toFixed(2), grade: +rideGrade.toFixed(3) },
   slow(k = 1) {
     timeScale = k;
   },
@@ -1399,6 +1830,12 @@ window.__tiu = {
   },
   entranceYaw,
   hero: () => Boolean(hero),
+  // run the getting-on/off sequence ahead without drawing: __tiu.advance(1.5); returns the step
+  advance(seconds) {
+    for (let t = 0; t < seconds && seq; t += 1 / 30) seqFrame(1 / 30);
+    return seq ? seq.steps[seq.i]?.name : riding ? "riding" : "walking";
+  },
+  ride: () => riding && { v: +riding.r.v.toFixed(2), heading: riding.r.heading, design: riding.bike.model.design },
   greet,
   // +1 when the character's face points the way the body is travelling, -1 when it is backwards
   facingCheck() {

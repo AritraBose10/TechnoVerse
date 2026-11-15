@@ -18,6 +18,7 @@ import * as THREE from "three";
 import { makeCharacter } from "/character.js";
 import { officeLook, studentLook, localLook, shopkeeperLook, guardLook } from "/looks.js";
 import { pickBody } from "/crowdbodies.js";
+import { varyBody } from "/character.js";
 
 const DOMAIN = [-130, 150]; // walkers appear and leave beyond these ends of the street
 const NEAR_FOOT = { lo: 6.95, hi: 8.2 }; // between the university's railing and the kerb
@@ -127,6 +128,23 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     for (const g of ITEMS) p.char.showGear(g, g === item);
   };
   const people = [];
+  // Every person gets a different set of clothes colours: shirts in the colours a Kolkata office
+  // street actually wears, trousers in navy, black, grey, khaki, denim; worked through in a
+  // sequence that does not repeat, so even two people on the same body differ.
+  const TOPS = [[1, 1, 1], [0.78, 0.86, 1], [1, 0.84, 0.86], [0.86, 1, 0.88], [1, 0.95, 0.78], [0.72, 0.74, 0.8], [1, 0.7, 0.6], [0.66, 0.78, 0.95], [0.9, 0.8, 1], [0.95, 0.95, 0.9]];
+  const BOTTOMS = [[1, 1, 1], [0.6, 0.65, 0.85], [0.55, 0.55, 0.58], [1.05, 0.95, 0.78], [0.8, 0.85, 1], [0.7, 0.62, 0.55], [0.45, 0.45, 0.5]];
+  let variantNo = 0;
+  let transitT = 3;
+  function variant(role) {
+    const n = variantNo++;
+    const plain = role === "guard"; // the guards keep their uniform
+    return {
+      hue: plain ? 0 : ((n * 0.618034) % 1) * Math.PI * 2,
+      sat: plain ? 1 : 0.5 + ((n * 0.381966) % 1) * 0.42, // muted, as worn clothes are
+      top: plain ? [1, 1, 1] : TOPS[n % TOPS.length],
+      bottom: plain ? [1, 1, 1] : BOTTOMS[Math.floor(n / 3) % BOTTOMS.length],
+    };
+  }
   const stats = { arrived: 0, vanished: 0, crossed: 0 };
   let kit = null;
   const LOOKS = { office: officeLook, student: studentLook, local: localLook, keeper: shopkeeperLook, guard: guardLook, vendor: shopkeeperLook };
@@ -141,7 +159,13 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       if (role === "student" && chance(sex === "m" ? 0.6 : 0.4)) gear.push({ kind: "backpack", color: ["#1f2a3c", "#3a3a3a", "#6a1f22", "#24503a", "#2a2a5a", "#c0782a"][(rnd() * 6) | 0] });
       if (role === "office" && chance(0.4)) gear.push("sling");
       if (role === "local" && chance(0.3)) gear.push({ kind: "carrybag", color: ["#d9c28a", "#c84a3a", "#3a7a5a", "#e8e0d0"][(rnd() * 4) | 0] });
-      c = makeCharacter(bodyKit.kit, { gear, height: 0.97 + rnd() * 0.06, lite: true });
+      // and the small things that tell people apart at a glance
+      if (chance(role === "office" ? 0.3 : 0.18)) gear.push("glasses");
+      if ((role === "local" || role === "student") && sex === "m" && chance(0.1)) gear.push({ kind: "cap", color: ["#a52a22", "#1f2a3c", "#e8e0d0", "#2d5a3a"][(rnd() * 4) | 0] });
+      if (role === "office" && chance(0.35)) gear.push("lanyard");
+      // heights spread like a real street (about 1.52 to 1.83 m), and clothes coloured per person
+      c = makeCharacter(bodyKit.kit, { gear, height: (sex === "f" ? 0.93 : 0.95) + rnd() * 0.12, lite: true });
+      varyBody(c, variant(role));
       look.pace *= sex === "f" ? 0.95 : 1;
     } else {
       const gear = [...(look.gear || []), { kind: "cup", clay: chance(0.5) }, "phone", "glass", "packet", "softdrink", "note"];
@@ -466,11 +490,28 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     p.vz += (fz - p.vz) * k;
     p.x += p.vx * dt;
     p.z += p.vz * dt;
+    solidPush(p);
     if (clampSide) {
       const b = bounds(clampSide, p.x);
       p.z = clamp(p.z, b.lo, b.hi);
     }
     return dist;
+  }
+  // Bodies do not pass through things: after moving, anyone overlapping a fixed thing (a post, a
+  // parked bike, a player standing still) or another person is pushed back out along the line
+  // between them. Two people share the push; a fixed thing does not move.
+  function solidPush(p) {
+    for (const o of others) {
+      if (o.p === p) continue;
+      const rx = p.x - o.x;
+      const rz = p.z - o.z;
+      const d = Math.hypot(rx, rz);
+      const need = p.radius + o.r - 0.04;
+      if (d >= need || d < 1e-5) continue;
+      const k = (need - d) * (o.p ? 0.5 : 1);
+      p.x += (rx / d) * k;
+      p.z += (rz / d) * k;
+    }
   }
   function stand(p, dt, face) {
     const k = 1 - Math.exp(-dt * 6);
@@ -566,12 +607,184 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       case "vendor":
         vendor(p, task, dt, t);
         break;
+      case "waitTransit":
+        waitTransit(p, task, dt, t);
+        break;
+      case "board":
+        board(p, task, dt, t);
+        break;
+      case "alight":
+        alight(p, task, dt, t);
+        break;
+      case "payDriver":
+        payDriver(p, task, dt, t);
+        break;
       case "vanish":
         stats.vanished++;
         remove(p);
         return;
     }
   }
+  // ---------- buses and autos: waiting, getting on, getting off ----------
+  // The stops are where the buses and shared autos pull in (traffic.js). People wait on the
+  // pavement beside them looking up the road for their vehicle; when one has stopped they walk to
+  // its door and climb in: up the bus's front step (38 cm, holding the rail), or ducking into the
+  // auto's open side. Those arriving climb down first; auto passengers walk round to the driver
+  // and pay before going on their way. The vehicle waits while anyone is still getting on or off.
+  const pavementOf = (road) => (road === "near" ? 7.85 : 25.95);
+  const kerbSide = (road) => (road === "near" ? -1 : 1); // from the road toward the pavement
+  function door(veh, inside = false) {
+    const k = kerbSide(veh.road);
+    const along = veh.kind === "bus" ? veh.L / 2 - 1.15 : -0.25;
+    return { x: veh.x + veh.dir * along, z: veh.lat + k * (inside ? veh.W / 2 - 0.4 : veh.W / 2 + 0.25) };
+  }
+  const stopSpots = [];
+  for (const road of ["near", "far"]) for (const st of traffic.stops[road]) stopSpots.push({ road, x: st.x, kinds: st.kinds, waiting: [] });
+  function transitWaiter() {
+    const st = stopSpots[(rnd() * stopSpots.length) | 0];
+    if (st.waiting.length >= (st.kinds.includes("bus") ? 5 : 3)) return;
+    const role = pickW([["office", 4], ["student", 3], ["local", 3]]);
+    const from = chance(0.5) ? -1 : 1;
+    const x0 = clamp(st.x + from * range(25, 45), DOMAIN[0] + 2, DOMAIN[1] - 2);
+    const p = person(role, x0, laneZ(st.road, x0, -from), headingOf(-from, 0));
+    p.side = st.road;
+    const spot = { x: st.x + range(-3, 3), z: pavementOf(st.road) + kerbSide(st.road) * -range(0, 0.35) };
+    p.tasks.push(lane(st.road, -from, spot.x), goto(spot.x, spot.z), { type: "waitTransit", stop: st, spot, kinds: st.kinds, T: range(60, 200) });
+    st.waiting.push(p);
+  }
+  function waitTransit(p, task, dt, t) {
+    const st = task.stop;
+    // face the road, looking up it for the vehicle now and then; a phone passes the time
+    stand(p, dt, headingOf(0, -kerbSide(st.road)));
+    task.look = (task.look || 0) - dt;
+    if (task.look < -4) task.look = range(3, 7);
+    if (task.look > 0) p.lookAt = lookPt(st.x - (st.road === "near" ? 1 : -1) * 40, st.road === "near" ? 12 : 22, 1.2);
+    else p.gesture = { text: 1 };
+    task.T -= dt;
+    for (const veh of traffic.vehicles) {
+      if (veh.road !== st.road || !veh.atStop || !task.kinds.includes(veh.kind) || Math.abs(veh.x - st.x) > 6) continue;
+      if ((veh.seats ?? (veh.kind === "bus" ? 6 : 3)) <= 0) continue;
+      veh.seats = (veh.seats ?? (veh.kind === "bus" ? 6 : 3)) - 1;
+      veh.boarding = (veh.boarding || 0) + 1;
+      st.waiting = st.waiting.filter((q) => q !== p);
+      p.tasks[0] = { type: "board", veh, stop: st, phase: "walk", t: 0 };
+      return;
+    }
+    if (task.T < 0) {
+      // gave up waiting: walk on
+      st.waiting = st.waiting.filter((q) => q !== p);
+      p.tasks.shift();
+      p.tasks.push(lane(st.road, chance(0.5) ? 1 : -1, chance(0.5) ? DOMAIN[0] - 5 : DOMAIN[1] + 5), { type: "vanish" });
+    }
+  }
+  function board(p, task, dt, t) {
+    const veh = task.veh;
+    const gone = !traffic.vehicles.includes(veh) || !veh.atStop;
+    if (gone && task.phase === "walk") {
+      // it left without them: back to waiting
+      p.tasks[0] = { type: "waitTransit", stop: task.stop, spot: { x: p.x, z: pavementOf(task.stop.road) }, kinds: task.stop.kinds, T: range(40, 120) };
+      task.stop.waiting.push(p);
+      return;
+    }
+    const d = door(veh);
+    if (task.phase === "walk") {
+      if (steer(p, d.x, d.z, p.pace * 1.15, dt, null) < 0.18) {
+        task.phase = "in";
+        task.t = 0;
+        task.from = { x: p.x, z: p.z };
+      }
+      return;
+    }
+    // climbing in: facing the door, up the step (bus) or ducking under the roof (auto)
+    task.t += dt;
+    const bus = veh.kind === "bus";
+    const k = Math.min(1, task.t / (bus ? 1.1 : 1.0));
+    const inn = door(veh, true);
+    p.x = task.from.x + (inn.x - task.from.x) * k;
+    p.z = task.from.z + (inn.z - task.from.z) * k;
+    p.vx = p.vz = 0;
+    p.want = headingOf(inn.x - task.from.x, inn.z - task.from.z);
+    if (bus) {
+      p.lift = 0.38 * Math.min(1, k * 1.6); // one step up into the bus
+      p.gesture = { hold: 0, take: 1 };
+      p.gestureAt = null;
+    } else {
+      p.lift = -0.12 * Math.sin(Math.PI * Math.min(1, k * 1.2)); // ducking under the roof
+      p.nod = 0.6 * Math.sin(Math.PI * k);
+    }
+    if (k >= 1) {
+      veh.boarding = Math.max(0, (veh.boarding || 1) - 1);
+      stats.boarded = (stats.boarded || 0) + 1;
+      p.tasks = [{ type: "vanish" }];
+    }
+  }
+  // someone arrives on a bus or auto that has just stopped
+  function unload(veh) {
+    veh.unloaded = true;
+    const n = veh.kind === "bus" ? pickW([[0, 1], [1, 3], [2, 3], [3, 2], [4, 1]]) : pickW([[0, 2], [1, 3], [2, 2]]);
+    for (let i = 0; i < n; i++) {
+      const inn = door(veh, true);
+      const p = person(pickW([["office", 4], ["student", 3], ["local", 3]]), inn.x, inn.z, headingOf(0, kerbSide(veh.road)));
+      p.side = veh.road;
+      p.lift = veh.kind === "bus" ? 0.38 : -0.12;
+      p.hidden = true;
+      veh.boarding = (veh.boarding || 0) + 1;
+      p.tasks.push({ type: "alight", veh, wait: i * (veh.kind === "bus" ? 1.3 : 1.6), t: 0 });
+      if (veh.kind === "auto") p.tasks.push({ type: "payDriver", veh, t: 0 });
+      const dir = chance(0.5) ? 1 : -1;
+      p.tasks.push(goto(p.x + dir * 0.8, pavementOf(veh.road) + kerbSide(veh.road) * 0.2), ...planFrom(p, veh.road, p.x + dir * 0.8, pickW([["pass", 5], ["university", veh.road === "near" ? 3 : 1], ["tea", 1]])));
+    }
+  }
+  function alight(p, task, dt, t) {
+    const veh = task.veh;
+    if (task.wait > 0) {
+      task.wait -= dt;
+      p.hidden = true; // still inside, behind the one in front
+      if (!traffic.vehicles.includes(veh) || !veh.atStop) task.wait = 0; // it is leaving: off now
+      return;
+    }
+    p.hidden = false;
+    task.t += dt;
+    const bus = veh.kind === "bus";
+    const k = Math.min(1, task.t / (bus ? 1.0 : 0.9));
+    if (!task.from) {
+      const inn = traffic.vehicles.includes(veh) ? door(veh, true) : { x: p.x, z: p.z };
+      task.from = inn;
+      task.to = traffic.vehicles.includes(veh) ? door(veh) : { x: p.x, z: pavementOf(veh.road) };
+    }
+    p.x = task.from.x + (task.to.x - task.from.x) * k;
+    p.z = task.from.z + (task.to.z - task.from.z) * k;
+    p.vx = p.vz = 0;
+    p.want = headingOf(task.to.x - task.from.x, task.to.z - task.from.z);
+    p.lift = bus ? 0.38 * (1 - Math.min(1, k * 1.5)) : -0.12 * Math.sin(Math.PI * Math.min(1, 0.5 + k * 0.5));
+    if (bus) p.gesture = { take: 1 - k };
+    if (k >= 1) {
+      p.lift = 0;
+      veh.boarding = Math.max(0, (veh.boarding || 1) - 1);
+      stats.alighted = (stats.alighted || 0) + 1;
+      p.tasks.shift();
+    }
+  }
+  // an auto passenger pays the driver through the side before going: a note held out, change back
+  function payDriver(p, task, dt, t) {
+    const veh = task.veh;
+    if (!traffic.vehicles.includes(veh)) return p.tasks.shift();
+    const k = kerbSide(veh.road);
+    const at = { x: veh.x + veh.dir * 0.75, z: veh.lat + k * (veh.W / 2 + 0.35) };
+    if (!task.there) {
+      if (steer(p, at.x, at.z, p.pace * 0.8, dt, null) < 0.2) task.there = true;
+      return;
+    }
+    task.t += dt;
+    stand(p, dt, headingOf(0, -k));
+    p.lookAt = lookPt(veh.x + veh.dir * 0.9, veh.lat, 1.1);
+    p.char.showGear("note", task.t > 0.4 && task.t < 2.2);
+    p.gesture = task.t < 0.4 ? { pocket: 1 } : task.t < 2.2 ? { serve: 1 } : task.t < 3.0 ? { take: 0.6, pocket: task.t > 2.6 ? 1 : 0 } : {};
+    p.talk = task.t > 0.6 && task.t < 1.6 ? 0.3 : 0;
+    p.expr = "polite";
+    if (task.t > 3.3) p.tasks.shift();
+  }
+
   // phones while walking, a glance at a passer-by
   function walkingHabits(p, dt, t) {
     if (p.role === "keeper" || p.role === "guard") return;
@@ -1132,6 +1345,13 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       for (const p of people) others.push({ p, x: p.x, z: p.z, r: p.radius, vx: p.vx, vz: p.vz });
       for (const pole of poles) others.push({ p: null, x: pole.x, z: pole.z, r: pole.r, vx: 0, vz: 0 });
       for (const e of extra) others.push({ p: null, x: e.x, z: e.z, r: e.r || 0.35, vx: e.vx || 0, vz: e.vz || 0 });
+      // buses and autos: people waiting at the stops, and those arriving get off
+      transitT -= dt;
+      if (transitT < 0) {
+        transitT = range(4, 10) * (quality === "low" ? 2 : 1);
+        transitWaiter();
+      }
+      for (const veh of traffic.vehicles) if (veh.atStop && !veh.unloaded && (veh.kind === "bus" || veh.kind === "auto")) unload(veh);
       // new walkers keep the street busy
       const walking = people.filter((p) => p.tasks[0] && (p.tasks[0].type === "lane" || p.tasks[0].type === "goto")).length;
       arriveT -= dt;
@@ -1161,7 +1381,7 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
         }
         if (p.groundY !== undefined) p.y += (p.groundY - p.y) * Math.min(1, dt * 10);
         const [wx, wz] = local(p.x, p.z);
-        p.group.position.set(wx, p.y + 0.015, wz);
+        p.group.position.set(wx, p.y + 0.015 + (p.lift || 0), wz);
         p.group.rotation.y = phi + p.heading;
         q.setFromAxisAngle(UP, phi + p.heading);
         p.body.setNextKinematicTranslation({ x: wx, y: p.y, z: wz });
@@ -1169,7 +1389,7 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
         sphere.center.set(wx, p.y + 1, wz);
         const dist = cam.distanceTo(sphere.center);
         const visible = dist < 120 && frustum.intersectsSphere(sphere);
-        p.group.visible = visible;
+        p.group.visible = visible && !p.hidden;
         p.dtAcc += dt;
         if (!visible) continue;
         const every = dist < 35 ? 1 : dist < 70 ? 2 : 4;

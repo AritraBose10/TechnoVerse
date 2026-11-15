@@ -386,8 +386,10 @@ export function buildOpposite({ RAPIER, world, scene, mid, phi, M, forest, place
     for (let a = 0; a < nx; a++) {
       const p0 = P(a / nx, 0);
       const p1 = P((a + 1) / nx, 0);
-      const drop = 0.55 + Math.sin(a * 1.7 + i) * 0.1;
-      B.quad(mat, [[p0[0], p0[1] - drop, zf - 0.75], [p1[0], p1[1] - drop, zf - 0.75], p1, p0], [[p0[0], 0], [p1[0], 0], [p1[0], 1], [p0[0], 1]], [0, 0.4, -1]);
+      // the flap is tied up so its lower edge stays above head height (2.05 m and more): people walk
+      // under it, they never pass through it
+      const drop = Math.min(0.22 + Math.sin(a * 1.7 + i) * 0.05, Math.min(p0[1], p1[1]) - 2.05);
+      B.quad(mat, [[p0[0], p0[1] - drop, zf - 0.55], [p1[0], p1[1] - drop, zf - 0.55], p1, p0], [[p0[0], 0], [p1[0], 0], [p1[0], 1], [p0[0], 1]], [0, 0.4, -1]);
     }
     for (const [za, ya] of [[zf, hF], [zb, hB]]) B.box(bamboo, x0, x1, ya + 0.02, ya + 0.09, za - 0.035, za + 0.035); // ridge poles
     // back and side cloths

@@ -311,7 +311,7 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
     veh.lane = lane ?? veh.prefLane;
     veh.kerb = kind === "cycle" ? -0.5 * Math.sign(R.lanes[1] - R.lanes[0]) : 0; // cyclists keep to the kerb side of their lane
     veh.lat = veh.latTarget = state === "parked" ? R.park : R.lanes[veh.lane] + veh.kerb + (kind === "bike" ? range(-0.6, 0.6) : range(-0.12, 0.12));
-    if (state === "drive" && kind !== "bus" && kind !== "auto" && kind !== "bike" && kind !== "cycle" && rnd() < 0.14) veh.wantsPark = true;
+    // (no car pulls in to park: see above)
     if (veh.needsRider && kit) seatRiders(veh);
     if ((u.rider || u.live) && kit) u.riderSeated = true;
     // a body for the physics, so nobody walks or rides through a vehicle
@@ -330,8 +330,9 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
     (pool[veh.kind] ||= []).push(veh.mesh);
   }
 
-  // parked cars at the start: most spaces are taken
-  for (const road of ["near", "far"]) {
+  // Nothing is left parked on the street: every car keeps moving (Captain's call, 15 Nov). The
+  // parking code below stays for a later choice, but no car is parked at the start or pulls in.
+  for (const road of []) {
     for (const slot of slots[road]) {
       if (rnd() < 0.62) {
         const kind = pickW([["hatch", 4], ["sedan", 3], ["suv", 3], ["taxi", 1]]);
@@ -536,7 +537,12 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
       if (ahead < 18) veh.latTarget = veh.kind === "bus" ? R.lanes[0] + 0.5 * Math.sign(R.lanes[1] - R.lanes[0]) : R.lanes[0] - 0.4 * Math.sign(R.lanes[1] - R.lanes[0]); // tuck in to the kerb
       if ((veh.stopX - veh.x) * veh.dir - veh.L / 2 < 1.4 && veh.v < 0.1) {
         veh.stopFor -= dt;
-        if (veh.stopFor < 0) {
+        veh.atStop = true;
+        // it waits while anyone is still getting on or off (see people.js), up to half a minute more
+        if (veh.stopFor < 0 && (!(veh.boarding > 0) || veh.stopFor < -30)) {
+          veh.atStop = false;
+          veh.boarding = 0;
+          veh.unloaded = false;
           veh.stopX = null;
           veh.state = "leaving";
           veh.ind = 1;
@@ -638,6 +644,8 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
      * people: [{x, z, vx, w}] in the street's frame: anyone standing or walking on a carriageway.
      */
     signals,
+    stops: STOPS,
+    roads: ROADS,
     /** k: 0 by day .. 1 at night (lamps on). flow: traffic for the hour, 1 = normal daytime. */
     setTime(k, flow = 1) {
       night = k;
@@ -661,9 +669,11 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
       for (const road of ["near", "far"]) {
         spawnTimer[road] -= dt;
         if (spawnTimer[road] > 0) continue;
-        spawnTimer[road] = (range(1.6, 4.8) * (quality === "low" ? 1.6 : 1)) / Math.max(0.08, busy);
+        spawnTimer[road] = (range(1.4, 4.4) * (quality === "low" ? 1.6 : 1)) / Math.max(0.06, busy);
         const moving = all.filter((v) => v.state !== "parked").length;
-        if (moving >= MAX_MOVING * Math.min(1, 0.25 + busy * 0.75)) continue;
+        // how many vehicles the street holds at this hour: full at the office rush, a sixth of that
+        // in the small hours
+        if (moving >= MAX_MOVING * Math.max(0.12, Math.min(1, busy / 1.45))) continue;
         const R = ROADS[road];
         if (all.some((o) => o.road === road && Math.abs(o.x - R.from) < 16)) continue;
         const kind = pickW(Object.entries(TYPES).map(([k, ty]) => [k, ty.w]));
