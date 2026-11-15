@@ -26,6 +26,9 @@
   .swatches { display:flex; gap:8px; margin-top:6px; }
   .swatches button { width:30px; height:30px; border-radius:50%; border:2px solid transparent; padding:0; }
   .swatches button[aria-pressed=true] { border-color:#fff; }
+  .shirts { display:flex; gap:8px; margin-top:6px; }
+  .shirts button { padding:6px 10px; border-radius:8px; border:2px solid transparent; background:rgba(255,255,255,.12); color:inherit; cursor:pointer; }
+  .shirts button[aria-pressed=true] { border-color:#fff; }
   .primary { width:100%; padding:12px; border:0; border-radius:8px; background:var(--accent); color:#1b1300; font-weight:600; }
   #joinError { color:#ff9c9c; min-height:1.4em; margin:8px 0 0; font-size:13px; }
 
@@ -90,6 +93,9 @@
     <label>Department <input type="text" id="dept" maxlength="32" placeholder="e.g. CSE, 3rd year"></label>
     <label>Colour
       <span class="swatches" id="swatches"></span>
+    </label>
+    <label>T-shirt
+      <span class="shirts" id="shirts"><button type="button" data-shirt="tiu">TIU polo</button><button type="button" data-shirt="reboot">School of the Future</button></span>
     </label>
     <button class="primary" type="submit">Enter campus</button>
     <p id="joinError" role="alert"></p>

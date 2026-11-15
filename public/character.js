@@ -9,6 +9,7 @@
 // bones in a different resting pose, so each animation is converted when it loads.
 import * as THREE from "three";
 import { makeHelmet } from "/helmet.js";
+import { rebootPrints } from "/shirt.js";
 import { GLTFLoader } from "/vendor/jsm/loaders/GLTFLoader.js";
 import { clone as cloneSkinned } from "/vendor/jsm/utils/SkeletonUtils.js";
 
@@ -25,24 +26,72 @@ const cleanName = (n) => n.replace(/^mixamorig:?/, "");
 // Which child a bone "points at". Used to line up the two skeletons' resting poses.
 const POINTS_AT = { Hips: "Spine", Spine: "Spine1", Spine1: "Spine2", Spine2: "Neck", Neck: "Head", Head: "HeadTop_End", LeftHand: "LeftHandMiddle1", RightHand: "RightHandMiddle1" };
 
-function dressInUniform(model) {
+function dressInUniform(model, shirt = "tiu") {
+  const reboot = shirt === "reboot";
   model.traverse((o) => {
     if (!o.isMesh) return;
     const name = o.material.name;
     if (name === "Wolf3D_Headwear" || name === "Wolf3D_Beard") o.visible = false;
     if (name === "Wolf3D_Outfit_Bottom") {
       o.material.map = null;
-      o.material.color.set("#1d212b");
+      o.material.color.set(reboot ? "#2a2c31" : "#1d212b");
       o.material.roughness = 0.85;
     }
     if (name === "Wolf3D_Outfit_Top") {
       // Colours are decided from where each point sits on the body in its resting pose, so the
       // diagonal stays put on the shirt while the character moves.
-      const m = o.material;
+      const m = o.material.clone(); // each wearer's shirt is their own
+      o.material = m;
       m.map = null;
       m.color.set("#ffffff");
       m.roughness = 0.9;
       m.metalness = 0;
+      if (reboot) {
+        // The School of the Future polo: black cotton pique (a fine knit you can just see), the
+        // chest print on the wearer's left (10.5 x 3.2 cm), the big print on the back (25 x 42 cm,
+        // its top 8 cm below the collar). Prints are slightly raised and less rough than the knit.
+        const pr = rebootPrints();
+        m.roughness = 0.92;
+        m.onBeforeCompile = (shader) => {
+          shader.uniforms.uFront = { value: pr.front };
+          shader.uniforms.uBack = { value: pr.back };
+          shader.vertexShader = shader.vertexShader
+            .replace("#include <common>", "#include <common>\nvarying vec3 vRestPos;")
+            .replace("#include <begin_vertex>", "#include <begin_vertex>\nvRestPos = position;");
+          shader.fragmentShader = shader.fragmentShader
+            .replace("#include <common>", "#include <common>\nvarying vec3 vRestPos;\nuniform sampler2D uFront; uniform sampler2D uBack;")
+            .replace(
+              "#include <map_fragment>",
+              `
+              if (vRestPos.y < 0.9 && abs(vRestPos.x) < 0.3) discard; // shirt hem at the hips
+              // pique knit: tiny alternating cells
+              vec2 k = floor(vec2(vRestPos.x + vRestPos.z, vRestPos.y) * 900.0);
+              float knit = mod(k.x + k.y, 2.0);
+              vec3 shirt = vec3(0.016, 0.016, 0.018) * (0.9 + 0.2 * knit);
+              // chest print (wearer's left is +x; seen from the front, u runs with +x)
+              if (vRestPos.z > 0.03) {
+                vec2 uv = vec2((vRestPos.x - 0.032) / 0.105, (vRestPos.y - 1.355) / 0.032);
+                if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0) {
+                  vec4 p = texture2D(uFront, uv);
+                  shirt = mix(shirt, p.rgb, p.a);
+                }
+              }
+              // back print (seen from behind, u runs with -x)
+              if (vRestPos.z < -0.02) {
+                vec2 uv = vec2((0.125 - vRestPos.x) / 0.25, (vRestPos.y - 1.03) / 0.42);
+                if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0) {
+                  vec4 p = texture2D(uBack, uv);
+                  shirt = mix(shirt, p.rgb, p.a);
+                }
+              }
+              diffuseColor.rgb = shirt;
+              `,
+            );
+        };
+        m.customProgramCacheKey = () => "shirt-reboot";
+        m.needsUpdate = true;
+        return;
+      }
       m.onBeforeCompile = (shader) => {
         shader.vertexShader = shader.vertexShader
           .replace("#include <common>", "#include <common>\nvarying vec3 vRestPos;")
@@ -809,7 +858,7 @@ export function makeCharacter(kit, opts = {}) {
   });
   const look = opts.look || {};
   const rocketbox = kit.kind === "rocketbox";
-  if (opts.uniform) dressInUniform(model);
+  if (opts.uniform) dressInUniform(model, opts.shirt);
   else if (!rocketbox) dressInLook(model, look);
   // hair colour, or none
   const hairMesh = rocketbox ? null : model.getObjectByName("Hair");

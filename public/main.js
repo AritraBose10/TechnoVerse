@@ -304,7 +304,7 @@ function showRemoteBike(a, dt, roll) {
 async function attachCharacter(a, mine = false) {
   const kit = await kitLoading;
   if (!kit || a.removed) return;
-  const c = makeCharacter(kit, { uniform: true, gear: [{ kind: "helmet", color: mine ? "#1b1d22" : ["#1b1d22", "#c41e24", "#e8e8e8", "#1e3a8a"][a.id.length % 4] }] });
+  const c = makeCharacter(kit, { uniform: true, shirt: a.shirt, gear: [{ kind: "helmet", color: mine ? "#1b1d22" : ["#1b1d22", "#c41e24", "#e8e8e8", "#1e3a8a"][a.id.length % 4] }] });
   c.showGear("helmet", false); // worn on a motorcycle
   a.char = c;
   if (mine) {
@@ -873,6 +873,21 @@ for (const ev of ["pointerup", "pointercancel"]) jumpBtn.addEventListener(ev, ()
 
 // ---------- Join form ----------
 let chosenColor = COLORS[Math.floor(Math.random() * COLORS.length)];
+// which T-shirt (see shirt.js): remembered on this device
+let chosenShirt = "tiu";
+try {
+  chosenShirt = localStorage.getItem("tv-shirt") || "tiu";
+} catch {}
+for (const b of document.querySelectorAll("#shirts button")) {
+  b.setAttribute("aria-pressed", b.dataset.shirt === chosenShirt);
+  b.addEventListener("click", () => {
+    chosenShirt = b.dataset.shirt;
+    try {
+      localStorage.setItem("tv-shirt", chosenShirt);
+    } catch {}
+    for (const o of document.querySelectorAll("#shirts button")) o.setAttribute("aria-pressed", o === b);
+  });
+}
 const swatches = $("#swatches");
 for (const c of COLORS) {
   const b = document.createElement("button");
@@ -890,7 +905,7 @@ $("#joinForm").addEventListener("submit", (e) => {
   e.preventDefault();
   if (ws && ws.readyState <= 1) return;
   $("#joinError").textContent = "";
-  connect({ name: $("#name").value, dept: $("#dept").value, color: chosenColor });
+  connect({ name: $("#name").value, dept: $("#dept").value, color: chosenColor, shirt: chosenShirt });
 });
 
 // ---------- Main loop ----------
