@@ -118,13 +118,19 @@ world.timestep = STEP;
 const campus = await (await fetch("/campus.json")).json();
 const worldInfo = buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel });
 const { places, props, focus, entranceYaw, animate: animateWorld, captureReflections } = worldInfo;
-// ?nav=1: build the walking navmesh and show it (debug view); handle on __tiu.nav
+// The walking navmesh and Detour crowd (nav.js): built from the fixed colliders in the background; the
+// people wait for it. ?nav=1 also shows the mesh as a green overlay (debug view). Handle: __tiu.nav
 let nav = null;
-if (new URLSearchParams(location.search).get("nav") === "1") {
-  const { buildNav } = await import("/nav.js");
-  nav = await buildNav({ RAPIER, world, local: worldInfo.local, toLocal: worldInfo.toLocal, scene, debug: true });
-  scene.add(nav.debugMesh);
-}
+const bikes = []; // parked two-wheelers
+let riding = null; // { bike, r }: the machine I am on
+const bikeColliders = new Set(); // parked two-wheelers are not part of the mesh: they carve obstacles in it
+const navDebug = new URLSearchParams(location.search).get("nav") === "1";
+const navLoading = import("/nav.js").then(({ buildNav }) => buildNav({ RAPIER, world, local: worldInfo.local, toLocal: worldInfo.toLocal, scene, debug: navDebug, skip: (c) => bikeColliders.has(c.handle) })).then((n) => {
+  nav = n;
+  if (navDebug) scene.add(n.debugMesh);
+  for (const b of bikes) if (riding?.bike !== b && !b.navObs) bikeObstacle(b);
+  return n;
+});
 if (HIGH) {
   composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(innerWidth, innerHeight, { type: THREE.HalfFloatType, samples: 4 }));
   composer.setPixelRatio(renderer.getPixelRatio());
@@ -232,7 +238,7 @@ const kitLoading = loadCharacterKit(renderer).catch((err) => {
 const streetLife = new URLSearchParams(location.search).get("life") !== "off";
 const traffic = streetLife ? buildTraffic({ scene, world, RAPIER, local: worldInfo.local, phi: worldInfo.phi, kitLoading, quality: HIGH ? "high" : "low" }) : null;
 const bodiesLoading = streetLife ? loadCrowdBodies(renderer, HIGH ? 12 : 8, HIGH ? 99 : 10) : null;
-const crowd = streetLife ? buildPeople({ scene, world, RAPIER, local: worldInfo.local, phi: worldInfo.phi, spots: worldInfo.spots, kitLoading, bodiesLoading, traffic, quality: HIGH ? "high" : "low", camera }) : null;
+const crowd = streetLife ? buildPeople({ scene, world, RAPIER, local: worldInfo.local, phi: worldInfo.phi, spots: worldInfo.spots, kitLoading, bodiesLoading, traffic, quality: HIGH ? "high" : "low", camera, nav: navLoading }) : null;
 // the real time of day in Salt Lake: sun, moon, sky, lamps (see daylight.js)
 const daylight = buildDaylight({ scene, renderer, sun, hemi, sunOffset: SUN_OFFSET, worldInfo, traffic, high: HIGH, clockEl: document.getElementById("clock") });
 let lastLocal = null;
@@ -251,15 +257,7 @@ function updateStreet(dt, pos) {
     const [ax, az] = worldInfo.toLocal(a.group.position.x, a.group.position.z);
     extra.push({ x: ax, z: az, r: a.bikeOn ? 0.7 : 0.35, vx: 0, vz: 0 });
   }
-  // parked bicycles and motorcycles: people walk round them (a circle at each wheel)
-  for (const b of bikes) {
-    if (riding?.bike === b) continue;
-    const half = b.model.size.L / 2 - 0.35;
-    for (const s of [-1, 1]) {
-      const [bx, bz] = worldInfo.toLocal(b.x - Math.sin(b.heading) * half * s, b.z - Math.cos(b.heading) * half * s);
-      extra.push({ x: bx, z: bz, r: 0.42, vx: 0, vz: 0 });
-    }
-  }
+  // (parked bicycles and motorcycles are obstacles in the navmesh, see bikeObstacle)
   const onRoad = crowd.onRoad();
   for (const e of extra) if ((e.z > 8.4 && e.z < 15.4) || (e.z > 19.4 && e.z < 25.6)) onRoad.push({ x: e.x, z: e.z, vx: e.vx, w: e.r > 0.5 ? 0.9 : 0.7 });
   for (const b of bikes) {
@@ -268,6 +266,7 @@ function updateStreet(dt, pos) {
     if ((bz > 8.4 && bz < 15.4) || (bz > 19.4 && bz < 25.6)) onRoad.push({ x: bx, z: bz, vx: 0, w: 0.9 });
   }
   traffic.update(dt, onRoad, t, [lx, lz]);
+  if (nav) nav.update(dt);
   crowd.update(dt, t, extra);
 }
 // Someone else on a bike: a lighter copy of the bike under their figure, leaning as they lean.
@@ -1006,7 +1005,6 @@ function buildRide(code, opts = {}) {
   return kind === "bicycle" ? buildBicycle({ design, ...opts }) : buildMotorcycle({ design, ...opts });
 }
 const rideCode = (model) => RIDE_KINDS.findIndex(([k, d]) => k === model.kind && d === model.design) + 1;
-const bikes = [];
 function parkBike(b, x, y, z, heading) {
   Object.assign(b, { x, y, z, heading });
   scene.add(b.stand);
@@ -1018,6 +1016,23 @@ function parkBike(b, x, y, z, heading) {
   b.model.pose({ steerAngle: b.model.spec.parkLean ? -0.3 : 0, kickstand: true });
   const { L, H } = b.model.size;
   b.collider = world.createCollider(RAPIER.ColliderDesc.cuboid(0.24, H / 2, L / 2 - 0.05).setTranslation(x, y + H / 2, z).setRotation({ x: 0, y: Math.sin(heading / 2), z: 0, w: Math.cos(heading / 2) }));
+  bikeColliders.add(b.collider.handle);
+  bikeObstacle(b);
+}
+// A parked machine blocks the walkers' navmesh: three circles along its length (a wheel at each end
+// and the middle), wide enough that a walker's body stays clear of it. Taking it frees the spot.
+function bikeObstacle(b) {
+  unbikeObstacle(b);
+  if (!nav) return; // the navmesh loads in the background: it adds the parked ones when it is ready
+  const half = b.model.size.L / 2 - 0.3;
+  b.navObs = [-1, 0, 1].map((s) => {
+    const [bx, bz] = worldInfo.toLocal(b.x - Math.sin(b.heading) * half * s, b.z - Math.cos(b.heading) * half * s);
+    return nav.addObstacle(bx, bz, 0.6);
+  });
+}
+function unbikeObstacle(b) {
+  if (b.navObs && nav) for (const id of b.navObs) nav.removeObstacle(id);
+  b.navObs = null;
 }
 function addRide(model, lx, lz, turn = Math.PI / 2) {
   const b = { model, stand: new THREE.Group() };
@@ -1046,7 +1061,6 @@ function addRide(model, lx, lz, turn = Math.PI / 2) {
   addRide(buildBicycle({ design: "ladies", color: "#1f8a8a" }), 14.5, 25.2, -Math.PI * 0.35);
 }
 const engine = makeEngineSound();
-let riding = null; // { bike, r }
 const rideRig = new THREE.Group(); // leans the bike and rider together about the tyre contact line
 let rideGrade = 0;
 let landBob = 0;
@@ -1422,6 +1436,7 @@ function toggleRide() {
   const b = nearestBike();
   if (!b) return;
   world.removeCollider(b.collider, true);
+  unbikeObstacle(b);
   scene.remove(b.stand);
   b.stand.remove(b.model.group);
   b.model.group.rotation.set(0, 0, 0);
@@ -1828,13 +1843,21 @@ frame();
 
 // Small handle for automated tests and debugging in the console.
 window.__tiu = {
-  nav,
+  get nav() {
+    return nav;
+  },
+  world,
+  RAPIER,
+  toLocal: worldInfo.toLocal,
+  local: worldInfo.local,
+  spots: worldInfo.spots,
   // free camera for screenshots: __tiu.cam(x, y, z, lookX, lookY, lookZ); __tiu.cam() to go back
   bikes: () => bikes.map((b) => ({ x: b.x, y: b.y, z: b.z, heading: b.heading, kind: b.model.kind, design: b.model.design })),
   // move a parked machine somewhere (street frame), for testing: __tiu.moveBike(i, lx, lz, turn)
   moveBike(i, lx, lz, turn = Math.PI / 2) {
     const b = bikes[i];
     world.removeCollider(b.collider, true);
+    unbikeObstacle(b);
     scene.remove(b.stand);
     const [x, z] = worldInfo.local(lx, lz);
     parkBike(b, x, 0, z, entranceYaw + turn);
@@ -1892,6 +1915,7 @@ window.__tiu = {
   traffic: () => traffic && traffic.vehicles.map((v) => ({ kind: v.kind, road: v.road, x: +v.x.toFixed(1), lat: +v.lat.toFixed(2), v: +v.v.toFixed(2), state: v.state, ind: v.ind })),
   crowd: () => crowd && crowd.people.map((p) => ({ role: p.role, x: +p.x.toFixed(1), z: +p.z.toFixed(2), task: p.tasks[0]?.type, act: p.tasks[0]?.act, left: p.tasks.length, sp: +p.speed.toFixed(2), body: p.bodyName })),
   crowdStats: () => crowd && crowd.stats,
+  people: () => crowd && crowd.people, // the live person objects (tests)
   deals: () => crowd && crowd.deals(),
   bodies: () => crowdBodies.map((b) => b.name),
   vehicleDetail: () => traffic && traffic.vehicles.filter((v) => v.state !== "parked" && v.state !== "drive").map((v) => ({ kind: v.kind, road: v.road, state: v.state, x: +v.x.toFixed(2), lat: +v.lat.toFixed(2), latT: +v.latTarget.toFixed(2), v: +v.v.toFixed(2), slot: v.slot && v.slot.x, stopX: v.stopX })),

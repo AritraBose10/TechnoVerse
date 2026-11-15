@@ -12,6 +12,11 @@
 //   - Walkers keep to their side, step round each other, lamp posts and you, and slow when they
 //     cannot pass. Each has their own pace, stride, height, build, clothes and habits (a call, a
 //     glance at the phone), so no two move alike.
+// Everyone who walks is a Detour crowd agent on the street's navmesh (nav.js): paths round railings,
+// walls, stalls and parked bikes come from the mesh, and the crowd keeps them apart; the agent's
+// height is the floor's, so nobody stands on a bike. People who step off the mesh on purpose (up
+// the university steps, into a bus or auto, behind a stall counter, onto a bench) leave the crowd for
+// that stretch and are moved by script, as before.
 // Positions are in the street's own frame ("local"): x along the street, z across it toward the
 // far side. A heading t faces local (-sin t, -cos t).
 import * as THREE from "three";
@@ -20,6 +25,8 @@ import { officeLook, studentLook, localLook, shopkeeperLook, guardLook } from "/
 import { pickBody } from "/crowdbodies.js";
 import { varyBody } from "/character.js";
 
+const CROWD_R = 0.22; // a walker's width in the crowd (the mesh keeps their bodies 0.27 m clear of walls)
+const STAND_R = 0.13; // ... and when standing about
 const DOMAIN = [-130, 150]; // walkers appear and leave beyond these ends of the street
 const NEAR_FOOT = { lo: 6.95, hi: 8.2 }; // between the university's railing and the kerb
 const FAR_FOOT = { lo: 26.0, hi: 29.1 }; // between the far kerb and the boundary wall
@@ -30,12 +37,14 @@ const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 const headingOf = (dx, dz) => Math.atan2(-dx, -dz);
 
-export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoading, bodiesLoading, traffic, quality = "high", camera, seed = 31 }) {
+export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoading, bodiesLoading, traffic, quality = "high", camera, nav: navLoading, seed = 31 }) {
   let s = seed;
   const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
   const range = (a, b) => a + rnd() * (b - a);
   const chance = (p) => rnd() < p;
   const low = quality === "low";
+  let nav = null; // the navmesh and crowd, once built
+  navLoading?.then((n) => (nav = n));
   const WALKERS = low ? 10 : 26;
 
   // ---------- where things are ----------
@@ -117,6 +126,31 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     const hit = world.castRay(ray, 4, true, undefined, undefined, undefined, undefined, staticOnly);
     return hit ? 3 - hit.toi : 0.04;
   }
+  // is there a fixed solid at chest height at this spot (street frame)? scripted moves must not enter one
+  const chest = new RAPIER.Ball(0.22);
+  const noRot = { x: 0, y: 0, z: 0, w: 1 };
+  function solidAt(x, z) {
+    const [wx, wz] = local(x, z);
+    let hit = false;
+    world.intersectionsWithShape({ x: wx, y: 1.0, z: wz }, noRot, chest, (c) => {
+      if (c.isSensor()) return true;
+      const b = c.parent();
+      if (!b || b.isFixed()) hit = true;
+      return !hit;
+    });
+    return hit;
+  }
+  // the nearest spot to (x, z) with nothing solid in it
+  function clearSpot(x, z) {
+    if (!solidAt(x, z)) return [x, z];
+    for (let r = 0.15; r <= 1.5; r += 0.15) {
+      for (let k = 0; k < 12; k++) {
+        const a = (k / 12) * Math.PI * 2;
+        if (!solidAt(x + Math.cos(a) * r, z + Math.sin(a) * r)) return [x + Math.cos(a) * r, z + Math.sin(a) * r];
+      }
+    }
+    return [x, z];
+  }
   const toWorld = (x, z, y) => {
     const [wx, wz] = local(x, z);
     return new THREE.Vector3(wx, y, wz);
@@ -148,7 +182,19 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
   const stats = { arrived: 0, vanished: 0, crossed: 0 };
   let kit = null;
   const LOOKS = { office: officeLook, student: studentLook, local: localLook, keeper: shopkeeperLook, guard: guardLook, vendor: shopkeeperLook };
-  function person(role, x, z, heading = 0) {
+  // mesh: true = must start on the walkable mesh (snapped to it; null when there is none, i.e. skip this
+// spawn), "try" = on the mesh if the spot is on it, else a scripted person, false = scripted
+function person(role, x, z, heading = 0, mesh = true) {
+  let snap = null;
+  if (mesh && nav) {
+    snap = snapPt(x, z);
+    if (snap && Math.hypot(snap.x - x, snap.z - z) > (mesh === true ? 1.6 : 0.35)) snap = null;
+    if (!snap && mesh === true) return null;
+  }
+  if (snap) {
+    x = snap.x;
+    z = snap.z;
+  }
     const look = LOOKS[role](rnd);
     // a photographic body when one has loaded: women and men alike, except at the stalls and gates
     const sex = role === "keeper" || role === "guard" || role === "vendor" ? "m" : chance(role === "local" ? 0.38 : 0.45) ? "f" : "m";
@@ -185,7 +231,11 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       body,
       x,
       z,
-      y: groundAt(x, z),
+      y: snap ? snap.y - 0.04 : groundAt(x, z),
+      ag: null, // crowd agent index while on the mesh
+      tgt: null,
+      mt: null,
+      joinT: 0,
       groundT: rnd() * 0.4,
       heading,
       want: heading,
@@ -221,9 +271,14 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       cup: false,
     };
     people.push(p);
+    if (snap) {
+      p.ag = nav.addAgent(snap.x, snap.z, { radius: CROWD_R, maxSpeed: p.pace, separationWeight: 0.4, queryRange: 2.2 });
+      if (p.ag == null) stats.noAgent = (stats.noAgent || 0) + 1;
+    }
     return p;
   }
   function remove(p) {
+    leave(p);
     scene.remove(p.group);
     world.removeRigidBody(p.body);
     for (const list of [customerSpots, benchSeats]) for (const sp of list) if (sp.taken === p) sp.taken = null;
@@ -352,7 +407,7 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     let p;
     if (source === "university" && !prefill) {
       const o = range(-1.3, 1.3);
-      p = person(role, TIU_DOOR.x + o, TIU_DOOR.z, Math.PI);
+      p = person(role, TIU_DOOR.x + o, TIU_DOOR.z, Math.PI, false); // out of the door: down the steps by script, onto the mesh at the foot
       const gx = range(9.3, 14.7);
       p.tasks.push(goto(TIU_DOOR.x + o, 2.6, { free: true }), goto(TIU_DOOR.x + o, 3.9, { free: true }), goto(gx, 6.0, { free: true }), goto(gx, 7.45, { setSide: "near" }));
       p.side = "near";
@@ -360,7 +415,7 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       p.tasks.push(...planFrom(p, "near", gx, purpose));
     } else if (source === "institute" && !prefill) {
       const gx = range(9, 15);
-      p = person(role, gx, 30.8, 0);
+      p = person(role, gx, 30.8, 0, false); // out of the institute gate
       p.tasks.push(goto(gx, 28.4, { free: true }), goto(gx, 27.2, { setSide: "far" }));
       p.side = "far";
       p.tasks.push(...planFrom(p, "far", gx, pickW(PURPOSES[role].filter(([k]) => k !== "university" || role !== "local"))));
@@ -369,9 +424,9 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       const dir = chance(0.5) ? 1 : -1;
       const x = prefill ? range(DOMAIN[0] + 10, DOMAIN[1] - 10) : dir > 0 ? DOMAIN[0] - 2 : DOMAIN[1] + 2;
       p = person(role, x, laneZ(side, x, dir), headingOf(dir, 0));
+      if (!p) return null; // nowhere on the mesh to start from
       p.side = side;
       p.tasks.push(...planFrom(p, side, x, pickW(PURPOSES[role])));
-      if (prefill) p.z = laneZ(side, x, Math.sign(p.tasks[0]?.xTo - x || dir)) + p.offset;
     }
     return p;
   }
@@ -379,22 +434,24 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
   // ---------- the people who stay put ----------
   const residents = [];
   function settle() {
+    for (const g of groups) for (const sl of g.slots) [sl.x, sl.z] = clearSpot(sl.x, sl.z); // not inside a pillar
+    for (const sp of [...customerSpots, ...benchSeats]) if (solidAt(sp.x, sp.z)) sp.taken = "blocked"; // a parked bike in the way
     for (const k of keepers) {
-      const p = person("keeper", k.x, k.z, 0);
+      const p = person("keeper", k.x, k.z, 0, false); // behind the counter: scripted
       p.tasks.push({ type: "keeper", k, act: "idle", t: range(1, 4), target: null });
       residents.push(p);
     }
     {
       const [cx, cz] = spots.cart;
-      const p = person("vendor", cx + 0.2, cz + 0.95, 0);
+      const p = person("vendor", cx + 0.2, cz + 0.95, 0, "try");
       p.tasks.push({ type: "vendor", t: 0 });
       const [rx, rz] = spots.rickshaw;
-      const q = person("local", rx - 0.9, rz + 0.95, headingOf(1, 0));
+      const q = person("local", rx - 0.9, rz + 0.95, headingOf(1, 0), "try");
       q.tasks.push({ type: "vendor", t: 0, arms: true });
       residents.push(p, q);
     }
     for (const [gx, gz, face] of [[17.7, 4.75, Math.PI], [15.7, 30.3, 0]]) {
-      const p = person("guard", gx, gz, face);
+      const p = person("guard", gx, gz, face, "try");
       p.tasks.push({ type: "guard", home: [gx, gz], face, t: range(10, 30) });
       residents.push(p);
     }
@@ -403,7 +460,7 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       for (const sl of g.slots) {
         if (chance(0.15)) continue;
         const role = g.kind === "mixed" ? pickW([["student", 2], ["office", 1], ["local", 1]]) : g.kind;
-        const p = person(role, sl.x, sl.z, headingOf(g.c[0] - sl.x, g.c[1] - sl.z));
+        const p = person(role, sl.x, sl.z, headingOf(g.c[0] - sl.x, g.c[1] - sl.z), "try");
         sl.taken = p;
         p.tasks.push({ type: "group", g, slot: sl, T: range(20, 200) });
         const near = g.c[1] < 20;
@@ -417,9 +474,9 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       }
     }
     for (const sp of customerSpots) {
-      if (!chance(low ? 0.25 : 0.45)) continue;
+      if (sp.taken || !chance(low ? 0.25 : 0.45)) continue;
       const role = pickW([["office", 3], ["student", 3], ["local", 3]]);
-      const p = person(role, sp.x, sp.z, sp.face);
+      const p = person(role, sp.x, sp.z, sp.face, "try");
       sp.taken = p;
       p.side = "far";
       p.served = true;
@@ -430,8 +487,8 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       p.tasks.push(...planFrom(p, "far", opening || sp.x, chance(0.5) && role === "student" ? "university" : "pass").filter((t) => t.type !== "customer"));
     }
     for (const seat of benchSeats) {
-      if (!chance(low ? 0.3 : 0.55)) continue;
-      const p = person(pickW([["local", 3], ["office", 1], ["student", 2]]), seat.x, seat.z, 0);
+      if (seat.taken || !chance(low ? 0.3 : 0.55)) continue;
+      const p = person(pickW([["local", 3], ["office", 1], ["student", 2]]), seat.x, seat.z, 0, "try");
       seat.taken = p;
       p.side = "far";
       p.tasks.push({ type: "bench", seat, T: range(20, 160) }, goto(seat.x, 27.4, { free: true }), goto(seat.stall.opening, 26.32, { free: true }), goto(seat.stall.opening, 25.62, { free: true }), lane("far", -1, DOMAIN[0] - 5), { type: "vanish" });
@@ -488,9 +545,22 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     const k = 1 - Math.exp(-dt * 5);
     p.vx += (fx - p.vx) * k;
     p.vz += (fz - p.vz) * k;
+    const ox = p.x;
+    const oz = p.z;
     p.x += p.vx * dt;
     p.z += p.vz * dt;
     solidPush(p);
+    if (p.ag == null && solidAt(p.x, p.z) && !solidAt(ox, oz)) {
+      // a pillar or a wall in the way of a scripted move: slide along it, or stop
+      if (!solidAt(p.x, oz)) p.z = oz;
+      else if (!solidAt(ox, p.z)) p.x = ox;
+      else {
+        p.x = ox;
+        p.z = oz;
+      }
+      p.vx = (p.x - ox) / Math.max(dt, 1e-3);
+      p.vz = (p.z - oz) / Math.max(dt, 1e-3);
+    }
     if (clampSide) {
       const b = bounds(clampSide, p.x);
       p.z = clamp(p.z, b.lo, b.hi);
@@ -514,12 +584,173 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     }
   }
   function stand(p, dt, face) {
+    if (p.ag != null) {
+      // on the mesh: hold still, but stay in the crowd so others walk round
+      pin(p);
+      if (face !== undefined) p.want = face;
+      return;
+    }
     const k = 1 - Math.exp(-dt * 6);
     p.vx -= p.vx * k;
     p.vz -= p.vz * k;
     p.x += p.vx * dt;
     p.z += p.vz * dt;
     if (face !== undefined) p.want = face;
+  }
+
+  // ---------- the navmesh crowd ----------
+  // the nearest point of the street's main walkable region to (x, z), or null
+  function snapPt(x, z) {
+    const c = nav.closest(x, z);
+    if (c && nav.connected(c.x, c.z)) return c;
+    let best = null;
+    let bd = 1e9;
+    for (const r of [0.5, 1, 1.5]) {
+      for (let k = 0; k < 8; k++) {
+        const a = (k * Math.PI) / 4;
+        const q = nav.closest(x + Math.cos(a) * r, z + Math.sin(a) * r, 0, { x: 0.3, y: 3, z: 0.3 });
+        if (!q || !nav.connected(q.x, q.z)) continue;
+        const d = Math.hypot(q.x - x, q.z - z);
+        if (d < bd) {
+          bd = d;
+          best = q;
+        }
+      }
+      if (best) break;
+    }
+    return best;
+  }
+  // put a person on the crowd at the mesh point nearest (x, z); false when there is none close
+  function join(p, x, z) {
+    const c = snapPt(x, z);
+    if (!c || Math.hypot(c.x - x, c.z - z) > 1.6) return false;
+    const i = nav.addAgent(c.x, c.z, { radius: CROWD_R, maxSpeed: p.pace, separationWeight: 0.4, queryRange: 2.2 });
+    if (i == null) return false;
+    p.ag = i;
+    p.x = c.x;
+    p.z = c.z;
+    p.groundY = c.y - 0.04;
+    p.noRay = false;
+    p.tgt = null;
+    p.jam = 0;
+    return true;
+  }
+  function tryJoin(p, dt) {
+    p.joinT -= dt;
+    if (p.joinT > 0) return false;
+    p.joinT = 0.4;
+    const at = p.joinAt || p;
+    if (!join(p, at.x, at.z)) return false;
+    p.joinAt = null;
+    return true;
+  }
+  // off the mesh for a while (a scripted move): out of the crowd
+  function leave(p) {
+    if (p.ag == null) return;
+    p.lastMesh = { x: p.x, z: p.z, y: p.y };
+    nav.removeAgent(p.ag);
+    p.ag = null;
+    p.tgt = null;
+  }
+  // Standing still: the agent stops, and narrows (people at a counter or a stop leave room to squeeze past)
+  function pin(p) {
+    if (p.ag == null) return;
+    nav.setRadius(p.ag, STAND_R);
+    if (p.tgt) {
+      nav.stop(p.ag);
+      p.tgt = null;
+    }
+  }
+  // Walking: full width, except for someone held up for a while, who turns sideways and slips past
+  function walkWidth(p, dt) {
+    if (p.ag == null) return;
+    p.slowT = p.speed < 0.15 ? (p.slowT || 0) + dt : 0;
+    if (p.slowT > 1) {
+      p.squeeze = 6;
+      p.slowT = 0;
+    }
+    if (p.squeeze > 0) p.squeeze -= dt;
+    nav.setRadius(p.ag, p.squeeze > 0 ? 0.04 : CROWD_R);
+  }
+  function follow(p, tx, tz, speed) {
+    if (!(p.squeeze > 0)) nav.setRadius(p.ag, CROWD_R);
+    nav.setSpeed(p.ag, speed);
+    if (!p.tgt || Math.hypot(p.tgt.x - tx, p.tgt.z - tz) > 0.2) {
+      nav.setTarget(p.ag, tx, tz);
+      p.tgt = { x: tx, z: tz };
+    }
+  }
+  // Walk toward a point along the mesh. Targets off the mesh by more than a metre (up the university
+  // steps, behind a counter) are walked straight, out of the crowd. Returns the distance left.
+  function moveTo(p, tx, tz, speed, dt) {
+    if (!p.mt || Math.abs(p.mt.x - tx) > 0.05 || Math.abs(p.mt.z - tz) > 0.05) {
+      const c = snapPt(tx, tz);
+      p.mt = { x: tx, z: tz, c, script: !c || Math.hypot(c.x - tx, c.z - tz) > 1 };
+    }
+    const m = p.mt;
+    if (m.script) {
+      leave(p);
+      return steer(p, tx, tz, speed, dt, null);
+    }
+    if (p.ag == null && !tryJoin(p, dt)) {
+      steer(p, m.c.x, m.c.z, speed, dt, null); // not on the mesh yet: straight toward it
+      return Math.hypot(m.c.x - p.x, m.c.z - p.z) + 0.5;
+    }
+    follow(p, m.c.x, m.c.z, speed);
+    return Math.hypot(m.c.x - p.x, m.c.z - p.z);
+  }
+  // the crowd's picture of where an agent is, each frame
+  function syncAgent(p, dt) {
+    const s = nav.agentState(p.ag);
+    if (!s) {
+      p.ag = null;
+      return;
+    }
+    p.x = s.x;
+    p.z = s.z;
+    const k = 1 - Math.exp(-dt * 10);
+    p.vx += (s.vx - p.vx) * k;
+    p.vz += (s.vz - p.vz) * k;
+    p.groundY = s.y - 0.04;
+  }
+  // people who have not moved for a while in a walking task: ask for the path again, then give up on it
+  function watchdog(p, dt, task) {
+    p.pw = (p.pw || 0) + dt;
+    if (p.pw < 5) return;
+    const moved = Math.hypot(p.x - (p.px ?? p.x), p.z - (p.pz ?? p.z));
+    p.px = p.x;
+    p.pz = p.z;
+    p.pw = 0;
+    if (moved >= 0.3) {
+      p.jam = 0;
+      return;
+    }
+    p.jam = (p.jam || 0) + 1;
+    if (p.jam === 1) {
+      p.tgt = null;
+      p.mt = null;
+      if (p.ag != null) nav.stop(p.ag);
+    } else if (p.jam >= 3) {
+      p.jam = 0;
+      stats.skipped = (stats.skipped || 0) + 1;
+      p.tgt = null;
+      p.mt = null;
+      if (task.type === "goto") p.tasks.shift();
+      else p.offset = range(-0.6, 0.6);
+    }
+  }
+  // players and the like, as still agents in the crowd, so walkers go round them
+  const proxies = [];
+  function syncProxies(extra) {
+    for (let i = 0; i < Math.max(extra.length, proxies.length); i++) {
+      const e = extra[i];
+      const c = e && nav.closest(e.x, e.z, 0, { x: 0.5, y: 3, z: 0.5 });
+      if (!c) {
+        if (proxies[i] != null) nav.removeAgent(proxies[i]);
+        proxies[i] = null;
+      } else if (proxies[i] == null) proxies[i] = nav.addAgent(c.x, c.z, { radius: 0.35, maxSpeed: 0.05 });
+      else nav.teleport(proxies[i], c.x, c.z);
+    }
   }
 
   // ---------- behaviour ----------
@@ -564,18 +795,44 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
           p.offset = range(-0.6, 0.6);
           p.stuck = 0;
         }
-        const z = laneZ(task.side, p.x, task.dir) + p.offset * (task.side === "near" ? 0.6 : 1);
-        steer(p, p.x + task.dir * 2.5, z, p.pace, dt, task.side);
-        if ((p.x - task.xTo) * task.dir >= 0) p.tasks.shift();
+        // (in front of the stalls the only way is the strip along the kerb: keep to its kerb side)
+        const off = laneZ(task.side, p.x, task.dir) < 26.5 && task.side === "far" ? 0 : p.offset * (task.side === "near" ? 0.6 : 1);
+        if (p.ag == null && !tryJoin(p, dt)) {
+          steer(p, p.x + task.dir * 2.5, laneZ(task.side, p.x, task.dir) + off, p.pace, dt, task.side);
+        } else {
+          // aim at a point a few metres ahead along the footpath, on this person's line
+          const t = p.tgt;
+          if (!t || t.dir !== task.dir || t.off !== off || (!t.final && (t.x - p.x) * task.dir < 2.2)) {
+            let xa = p.x + task.dir * 6;
+            const final = (xa - task.xTo) * task.dir >= 0;
+            if (final) xa = task.xTo;
+            const c = snapPt(xa, laneZ(task.side, xa, task.dir) + off) || snapPt(xa, task.side === "near" ? 7.6 : 27.2);
+            if (c) {
+              nav.setSpeed(p.ag, p.pace);
+              nav.setTarget(p.ag, c.x, c.z);
+              p.tgt = { x: c.x, z: c.z, dir: task.dir, off, final };
+              p.mt = null;
+            }
+          }
+        }
+        walkWidth(p, dt);
+        if ((p.x - task.xTo) * task.dir >= -0.4) {
+          p.tasks.shift();
+          p.tgt = null;
+        } else watchdog(p, dt, task);
         walkingHabits(p, dt, t);
         break;
       }
       case "goto": {
-        const d = steer(p, task.x, task.z, task.road ? p.pace * 1.2 : p.pace * (task.free ? 0.85 : 1), dt, null);
-        if (d < (task.free ? 0.12 : 0.35)) {
+        const tol = task.free ? 0.12 : 0.35;
+        const d = moveTo(p, task.x, task.z, task.road ? p.pace * 1.2 : p.pace * (task.free ? 0.85 : 1), dt);
+        walkWidth(p, dt);
+        // arrived, or as near as the crowd will let them get
+        task.still = p.speed < 0.08 && d < Math.max(0.5, tol * 3) ? (task.still || 0) + dt : 0;
+        if (d < tol || task.still > 0.7) {
           if (task.setSide) p.side = task.setSide;
           p.tasks.shift();
-        }
+        } else watchdog(p, dt, task);
         if (task.road) p.lookAt = lookPt(p.x + (p.z < 17 ? -12 : 12), p.z < 17 ? 12 : 22, 1.2);
         else walkingHabits(p, dt, t);
         break;
@@ -647,9 +904,15 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     const from = chance(0.5) ? -1 : 1;
     const x0 = clamp(st.x + from * range(25, 45), DOMAIN[0] + 2, DOMAIN[1] - 2);
     const p = person(role, x0, laneZ(st.road, x0, -from), headingOf(-from, 0));
+    if (!p) return;
     p.side = st.road;
-    const spot = { x: st.x + range(-3, 3), z: pavementOf(st.road) + kerbSide(st.road) * -range(0, 0.35) };
+    // waiting people stand along the kerb, apart from each other (the far footpath is a narrow strip in
+    // front of the stalls, and a knot of waiters would block it)
+    let sx = st.x + range(-3, 3);
+    for (let tries = 0; tries < 8 && st.waiting.some((w) => Math.abs(w.spotX - sx) < 0.9); tries++) sx = st.x + range(-3.5, 3.5);
+    const spot = { x: sx, z: pavementOf(st.road) + kerbSide(st.road) * -0.25 };
     p.tasks.push(lane(st.road, -from, spot.x), goto(spot.x, spot.z), { type: "waitTransit", stop: st, spot, kinds: st.kinds, T: range(60, 200) });
+    p.spotX = spot.x;
     st.waiting.push(p);
   }
   function waitTransit(p, task, dt, t) {
@@ -688,10 +951,14 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     }
     const d = door(veh);
     if (task.phase === "walk") {
-      if (steer(p, d.x, d.z, p.pace * 1.15, dt, null) < 0.18) {
+      // along the kerb to the door (the doorstep itself is on the carriageway, off the mesh)
+      const left = moveTo(p, d.x, d.z, p.pace * 1.15, dt);
+      task.still = p.speed < 0.08 && left < 1.2 ? (task.still || 0) + dt : 0;
+      if (left < 0.18 || task.still > 0.6) {
         task.phase = "in";
         task.t = 0;
         task.from = { x: p.x, z: p.z };
+        leave(p);
       }
       return;
     }
@@ -724,7 +991,7 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     const n = veh.kind === "bus" ? pickW([[0, 1], [1, 3], [2, 3], [3, 2], [4, 1]]) : pickW([[0, 2], [1, 3], [2, 2]]);
     for (let i = 0; i < n; i++) {
       const inn = door(veh, true);
-      const p = person(pickW([["office", 4], ["student", 3], ["local", 3]]), inn.x, inn.z, headingOf(0, kerbSide(veh.road)));
+      const p = person(pickW([["office", 4], ["student", 3], ["local", 3]]), inn.x, inn.z, headingOf(0, kerbSide(veh.road)), false);
       p.side = veh.road;
       p.lift = veh.kind === "bus" ? 0.38 : -0.12;
       p.hidden = true;
@@ -771,6 +1038,7 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     if (!traffic.vehicles.includes(veh)) return p.tasks.shift();
     const k = kerbSide(veh.road);
     const at = { x: veh.x + veh.dir * 0.75, z: veh.lat + k * (veh.W / 2 + 0.35) };
+    leave(p); // beside the auto, on the carriageway: scripted
     if (!task.there) {
       if (steer(p, at.x, at.z, p.pace * 0.8, dt, null) < 0.2) task.there = true;
       return;
@@ -839,6 +1107,20 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
   function customer(p, task, dt, t) {
     const sp = task.spot;
     const st = sp.stall;
+    // In front of the railed stalls the counter and the railing leave a corridor too narrow to pass a
+    // person standing in it: customers there stand out of the crowd (walkers pass them as they pass
+    // each other in life, turning sideways). Where there is room beside them they stay in it.
+    if (p.ag != null) {
+      if (task.narrow === undefined) {
+        const c = nav.closest(sp.x, sp.z - 0.55, 0, { x: 0.02, y: 3, z: 0.12 });
+        task.narrow = !(c && nav.connected(c.x, c.z));
+      }
+      if (task.narrow) {
+        p.floorY = p.groundY ?? p.y;
+        leave(p);
+        p.noRay = true;
+      }
+    }
     stand(p, dt, sp.face);
     p.busy = null;
     const keeperP = residents.find((r) => r.tasks[0]?.k?.stall === st);
@@ -977,6 +1259,12 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     // walk the last steps, turn round, sit
     const d = Math.hypot(seat.x - p.x, seat.z - 0.05 - p.z);
     if (!task.seated) {
+      if (p.ag != null) {
+        // the last steps onto the seat are scripted (the seat is not a place to walk to)
+        p.floorY = p.groundY ?? p.y;
+        leave(p);
+        p.noRay = true;
+      }
       if (d > 0.08) {
         steer(p, seat.x, seat.z - 0.05, 0.6, dt, null);
         return;
@@ -1002,6 +1290,7 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     if (task.T < 0) {
       hold(p, null);
       seat.taken = null;
+      p.joinAt = p.lastMesh; // stands up where they came from, not on the seat
       p.tasks.shift();
     }
   }
@@ -1010,8 +1299,10 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     const sl = task.slot;
     if (!g.members.includes(p)) g.members.push(p);
     stand(p, dt, headingOf(g.c[0] - sl.x, g.c[1] - sl.z));
-    p.x += (sl.x - p.x) * Math.min(1, dt * 2);
-    p.z += (sl.z - p.z) * Math.min(1, dt * 2);
+    if (p.ag == null) {
+      p.x += (sl.x - p.x) * Math.min(1, dt * 2);
+      p.z += (sl.z - p.z) * Math.min(1, dt * 2);
+    }
     // whose turn to talk
     if (t > g.until || !g.members[g.speaker]) {
       g.speaker = (g.speaker + 1 + ((rnd() * Math.max(1, g.members.length - 1)) | 0)) % Math.max(1, g.members.length);
@@ -1270,8 +1561,10 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       task.t = range(18, 40);
     }
     if (task.walk) {
-      const d = steer(p, task.walk[0], task.walk[1], 0.7, dt, null);
-      if (d < 0.1) {
+      const d = moveTo(p, task.walk[0], task.walk[1], 0.7, dt);
+      task.still = p.speed < 0.08 && d < 0.6 ? (task.still || 0) + dt : 0;
+      if (d < 0.1 || task.still > 1) {
+        task.still = 0;
         task.walk = null;
         task.back = !task.back;
       }
@@ -1334,12 +1627,13 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
      * [{x, z, r, vx, vz}] in the street frame; camPos: the camera in world space.
      */
     update(dt, t, extra = []) {
-      if (!kit || !bodiesIn) return;
+      if (!kit || !bodiesIn || !nav) return;
       if (!started) {
         started = true;
         settle();
       }
       frameNo++;
+      syncProxies(extra);
       // who is where, for keeping clear of each other
       others.length = 0;
       for (const p of people) others.push({ p, x: p.x, z: p.z, r: p.radius, vx: p.vx, vz: p.vz });
@@ -1364,6 +1658,7 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       frustum.setFromProjectionMatrix(projScreen);
       const cam = camera.position;
       for (const p of [...people]) {
+        if (p.ag != null) syncAgent(p, dt);
         act(p, dt, t);
         if (!people.includes(p)) continue;
         // turn toward where they are going (or told to face)
@@ -1373,12 +1668,12 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
         p.heading += wrap(p.want - p.heading) * Math.min(1, dt * 5);
         const turnRate = wrap(p.heading - before) / Math.max(dt, 1e-3);
         p.speed = sp;
-        // ground under the feet, every so often
+        // ground under the feet: the floor the agent walks on, or (scripted people) a ray every so often
         p.groundT -= dt;
-        if (p.groundT < 0) {
+        if (p.ag == null && !p.noRay && p.groundT < 0) {
           p.groundT = 0.35;
           p.groundY = groundAt(p.x, p.z);
-        }
+        } else if (p.noRay && p.floorY !== undefined) p.groundY = p.floorY;
         if (p.groundY !== undefined) p.y += (p.groundY - p.y) * Math.min(1, dt * 10);
         const [wx, wz] = local(p.x, p.z);
         p.group.position.set(wx, p.y + 0.015 + (p.lift || 0), wz);

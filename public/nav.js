@@ -28,7 +28,7 @@ export const NAV = {
 
 const UP_EPS = 0.05;
 
-export async function buildNav({ RAPIER, world, local, toLocal, scene, debug = false }) {
+export async function buildNav({ RAPIER, world, local, toLocal, scene, debug = false, skip = null }) {
   await init();
   const t0 = performance.now();
   const B = NAV.bounds;
@@ -94,7 +94,7 @@ export async function buildNav({ RAPIER, world, local, toLocal, scene, debug = f
   // ---- collect the fixed colliders ----
   const ST = RAPIER.ShapeType;
   world.colliders.forEach((c) => {
-    if (c.isSensor()) return;
+    if (c.isSensor() || (skip && skip(c))) return;
     const body = c.parent();
     if (body && !body.isFixed()) return;
     const q = c.rotation();
@@ -263,19 +263,20 @@ export async function buildNav({ RAPIER, world, local, toLocal, scene, debug = f
     return Math.hypot(e.x - c.x, e.z - c.z) < 0.5;
   }
   const agents = new Map(); // our index -> CrowdAgent
-  function addAgent(x, z, { radius = 0.27, maxSpeed = 1.4 } = {}) {
+  function addAgent(x, z, { radius = 0.27, maxSpeed = 1.4, separationWeight = 1.5, queryRange = radius * 12 } = {}) {
     const p = closest(x, z) || { x, y: 0, z };
     const a = crowd.addAgent(v3(p.x, p.y, p.z), {
       radius,
       height: agent.height,
       maxSpeed,
       maxAcceleration: 6,
-      collisionQueryRange: radius * 12,
+      collisionQueryRange: queryRange,
       pathOptimizationRange: radius * 30,
-      separationWeight: 1.5,
+      separationWeight,
       updateFlags: 1 | 2 | 4 | 8 | 16,
       obstacleAvoidanceType: 3,
     });
+    if (!a || a.agentIndex === undefined) return null; // the crowd is full
     agents.set(a.agentIndex, a);
     return a.agentIndex;
   }
@@ -296,6 +297,14 @@ export async function buildNav({ RAPIER, world, local, toLocal, scene, debug = f
     if (!a) return;
     const p = closest(x, z) || { x, y: 0, z };
     a.teleport(v3(p.x, p.y, p.z));
+  }
+  function setSpeed(i, v) {
+    const a = agents.get(i);
+    if (a && Math.abs(a.maxSpeed - v) > 0.02) a.maxSpeed = v;
+  }
+  function setRadius(i, r) {
+    const a = agents.get(i);
+    if (a && Math.abs(a.radius - r) > 0.005) a.radius = r;
   }
   function stop(i) {
     agents.get(i)?.resetMoveTarget();
@@ -332,7 +341,7 @@ export async function buildNav({ RAPIER, world, local, toLocal, scene, debug = f
 
   return {
     navMesh, crowd, query, tileCache,
-    closest, connected, path, addAgent, removeAgent, setTarget, teleport, stop, agentState, update,
+    closest, connected, path, addAgent, removeAgent, setTarget, teleport, setSpeed, setRadius, stop, agentState, update,
     addObstacle, removeObstacle, debugMesh,
     stats: { ...stats, polyCount, buildMs, inputTriangles: idx.length / 3 },
   };
