@@ -605,6 +605,7 @@ export async function loadCrowdBody(renderer, url) {
  */
 function dressRocketboxShirt(model, shirt = "tiu") {
   const pr = rebootPrints();
+  let axes = null;
   model.traverse((o) => {
     if (!o.isSkinnedMesh || o.material.name !== "body") return;
     const bindPos = (name) => {
@@ -634,6 +635,7 @@ function dressRocketboxShirt(model, shirt = "tiu") {
       highest = Math.max(highest, h);
     }
     const scale = 1.75 / (highest - lowest);
+    axes = { up, lowest, scale };
     const centre = head.clone().addScaledVector(up, -head.dot(up)); // the body's midline
     const m = o.material.clone();
     m.onBeforeCompile = (sh) => {
@@ -665,8 +667,11 @@ function dressRocketboxShirt(model, shirt = "tiu") {
             float skin = smoothstep(0.29, 0.33, cb) * (1.0 - smoothstep(0.48, 0.52, cb)) * smoothstep(0.52, 0.55, cr) * (1.0 - smoothstep(0.66, 0.7, cr)) * smoothstep(0.12, 0.2, Y);
             // the shirt: above the belt (about 1.0 m on a 1.75 m body), not skin, not the head
             float shirtK = smoothstep(0.99, 1.02, vBody.y) * (1.0 - smoothstep(1.64, 1.68, vBody.y)) * (1.0 - skin);
+            // the chest and back below the neckline are all shirt, whatever colour the old print was
+            if (abs(vBody.x) < 0.2 && vBody.y < 1.46 && vBody.y > 1.0) shirtK = 1.0;
             // folds and seams of the original, as light and shade on the new colour
-            float shade = clamp(Y / 0.22, 0.45, 1.6);
+            // only a little of the photo's light and shade, so its own printed graphic does not show through
+            float shade = 0.82 + 0.18 * clamp(Y / 0.12, 0.0, 1.6);
             vec3 cloth;
             if (uReboot == 1) {
               cloth = vec3(0.02, 0.02, 0.022) * shade;
@@ -692,6 +697,21 @@ function dressRocketboxShirt(model, shirt = "tiu") {
         );
     };
     m.customProgramCacheKey = () => "rb-shirt";
+    o.material = m;
+  });
+  // some of these bodies carry their T-shirt graphic on the hair layer (cut-out cards): drop
+  // anything on that layer below the neck (1.5 m on a 1.75 m body, in the resting pose)
+  if (!axes) return;
+  model.traverse((o) => {
+    if (!o.isSkinnedMesh || o.material.name !== "hair") return;
+    const m = o.material.clone();
+    m.onBeforeCompile = (sh) => {
+      sh.uniforms.uUp = { value: axes.up };
+      sh.uniforms.uNeck = { value: axes.lowest + 1.5 / axes.scale };
+      sh.vertexShader = sh.vertexShader.replace("#include <common>", "#include <common>\nvarying float vH;\nuniform vec3 uUp;").replace("#include <begin_vertex>", "#include <begin_vertex>\nvH = dot(position, uUp);");
+      sh.fragmentShader = sh.fragmentShader.replace("#include <common>", "#include <common>\nvarying float vH;\nuniform float uNeck;").replace("#include <alphatest_fragment>", "#include <alphatest_fragment>\nif (vH < uNeck) discard;");
+    };
+    m.customProgramCacheKey = () => "rb-hair-cut";
     o.material = m;
   });
 }

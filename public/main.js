@@ -304,7 +304,7 @@ function showRemoteBike(a, dt, roll) {
 // Players wear a photographic body in a short-sleeved collared shirt, dyed and printed as the
 // chosen T-shirt (see dressRocketboxShirt in character.js); the older stylised body is the
 // fallback if it cannot load. A MetaHuman replaces this when it is ready.
-const playerKitLoading = loadCrowdBody(renderer, "/models/people/Male_Adult_11.glb").catch((err) => {
+const playerKitLoading = loadCrowdBody(renderer, "/models/people/Male_Adult_09.glb").catch((err) => {
   console.warn("Could not load the player body; using the older one.", err);
   return null;
 });
