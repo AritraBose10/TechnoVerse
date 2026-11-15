@@ -1915,6 +1915,7 @@ window.__tiu = {
   traffic: () => traffic && traffic.vehicles.map((v) => ({ kind: v.kind, road: v.road, x: +v.x.toFixed(1), lat: +v.lat.toFixed(2), v: +v.v.toFixed(2), state: v.state, ind: v.ind })),
   crowd: () => crowd && crowd.people.map((p) => ({ role: p.role, x: +p.x.toFixed(1), z: +p.z.toFixed(2), task: p.tasks[0]?.type, act: p.tasks[0]?.act, left: p.tasks.length, sp: +p.speed.toFixed(2), body: p.bodyName })),
   crowdStats: () => crowd && crowd.stats,
+  crowdObj: () => crowd, // the whole street-life object (queues, stops, the aisle): tests
   people: () => crowd && crowd.people, // the live person objects (tests)
   deals: () => crowd && crowd.deals(),
   bodies: () => crowdBodies.map((b) => b.name),
