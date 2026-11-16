@@ -1098,6 +1098,9 @@ const _m = { saddle: new THREE.Vector3(), gripL: new THREE.Vector3(), gripR: new
 const _h = { pos: new THREE.Vector3(), quat: new THREE.Quaternion(), p0: new THREE.Vector3(), q0: new THREE.Quaternion(), p1: new THREE.Vector3(), q1: new THREE.Quaternion(), mtx: new THREE.Matrix4(), s: new THREE.Vector3() };
 const V = () => new THREE.Vector3();
 const bez = (a, b, c, k, out) => out.copy(a).multiplyScalar((1 - k) * (1 - k)).addScaledVector(b, 2 * k * (1 - k)).addScaledVector(c, k * k);
+// a curve from a to c that passes through `top` halfway (a plain quadratic only aims at its middle
+// point and would carry the foot through the seat)
+const over = (a, top, c, k, out) => bez(a, V().copy(top).multiplyScalar(2).addScaledVector(a, -0.5).addScaledVector(c, -0.5), c, k, out);
 // where things are this frame, in the world
 function markers(bike) {
   const m = bike.model;
@@ -1234,8 +1237,8 @@ function stepsOn(bike) {
       // the right foot lifts behind, swings over the back of the seat and comes down on the far side
       const from = footSpot(1, V());
       const top = V().copy(_m.saddle).addScaledVector(_m.back, m.kind === "bicycle" && m.design === "ladies" ? -0.25 : 0.32).addScaledVector(UPV, m.kind === "bicycle" && m.design === "ladies" ? -0.25 : 0.2);
-      const to = motor ? V().copy(_m.pedalR) : V().copy(_m.groundR);
-      P.footR = bez(from, top, to, span(k, 0.05, 0.85), V());
+      const to = V().copy(_m.pedalR); // footrest, or the pedal on a bicycle: where the ride starts from
+      P.footR = over(from, top, to, span(k, 0.05, 0.85), V());
       P.footL = footSpot(-1, V()).lerp(V().copy(_m.groundL), span(k, 0.55, 1));
       P.stoop = 0.15 * (1 - k);
     },
@@ -1357,9 +1360,9 @@ function stepsOff(bike) {
       P.lean = lean0 * span(k, 0.6, 1);
       P.stand = span(k, 0.1, 0.75);
       P.lift = 0.07 * Math.sin(Math.PI * span(k, 0.15, 0.9));
-      const from = motor ? V().copy(_m.pedalR) : V().copy(_m.groundR);
+      const from = V().copy(_m.pedalR);
       const top = V().copy(_m.saddle).addScaledVector(_m.back, m.kind === "bicycle" && m.design === "ladies" ? -0.25 : 0.32).addScaledVector(UPV, m.kind === "bicycle" && m.design === "ladies" ? -0.25 : 0.2);
-      P.footR = bez(from, top, footSpot(1, V()), span(k, 0.15, 0.95), V());
+      P.footR = over(from, top, footSpot(1, V()), span(k, 0.15, 0.95), V());
       P.footL = V().copy(_m.groundL).lerp(footSpot(-1, V()), span(k, 0, 0.45));
     },
   });
@@ -1476,8 +1479,9 @@ function seqFrame(dt) {
   for (const key of ["handL", "handR", "footL", "footR", "lift", "stoop", "roll"]) delete P[key];
   P.lean = q.lean;
   P.kick = q.kickK;
-  P.stand = q.off ? 0 : 1;
-  if (q.off) P.stand = q.standNow ?? 0;
+  // carried over from the step before, like the lean and the stand (a step that does not set it
+  // keeps the rider where the last one left them)
+  P.stand = q.standNow ?? (q.off ? 0 : 1);
   markers(q.bike);
   step.run.call(step, Math.min(1, q.t / step.dur));
   q.lean = P.lean;
@@ -1491,7 +1495,7 @@ function seqFrame(dt) {
   if (P.stand > 0.5 && P.footL === undefined) P.footL = footSpot(-1, V());
   if (P.stand > 0.5 && P.footR === undefined) P.footR = footSpot(1, V());
   if (P.stand <= 0.5 && P.footL === undefined) P.footL = V().copy(_m.groundL);
-  if (P.stand <= 0.5 && P.footR === undefined && m.spec.motor) P.footR = V().copy(_m.pedalR);
+  if (P.stand <= 0.5 && P.footR === undefined) P.footR = V().copy(_m.pedalR);
   hero.update(dt, {
     speed: 0,
     grounded: true,
@@ -1528,6 +1532,11 @@ function crashIntoVehicle(veh) {
 function finishSeq() {
   const { bike, off } = seq;
   seq = null;
+  if (rideRig.position.z) {
+    const w = me.group.localToWorld(new THREE.Vector3(0, 0, rideRig.position.z));
+    me.group.position.set(w.x, me.group.position.y, w.z);
+    placeBody(w.x, me.group.position.y, w.z);
+  }
   rideRig.position.set(0, 0, 0);
   if (!off) {
     rideRig.rotation.z = 0;
