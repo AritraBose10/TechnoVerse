@@ -687,7 +687,7 @@ function dressRocketboxShirt(model, shirt = "tiu") {
       highest = Math.max(highest, h);
     }
     const scale = 1.75 / (highest - lowest);
-    axes = { up, lowest, scale };
+    axes = { up, lowest, scale, eye: eye.dot(up) };
     const centre = head.clone().addScaledVector(up, -head.dot(up)); // the body's midline
     const m = o.material.clone();
     m.onBeforeCompile = (sh) => {
@@ -700,13 +700,14 @@ function dressRocketboxShirt(model, shirt = "tiu") {
         uScale: { value: scale },
         uFront: { value: pr.front },
         uBack: { value: pr.back },
+        uSleeve: { value: pr.sleeve },
         uReboot: { value: shirt === "reboot" ? 1 : 0 },
       });
       sh.vertexShader = sh.vertexShader
-        .replace("#include <common>", "#include <common>\nvarying vec3 vBody;\nuniform vec3 uUp; uniform vec3 uFwd; uniform vec3 uLeft; uniform vec3 uMid; uniform float uFloor; uniform float uScale;")
-        .replace("#include <begin_vertex>", "#include <begin_vertex>\nvec3 rel = position - uMid;\nvBody = vec3(dot(rel, uLeft), dot(position, uUp) - uFloor, dot(rel, uFwd)) * uScale;");
+        .replace("#include <common>", "#include <common>\nvarying vec3 vBody;\nvarying float vSide;\nvarying float vFace;\nuniform vec3 uUp; uniform vec3 uFwd; uniform vec3 uLeft; uniform vec3 uMid; uniform float uFloor; uniform float uScale;")
+        .replace("#include <begin_vertex>", "#include <begin_vertex>\nvec3 rel = position - uMid;\nvBody = vec3(dot(rel, uLeft), dot(position, uUp) - uFloor, dot(rel, uFwd)) * uScale;\nvSide = dot(normal, uLeft);\nvFace = dot(normal, uFwd);");
       sh.fragmentShader = sh.fragmentShader
-        .replace("#include <common>", "#include <common>\nvarying vec3 vBody;\nuniform sampler2D uFront; uniform sampler2D uBack; uniform int uReboot;")
+        .replace("#include <common>", "#include <common>\nvarying vec3 vBody;\nvarying float vSide;\nvarying float vFace;\nuniform sampler2D uFront; uniform sampler2D uBack; uniform sampler2D uSleeve; uniform int uReboot;")
         .replace(
           "#include <map_fragment>",
           `#include <map_fragment>
@@ -718,7 +719,8 @@ function dressRocketboxShirt(model, shirt = "tiu") {
             float cr = 0.5 + 0.5 * s.r - 0.419 * s.g - 0.081 * s.b;
             float skin = smoothstep(0.29, 0.33, cb) * (1.0 - smoothstep(0.48, 0.52, cb)) * smoothstep(0.52, 0.55, cr) * (1.0 - smoothstep(0.66, 0.7, cr)) * smoothstep(0.12, 0.2, Y);
             // the shirt: above the belt (about 1.0 m on a 1.75 m body), not skin, not the head
-            float shirtK = smoothstep(0.99, 1.02, vBody.y) * (1.0 - smoothstep(1.64, 1.68, vBody.y)) * (1.0 - skin);
+            float shirtK = smoothstep(0.99, 1.02, vBody.y) * (1.0 - smoothstep(1.72, 1.76, vBody.y)) * (1.0 - skin);
+            if (abs(vBody.x) > 0.22 && vBody.y < 1.25) shirtK = 0.0; // forearms and wrists (a watch) are not shirt
             // the chest and back below the neckline are all shirt, whatever colour the old print was
             if (abs(vBody.x) < 0.2 && vBody.y < 1.46 && vBody.y > 1.0) shirtK = 1.0;
             // folds and seams of the original, as light and shade on the new colour
@@ -727,13 +729,18 @@ function dressRocketboxShirt(model, shirt = "tiu") {
             vec3 cloth;
             if (uReboot == 1) {
               cloth = vec3(0.02, 0.02, 0.022) * shade;
-              if (vBody.z > 0.02) {
-                vec2 uv = vec2((vBody.x - 0.03) / 0.105, (vBody.y - 1.375) / 0.032);
+              if (vBody.z > 0.02 && vFace > 0.3) {
+                vec2 uv = vec2((vBody.x - 0.03) / 0.105, (vBody.y - 1.43) / 0.032);
                 if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0) { vec4 p = texture2D(uFront, uv); cloth = mix(cloth, p.rgb * 0.85, p.a); }
               }
-              if (vBody.z < -0.02) {
-                vec2 uv = vec2((0.125 - vBody.x) / 0.25, (vBody.y - 1.0) / 0.42);
+              if (vBody.z < -0.02 && vFace < -0.3) {
+                vec2 uv = vec2((0.11 - vBody.x) / 0.22, (vBody.y - 1.08) / 0.399);
                 if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0) { vec4 p = texture2D(uBack, uv); cloth = mix(cloth, p.rgb * 0.85, p.a); }
+              }
+              // sleeve print on the outside of the wearer's right sleeve (seen from that side, u runs forward)
+              if (vBody.x < -0.16 && vSide < -0.45) {
+                vec2 uv = vec2((vBody.z + 0.0375) / 0.075, (vBody.y - 1.31) / 0.04);
+                if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0) { vec4 p = texture2D(uSleeve, uv); cloth = mix(cloth, p.rgb * 0.85, p.a); }
               }
             } else {
               vec3 navy = vec3(0.012, 0.018, 0.05);
@@ -744,12 +751,46 @@ function dressRocketboxShirt(model, shirt = "tiu") {
               vec2 badge = vec2(vBody.x - 0.088, vBody.y - 1.38);
               if (vBody.z > 0.02 && length(badge) < 0.032) cloth = vec3(0.6, 0.02, 0.03);
             }
-            diffuseColor.rgb = mix(c, cloth, shirtK);
+            // skin a shade warmer and browner, as on the reference (a Bengali student)
+            vec3 tone = mix(c, c * vec3(0.84, 0.7, 0.58), skin);
+            diffuseColor.rgb = mix(tone, cloth, shirtK);
           }`,
         );
     };
     m.customProgramCacheKey = () => "rb-shirt";
     o.material = m;
+  });
+  // black hair and a matching skin tone on the face (the student in the reference sheet)
+  model.traverse((o) => {
+    if (!o.isMesh) return;
+    if (o.material.name === "hair") o.material.color.setRGB(0.16, 0.14, 0.13);
+    if (o.material.name === "skin_head") {
+      // the face and scalp share one picture: skin gets the warmer tone, the painted hair goes black
+      const m = o.material.clone();
+      m.onBeforeCompile = (sh) => {
+        sh.uniforms.uUp = { value: axes ? axes.up : new THREE.Vector3(0, 1, 0) };
+        sh.uniforms.uBrow = { value: axes ? axes.eye + 0.065 / axes.scale : 1e9 };
+        sh.vertexShader = sh.vertexShader.replace("#include <common>", "#include <common>\nvarying float vH;\nuniform vec3 uUp;").replace("#include <begin_vertex>", "#include <begin_vertex>\nvH = dot(position, uUp);");
+        sh.fragmentShader = sh.fragmentShader.replace("#include <common>", "#include <common>\nvarying float vH;\nuniform float uBrow;").replace(
+          "#include <map_fragment>",
+          `#include <map_fragment>
+          {
+            vec3 c = diffuseColor.rgb;
+            vec3 s = pow(max(c, vec3(0.0)), vec3(0.4545));
+            float Y = dot(s, vec3(0.299, 0.587, 0.114));
+            float cb = 0.5 - 0.169 * s.r - 0.331 * s.g + 0.5 * s.b;
+            float cr = 0.5 + 0.5 * s.r - 0.419 * s.g - 0.081 * s.b;
+            float skin = smoothstep(0.29, 0.33, cb) * (1.0 - smoothstep(0.48, 0.52, cb)) * smoothstep(0.52, 0.55, cr) * (1.0 - smoothstep(0.66, 0.7, cr)) * smoothstep(0.2, 0.3, Y);
+            vec3 hair = vec3(dot(c, vec3(0.333))) * vec3(0.32, 0.29, 0.27);
+            // above the brow, anything darker than forehead skin is hair
+            float isHair = max(1.0 - skin, step(uBrow, vH) * (1.0 - smoothstep(0.4, 0.52, Y)));
+            diffuseColor.rgb = mix(c * vec3(0.84, 0.7, 0.58), hair, isHair);
+          }`,
+        );
+      };
+      m.customProgramCacheKey = () => "rb-head-student";
+      o.material = m;
+    }
   });
   // some of these bodies carry their T-shirt graphic on the hair layer (cut-out cards): drop
   // anything on that layer below the neck (1.5 m on a 1.75 m body, in the resting pose)
