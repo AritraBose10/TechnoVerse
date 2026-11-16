@@ -852,6 +852,7 @@ function person(role, x, z, heading = 0, mesh = true) {
     }
     if (p.hesT > 0) v *= 0.6;
     if (p.yieldT > 0) v *= p.yieldK;
+    if (p.rx && p.rx.t < 0.4 && p.rx.kind !== "flinch") v *= 0.3; // a stumble
     return v;
   }
   // A kerb, a ramp or a step underfoot: people shorten their stride for a moment. The ground is sampled every
@@ -1488,6 +1489,9 @@ function person(role, x, z, heading = 0, mesh = true) {
       case "alight":
         alight(p, task, dt, t);
         break;
+      case "argue":
+        argue(p, task, dt, t);
+        break;
       case "payDriver":
         payDriver(p, task, dt, t);
         break;
@@ -1686,6 +1690,206 @@ function person(role, x, z, heading = 0, mesh = true) {
       stats.alighted = (stats.alighted || 0) + 1;
       p.tasks.shift();
     }
+  }
+  // ---------- bumps, near misses and arguments ----------
+  const isWalking = (p) => !p.hidden && !p.sit && !p.rx && p.tasks[0] && (p.tasks[0].type === "lane" || p.tasks[0].type === "goto") && p.speed > 0.25;
+  const ready = (p, t) => !(t - (p.bumpAt ?? -99) < 20);
+  // p is shoved d metres away from (ox, oz), stumbles, glances back, then says sorry, scowls or has a word
+  function startBump(p, ox, oz, t, kind = "bump") {
+    let dx = p.x - ox;
+    let dz = p.z - oz;
+    const d = Math.hypot(dx, dz) || 1;
+    if (d < 1e-3) dx = 1;
+    const push = kind === "bump" ? range(0.1, 0.2) : kind === "hit" ? 0.35 : 0.3;
+    p.rx = { kind, t: 0, ox, oz, mx: (dx / d) * push, mz: (dz / d) * push, out: kind === "bump" ? pickW([["polite", 6], ["annoyed", 3], ["word", 1]]) : kind };
+    p.bumpAt = t;
+  }
+  function shove(p, dx, dz) {
+    p.x += dx;
+    p.z += dz;
+    if (p.ag != null) nav.teleport(p.ag, p.x, p.z);
+  }
+  // runs after act(): the reaction overrides face and body for its moment
+  function reaction(p, dt) {
+    const r = p.rx;
+    r.t += dt;
+    const span = r.kind === "flinch" ? 0.3 : 0.3;
+    if (r.t < span) shove(p, (r.mx * dt) / span, (r.mz * dt) / span);
+    p.lookAt = toWorld(r.ox, r.oz, 1.5);
+    if (r.kind === "flinch") {
+      p.expr = "surprised";
+      p.nod = 0;
+      if (r.t > 1.2) p.rx = null;
+      return;
+    }
+    if (r.t < 0.4) {
+      p.nod = 0.3;
+      p.expr = "surprised";
+    } else if (r.kind === "hit") {
+      p.expr = "angry";
+      p.talk = r.t < 2 ? 0.5 : 0;
+      p.gesture.point = 1;
+      p.shake = 0.6;
+    } else if (r.out === "polite") {
+      p.expr = "polite";
+      p.nod = r.t < 1.4 ? 1 : 0;
+    } else if (r.out === "annoyed") p.expr = "annoyed";
+    else {
+      p.expr = "annoyed";
+      if (r.t < 1.2) p.talk = 0.4;
+      p.gesture.hip = 1;
+    }
+    if (r.t > (r.kind === "hit" ? 2.6 : 2.0)) p.rx = null;
+  }
+  const rectGap = (p, v) => Math.hypot(Math.max(0, Math.abs(p.x - v.x) - v.L / 2), Math.max(0, Math.abs(p.z - v.lat) - v.W / 2));
+  function collisions(t, extra) {
+    const walkers = people.filter((p) => isWalking(p) && ready(p, t));
+    for (let i = 0; i < walkers.length; i++) {
+      const a = walkers[i];
+      if (a.rx) continue;
+      for (let j = i + 1; j < walkers.length; j++) {
+        const b = walkers[j];
+        if (b.rx || (a.party && a.party === b.party)) continue;
+        if (Math.hypot(a.x - b.x, a.z - b.z) < 0.45) {
+          stats.bumps = (stats.bumps || 0) + 1;
+          startBump(a, b.x, b.z, t);
+          startBump(b, a.x, a.z, t);
+          break;
+        }
+      }
+    }
+    // the player, walking or riding, into someone
+    const e = extra[0];
+    if (e) {
+      playerAt = e;
+      const sp = Math.hypot(e.vx || 0, e.vz || 0);
+      for (const p of walkers) {
+        if (p.rx) continue;
+        const d = Math.hypot(p.x - e.x, p.z - e.z);
+        if (e.riding && sp > 1.5 && d < 0.85) {
+          stats.hits = (stats.hits || 0) + 1;
+          startBump(p, e.x, e.z, t, "hit");
+          crowdApi.playerHit = { p };
+        } else if (!e.riding && sp > 0.5 && d < 0.5) {
+          stats.bumps = (stats.bumps || 0) + 1;
+          startBump(p, e.x, e.z, t);
+        }
+      }
+    }
+    // someone on a carriageway right beside a moving vehicle: the driver stands on the brake, they step back
+    for (const p of people) {
+      if (p.hidden || p.rx || p.sit || !((p.z > 8.4 && p.z < 15.6) || (p.z > 19.3 && p.z < 25.6)) || !ready(p, t)) continue;
+      for (const v of traffic.vehicles) {
+        if (v.state === "parked" || v.state === "crash" || v.v < 0.2 || (v.road === "near") !== p.z < 17) continue;
+        if (rectGap(p, v) >= 0.6) continue;
+        const front = (p.x - v.x) * v.dir > v.L / 2 - 0.3;
+        v.hardBrake = 0.8;
+        p.bumpAt = t - 14; // a shorter cooldown than a bump
+        stats.flinches = (stats.flinches || 0) + 1;
+        startBump(p, v.x, v.lat, t, "flinch");
+        p.bumpAt = t - 14;
+        if (!front) p.rx.mx = p.rx.mz = 0;
+        else {
+          p.rx.mx = 0;
+          p.rx.mz = (p.z - v.lat > 0 ? 1 : -1) * 0.3;
+        }
+        break;
+      }
+    }
+  }
+  let playerAt = null;
+  // the drivers of a crash get out, stand between the vehicles and argue (or face the player), then get back in
+  function stepOut(c) {
+    c.drivers = [];
+    stats.argues = (stats.argues || 0) + 1;
+    const vs = [c.a, c.b].filter((v) => v && CAR_LIKE.includes(v.kind));
+    vs.forEach((veh, i) => {
+      const inn = door(veh, true);
+      const p = person(pickW([["office", 4], ["local", 4], ["student", 1]]), inn.x, inn.z, headingOf(0, kerbSide(veh.road)), false);
+      if (!p) return;
+      p.side = veh.road;
+      p.hidden = true;
+      p.lift = veh.kind === "bus" ? 0.38 : -0.12;
+      p.tasks = [{ type: "argue", crash: c, veh, i, n: vs.length, t: -0.5 - i * 0.7, other: null }, { type: "vanish" }];
+      c.drivers.push(p);
+    });
+    for (const p of c.drivers) p.tasks[0].other = c.drivers.find((q) => q !== p) || null;
+  }
+  const CAR_LIKE = ["hatch", "sedan", "suv", "taxi", "auto", "bus"];
+  function argue(p, task, dt, t) {
+    const { veh, crash } = task;
+    task.t += dt;
+    const k = kerbSide(veh.road);
+    const ended = crash.done || !traffic.vehicles.includes(veh);
+    if (task.t < 0) {
+      p.hidden = true;
+      p.vx = p.vz = 0;
+      return;
+    }
+    p.hidden = false;
+    // where this one stands: on the kerb side between the two vehicles (or beside their own door when alone)
+    const inn = traffic.vehicles.includes(veh) ? door(veh, true) : { x: p.x, z: p.z };
+    const out = traffic.vehicles.includes(veh) ? door(veh) : { x: p.x, z: p.z };
+    let sx = out.x;
+    const other = task.other;
+    if (other && task.n > 1 && crash.a && crash.b) {
+      const mx = (crash.a.x + crash.b.x) / 2;
+      sx = mx + (task.i ? 0.5 : -0.5);
+    } else sx = out.x - veh.dir * 0.8;
+    const stand = { x: sx, z: out.z + k * 0.55 };
+    task.k = task.k ?? 0;
+    const prev = { x: p.x, z: p.z };
+    if (!ended) {
+      // out of the door, then a few steps to the spot
+      if (task.t < 1.0) {
+        const f = task.t / 1.0;
+        p.x = inn.x + (out.x - inn.x) * f;
+        p.z = inn.z + (out.z - inn.z) * f;
+        p.lift = (veh.kind === "bus" ? 0.38 : -0.12) * (1 - f);
+        p.want = headingOf(out.x - inn.x, out.z - inn.z);
+      } else {
+        p.lift = 0;
+        const d = Math.hypot(stand.x - p.x, stand.z - p.z);
+        const step = Math.min(d, 1.1 * dt);
+        if (d > 0.02) {
+          p.x += ((stand.x - p.x) / d) * step;
+          p.z += ((stand.z - p.z) / d) * step;
+        }
+      }
+    } else {
+      // crash over: back to the door and inside
+      task.back = (task.back || 0) + dt;
+      const d = Math.hypot(inn.x - p.x, inn.z - p.z);
+      const step = Math.min(d, 1.2 * dt);
+      if (d > 0.02) {
+        p.x += ((inn.x - p.x) / d) * step;
+        p.z += ((inn.z - p.z) / d) * step;
+        p.want = headingOf(inn.x - p.x, inn.z - p.z);
+      }
+      p.lift = (veh.kind === "bus" ? 0.38 : -0.12) * Math.max(0, 1 - d / 0.8);
+      if (d < 0.08 || task.back > 6) {
+        p.hidden = true;
+        p.lift = 0;
+        p.tasks.shift();
+        return;
+      }
+    }
+    const moved = Math.hypot(p.x - prev.x, p.z - prev.z);
+    p.vx = (p.x - prev.x) / Math.max(dt, 1e-3);
+    p.vz = (p.z - prev.z) / Math.max(dt, 1e-3);
+    if (moved > 0.2 * dt || ended || task.t < 1.0) return;
+    // standing: face the other, and have it out
+    p.vx = p.vz = 0;
+    const faceAt = other ? { x: other.x, z: other.z } : playerAt ? { x: playerAt.x, z: playerAt.z } : { x: veh.x, z: veh.lat };
+    p.want = headingOf(faceAt.x - p.x, faceAt.z - p.z);
+    p.lookAt = toWorld(faceAt.x, faceAt.z, 1.5);
+    const turn = Math.floor((task.t - 1) / 2.4);
+    const mine = turn % 2 === task.i || task.n === 1 ? 1 : 0;
+    p.expr = (turn + task.i) % 3 === 0 ? "angry" : "annoyed";
+    if (mine) {
+      p.talk = 0.6 + 0.3 * Math.sin(t * 9);
+      p.gesture[(turn >> 1) % 2 ? "hip" : "point"] = 1;
+    } else p.shake = 0.7;
   }
   // an auto passenger pays the driver through the side before going: a note held out, change back
   function payDriver(p, task, dt, t) {
@@ -2394,9 +2598,10 @@ function person(role, x, z, heading = 0, mesh = true) {
     setTimeout(() => (bodiesIn = true), new URLSearchParams(location.search).has("waitbodies") ? 1e9 : 90000); // very slow connection: start with what there is
   });
   bodiesLoading?.then(() => (bodiesIn = true));
-  return {
+  const crowdApi = {
     people,
     stats,
+    playerHit: null,
     aisle: AISLE,
     counters,
     stops: stopSpots,
@@ -2433,6 +2638,8 @@ function person(role, x, z, heading = 0, mesh = true) {
         transitT = range(4, 10) * (quality === "low" ? 2 : 1);
         transitWaiter();
       }
+      collisions(t, extra);
+      for (const c of traffic.crashes) if (!c.drivers && !c.done) stepOut(c);
       for (const veh of traffic.vehicles) if (veh.atStop && !veh.unloaded && (veh.kind === "bus" || veh.kind === "auto")) unload(veh);
       // new walkers keep the street busy
       const walking = people.filter((p) => p.tasks[0] && (p.tasks[0].type === "lane" || p.tasks[0].type === "goto")).length;
@@ -2449,6 +2656,7 @@ function person(role, x, z, heading = 0, mesh = true) {
         if (p.ag != null) syncAgent(p, dt);
         act(p, dt, t);
         if (!people.includes(p)) continue;
+        if (p.rx) reaction(p, dt);
         // turn toward where they are going (or told to face)
         const sp = Math.hypot(p.vx, p.vz);
         if (sp > 0.2 && !p.sit && p.tasks[0]?.type !== "keeper") p.want = headingOf(p.vx, p.vz);
@@ -2500,4 +2708,5 @@ function person(role, x, z, heading = 0, mesh = true) {
       }
     },
   };
+  return crowdApi;
 }

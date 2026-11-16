@@ -252,7 +252,7 @@ function updateStreet(dt, pos) {
   const vx = lastLocal ? (lx - lastLocal[0]) / Math.max(dt, 1e-3) : 0;
   const vz = lastLocal ? (lz - lastLocal[1]) / Math.max(dt, 1e-3) : 0;
   lastLocal = [lx, lz];
-  const extra = [{ x: lx, z: lz, r: riding ? 0.7 : 0.35, vx, vz }];
+  const extra = [{ x: lx, z: lz, r: riding ? 0.7 : 0.35, vx, vz, riding: Boolean(riding) }];
   for (const a of players.values()) {
     const [ax, az] = worldInfo.toLocal(a.group.position.x, a.group.position.z);
     extra.push({ x: ax, z: az, r: a.bikeOn ? 0.7 : 0.35, vx: 0, vz: 0 });
@@ -268,6 +268,11 @@ function updateStreet(dt, pos) {
   traffic.update(dt, onRoad, t, [lx, lz]);
   if (nav) nav.update(dt);
   crowd.update(dt, t, extra);
+  if (crowd.playerHit) {
+    // rode into a pedestrian: the bike stops
+    if (riding && !seq) riding.r.v = 0;
+    crowd.playerHit = null;
+  }
 }
 // Someone else on a bike: a lighter copy of the bike under their figure, leaning as they lean.
 function showRemoteBike(a, dt, roll) {
@@ -1497,6 +1502,29 @@ function seqFrame(dt) {
     ride: { ..._m, crank: m.spec.motor ? 0.6 : 0, effort: 0, footDown: 0, backing: 0, backDist: 0, posture: m.spec.posture, stand: P.stand, at: _m.at, lift: P.lift || 0, stoop: P.stoop || 0, handL: P.handL, handR: P.handR, footL: P.footL, footR: P.footR },
   });
 }
+// Rode into a car, auto or bus: the bike stops dead and falls on its side, the rider is on their feet
+// beside it, the other driver stops, puts the hazards on and gets out (people.js "argue").
+function crashIntoVehicle(veh) {
+  const { bike, r } = riding;
+  const label = veh.kind === "bus" ? "bus" : veh.kind === "auto" ? "auto" : veh.kind === "bike" ? "motorbike" : veh.kind === "cycle" ? "cycle" : "car";
+  logLine(`You crashed into a ${label}!`, true);
+  traffic.crashWithPlayer(veh);
+  const p = me.group.position;
+  const heading = r.heading;
+  rideRig.position.set(0, 0, 0);
+  rideRig.rotation.z = 0;
+  rideRig.remove(bike.model.group);
+  parkBike(bike, p.x, p.y, p.z, heading);
+  bike.model.group.rotation.z = 1.2; // lying on its side
+  engine.set(1300, 0, false);
+  engine.horn(false);
+  me.group.add(hero.model);
+  me.group.remove(rideRig);
+  // the rider ends up a step back from the machine
+  placeBody(p.x - Math.cos(heading) * 0.8 + Math.sin(heading) * 0.5, p.y, p.z + Math.sin(heading) * 0.8 + Math.cos(heading) * 0.5);
+  vel.x = vel.z = 0;
+  riding = null;
+}
 function finishSeq() {
   const { bike, off } = seq;
   seq = null;
@@ -1544,7 +1572,13 @@ function rideFrame(dt) {
     const f = { x: (-Math.sin(r.heading) * dir), y: 0, z: (-Math.cos(r.heading) * dir) };
     const hit = world.castRay(new RAPIER.Ray({ x: before.x, y: before.y - BODY_CENTRE + 0.5, z: before.z }, f), 1.2, true, undefined, undefined, undefined, body.rigid, (c) => !c.parent()?.isDynamic());
     if (hit && hit.toi < 0.92 + Math.abs(r.v) * dt) {
-      if (Math.abs(r.v) > 3) logLine("Bump! Mind the walls.", true);
+      const veh = traffic && traffic.vehicleOfCollider(hit.collider ?? hit.colliderHandle);
+      if (veh && Math.abs(r.v) > 2) {
+        r.v = 0;
+        crashIntoVehicle(veh);
+        return;
+      }
+      if (Math.abs(r.v) > 3 && !veh) logLine("Bump! Mind the walls.", true);
       r.v = 0;
     }
   }
@@ -1914,7 +1948,9 @@ window.__tiu = {
   },
   traffic: () => traffic && traffic.vehicles.map((v) => ({ kind: v.kind, road: v.road, x: +v.x.toFixed(1), lat: +v.lat.toFixed(2), v: +v.v.toFixed(2), state: v.state, ind: v.ind })),
   crowd: () => crowd && crowd.people.map((p) => ({ role: p.role, x: +p.x.toFixed(1), z: +p.z.toFixed(2), task: p.tasks[0]?.type, act: p.tasks[0]?.act, left: p.tasks.length, sp: +p.speed.toFixed(2), body: p.bodyName })),
-  crowdStats: () => crowd && crowd.stats,
+  crowdStats: () => crowd && { ...crowd.stats, crashes: traffic ? traffic.crashCount : 0, arguing: crowd.people.filter((p) => p.tasks[0]?.type === "argue").length },
+  forceCrash: () => traffic && traffic.forceCrash(),
+  crashes: () => traffic && traffic.crashes.map((c) => ({ a: c.a.kind, b: c.b && c.b.kind, x: +c.x.toFixed(1), road: c.road, t: +c.t.toFixed(1), done: c.done, player: Boolean(c.player) })),
   crowdObj: () => crowd, // the whole street-life object (queues, stops, the aisle): tests
   people: () => crowd && crowd.people, // the live person objects (tests)
   deals: () => crowd && crowd.deals(),

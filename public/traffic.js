@@ -265,6 +265,54 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
   ];
   const slots = { near: PARK_SLOTS.near.map((x) => ({ x, taken: null })), far: PARK_SLOTS.far.map((x) => ({ x, taken: null })) };
   const qY = new THREE.Quaternion();
+  // collider handle -> vehicle, so the player's ray or contact can tell a car from a wall
+  const colliders = new Map();
+  // fender-benders: see maybeCrash. crashes keeps the recent ones ({a, b, t, x, road, done}).
+  const crashes = [];
+  let crashCount = 0;
+  let crashCheck = 2;
+  let forceNext = false;
+  const CRASH_KINDS = ["hatch", "sedan", "suv", "taxi", "auto", "bus"];
+  function stopCrash(veh, dur) {
+    veh.state = "crash";
+    veh.v = 0;
+    veh.ind = 0;
+    veh.stuckT = 0;
+    veh.hazard = true;
+    veh.crashT = dur;
+    veh.slot = null;
+    veh.stopX = null;
+    veh.latTarget = veh.lat;
+  }
+  function maybeCrash(dt) {
+    crashCheck -= dt;
+    if (crashCheck > 0) return;
+    crashCheck = 0.5;
+    const cands = [];
+    for (const f of all) {
+      if (f.state !== "drive" || !CRASH_KINDS.includes(f.kind) || (!forceNext && f.v >= 4)) continue;
+      for (const l of all) {
+        if (l === f || l.road !== f.road || l.state !== "drive" || (!forceNext && l.v >= 4)) continue;
+        const dx = (l.x - f.x) * f.dir;
+        if (dx <= 0 || Math.abs(f.lat - l.lat) > ((f.W + l.W) / 2) * 0.8) continue;
+        if (dx - (f.L + l.L) / 2 < (forceNext ? 40 : 8)) cands.push([f, l]);
+      }
+    }
+    if (!cands.length) return;
+    if (!forceNext && rnd() > 0.5 / 300) return; // about one eligible moment in 5 simulated minutes
+    const [f, l] = cands[(rnd() * cands.length) | 0];
+    if (crashes.some((c) => !c.done && c.road === f.road && Math.abs(c.x - f.x) < 40)) return;
+    forceNext = false;
+    f.x = l.x - l.dir * ((f.L + l.L) / 2 + 0.03); // touching: a bump at about 1.5 m/s
+    f.lat = l.lat;
+    f.latTarget = l.latTarget = l.lat;
+    const dur = range(45, 75);
+    stopCrash(f, dur);
+    stopCrash(l, dur);
+    crashCount++;
+    crashes.push({ a: l, b: f, t: clock, x: (f.x + l.x) / 2, road: f.road, v: 1.5, done: false });
+    while (crashes.length > 30) crashes.shift();
+  }
   const UP = new THREE.Vector3(0, 1, 0);
 
   function spawn(kind, road, x, { state = "drive", lane, slot, v } = {}) {
@@ -316,13 +364,15 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
     if ((u.rider || u.live) && kit) u.riderSeated = true;
     // a body for the physics, so nobody walks or rides through a vehicle
     veh.body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
-    world.createCollider(RAPIER.ColliderDesc.cuboid(veh.L / 2, veh.H / 2, Math.max(0.3, veh.W / 2)).setTranslation(0, veh.H / 2, 0), veh.body);
+    veh.collider = world.createCollider(RAPIER.ColliderDesc.cuboid(veh.L / 2, veh.H / 2, Math.max(0.3, veh.W / 2)).setTranslation(0, veh.H / 2, 0), veh.body);
+    colliders.set(veh.collider.handle, veh);
     scene.add(mesh);
     place(veh, 0);
     all.push(veh);
     return veh;
   }
   function despawn(veh) {
+    if (veh.collider) colliders.delete(veh.collider.handle);
     scene.remove(veh.mesh);
     world.removeRigidBody(veh.body);
     if (veh.slot) veh.slot.taken = null;
@@ -433,6 +483,19 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
     const R = ROADS[veh.road];
     veh.cooldown -= dt;
     veh.think -= dt;
+    if (veh.state === "crash") {
+      veh.v = 0;
+      veh.ind = 0;
+      veh.brake = 1;
+      veh.latVel = 0;
+      veh.crashT -= dt;
+      if (veh.crashT <= 0) {
+        veh.state = "drive";
+        veh.hazard = false;
+        veh.cooldown = 3;
+      }
+      return;
+    }
     if (veh.state === "parked") {
       veh.v = 0;
       veh.timer -= dt;
@@ -555,15 +618,29 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
 
     // speed: keep the gap to whatever is ahead
     const { gap, vl, what } = leaderOf(veh, people);
-    if (veh.v < 0.2 && what && what !== "stop" && (what.state === "parked" || what.state === "static")) veh.stuckT = (veh.stuckT || 0) + dt;
+    if (veh.v < 0.2 && what && what !== "stop" && (what.state === "parked" || what.state === "static" || what.state === "crash")) veh.stuckT = (veh.stuckT || 0) + dt;
     else veh.stuckT = 0;
-    if (veh.stuckT > 6 && veh.state === "drive") {
-      veh.stuckT = 0;
-      veh.lane = 1;
-      veh.latTarget = R.lanes[1];
+    if (veh.stuckT > (what?.state === "crash" ? 3 : 6) && veh.state === "drive") {
+      if (what.state === "crash") {
+        // go round the wreck when the other lane is clear
+        if (laneFree(veh, R.lanes[1 - veh.lane], people)) {
+          veh.stuckT = 0;
+          veh.lane = 1 - veh.lane;
+          veh.latTarget = R.lanes[veh.lane];
+          veh.ind = Math.sign((veh.latTarget - veh.lat) * veh.dir);
+        }
+      } else {
+        veh.stuckT = 0;
+        veh.lane = 1;
+        veh.latTarget = R.lanes[1];
+      }
     }
     let acc = idm(veh, gap, vl, v0At(veh));
     acc = Math.max(-7.5, Math.min(veh.aMax, acc));
+    if (veh.hardBrake > 0) {
+      veh.hardBrake -= dt; // someone stepped right in front: stand on the brake
+      acc = -9;
+    }
     const vBefore = veh.v;
     veh.v = Math.max(0, veh.v + acc * dt);
     if (gap < 0.25) veh.v = 0;
@@ -612,8 +689,8 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
     if (u.live && u.cyclist && dt > 0 && (!eye || Math.hypot(veh.x - eye[0], veh.lat - eye[1]) < 70)) liveRider(veh, dt);
     u.tail.emissiveIntensity = veh.brake ? 2.6 : 0.3 + night * 0.9;
     const blink = Math.sin(t * 9.4) > 0 ? 2.8 : 0;
-    u.indL.emissiveIntensity = veh.ind < 0 || (veh.state === "parked" && veh.hazard) ? blink : 0;
-    u.indR.emissiveIntensity = veh.ind > 0 ? blink : 0;
+    u.indL.emissiveIntensity = veh.ind < 0 || veh.hazard ? blink : 0;
+    u.indR.emissiveIntensity = veh.ind > 0 || veh.hazard ? blink : 0;
     qY.setFromAxisAngle(UP, phi + veh.yaw);
     veh.body.setNextKinematicTranslation({ x: wx, y: 0, z: wz });
     veh.body.setNextKinematicRotation(qY);
@@ -624,6 +701,26 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
 
   return {
     vehicles: all,
+    crashes,
+    get crashCount() {
+      return crashCount;
+    },
+    isVehicleCollider: (c) => colliders.has(c && c.handle !== undefined ? c.handle : c),
+    vehicleOfCollider: (c) => colliders.get(c && c.handle !== undefined ? c.handle : c) || null,
+    /** debug: the next eligible follower rear-ends its leader at once */
+    forceCrash() {
+      forceNext = true;
+      crashCheck = 0;
+    },
+    /** the player rode into this vehicle: it stops, hazards on, its driver gets out */
+    crashWithPlayer(veh, dur = range(20, 30)) {
+      if (!veh || veh.state === "crash") return null;
+      stopCrash(veh, dur);
+      crashCount++;
+      const c = { a: veh, b: null, t: clock, x: veh.x, road: veh.road, player: true, done: false };
+      crashes.push(c);
+      return c;
+    },
     /** Can someone walk across this carriageway at x for the next `seconds`? */
     clearToCross(road, x, seconds = 5) {
       for (const veh of all) {
@@ -660,6 +757,8 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
       const steps = Math.ceil(dt / 0.05);
       const h = dt / steps;
       for (let i = 0; i < steps; i++) for (const veh of [...all]) drive(veh, h, people, t);
+      maybeCrash(dt);
+      for (const c of crashes) if (!c.done && ![c.a, c.b].some((v) => v && v.state === "crash" && all.includes(v))) c.done = true;
       for (const veh of [...all]) {
         const R = ROADS[veh.road];
         if ((veh.x - R.to) * veh.dir > 0) despawn(veh);
