@@ -1520,8 +1520,13 @@ export function makeCharacter(kit, opts = {}) {
 
       // ---- lean into turns ----
       lean += (clamp(-s.turnRate * 0.035 * clamp(s.speed / 4, 0, 1.4), -0.16, 0.16) - lean) * ease(dt, 6);
-      holder.rotation.z = lean;
-      holder.rotation.x = -0.04 * running;
+      // body lean from the physics (leaning into speeding up and turning), a wobble while
+      // staggering, and the whole body tipping about the feet when it falls
+      const wob = s.stagger ? Math.sin(phase * Math.PI * 4) * 0.08 : 0;
+      const down = s.down || 0;
+      holder.rotation.z = lean + (s.leanSide || 0) * 0.6 + wob;
+      holder.rotation.x = -0.04 * running - (s.leanFwd || 0) * 0.6 - down;
+      holder.position.y = Math.sin(down) * 0.12;
       holder.parent?.updateMatrixWorld(true);
       if (s.sit) {
         sitting = true;

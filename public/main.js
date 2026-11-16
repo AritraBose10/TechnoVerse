@@ -148,7 +148,7 @@ if (HIGH) {
 // My own body: a capsule moved by a character controller, so it walks up steps and
 // ramps, slides along walls, falls with gravity and pushes loose objects.
 const controller = world.createCharacterController(0.02);
-controller.enableAutostep(0.4, 0.2, false);
+controller.enableAutostep(0.3, 0.2, false); // a high kerb or a stair, not a knee-high wall
 controller.enableSnapToGround(0.3);
 controller.setMaxSlopeClimbAngle((50 * Math.PI) / 180);
 controller.setMinSlopeSlideAngle((35 * Math.PI) / 180);
@@ -932,7 +932,8 @@ const clock = new THREE.Clock();
 let physicsTime = 0;
 let airTime = 0;
 const vel = { x: 0, z: 0 };
-const human = newHuman(0); // the player's body physics (humanphys.js)
+const human = newHuman(0);
+const fall = { th: 0, w: 0 }; // the player's body physics (humanphys.js)
 let walkGrade = 0;
 let lastImpact = 0;
 const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
@@ -1550,7 +1551,7 @@ function seqFrame(dt) {
 }
 // Rode into a car, auto or bus: the bike stops dead and falls on its side, the rider is on their feet
 // beside it, the other driver stops, puts the hazards on and gets out (people.js "argue").
-function crashIntoVehicle(veh) {
+function crashIntoVehicle(veh, v0 = 0) {
   const { bike, r } = riding;
   const label = veh.kind === "bus" ? "bus" : veh.kind === "auto" ? "auto" : veh.kind === "bike" ? "motorbike" : veh.kind === "cycle" ? "cycle" : "car";
   logLine(`You crashed into a ${label}!`, true);
@@ -1570,6 +1571,10 @@ function crashIntoVehicle(veh) {
   placeBody(p.x - Math.cos(heading) * 0.8 + Math.sin(heading) * 0.5, p.y, p.z + Math.sin(heading) * 0.8 + Math.cos(heading) * 0.5);
   vel.x = vel.z = 0;
   riding = null;
+  // the body keeps going when the bike stops: its momentum (70 kg x speed) is the push
+  me.group.rotation.y = human.heading = heading;
+  const j = 70 * Math.abs(v0) * 0.6;
+  pushHuman(human, Math.sin(heading) * j, Math.cos(heading) * j);
 }
 function finishSeq() {
   const { bike, off } = seq;
@@ -1625,8 +1630,9 @@ function rideFrame(dt) {
     if (hit && hit.toi < 0.92 + Math.abs(r.v) * dt) {
       const veh = traffic && traffic.vehicleOfCollider(hit.collider ?? hit.colliderHandle);
       if (veh && Math.abs(r.v) > 2) {
+        const v0 = r.v;
         r.v = 0;
-        crashIntoVehicle(veh);
+        crashIntoVehicle(veh, v0);
         return;
       }
       if (Math.abs(r.v) > 3 && !veh) logLine("Bump! Mind the walls.", true);
@@ -1801,7 +1807,8 @@ function walkFrame(dt, now) {
   const launchNow = updateJump(dt, keys.has("Space") || jumpHeld, speedNow);
   if (launchNow) pendingLaunch = launchNow; // used by the next physics step, which may come a frame later
   physicsTime += dt;
-  for (let i = 0; physicsTime >= STEP && i < 6; i++) {
+  let steps = 0;
+  for (let i = 0; physicsTime >= STEP && i < 6; i++, steps++) {
     physicsTime -= STEP;
     stepPhysics(vx, vz, pendingLaunch);
     pendingLaunch = 0;
@@ -1811,6 +1818,15 @@ function walkFrame(dt, now) {
   // the slope under the feet, from how far the body rose per metre walked (for the walking speed)
   {
     const flat = Math.hypot(t.x - pos.x, t.z - pos.z);
+    // pressing into a wall: the body is held back, so the legs slow down instead of sliding at full pace
+    if (steps && body.grounded && speedNow > 0.6) {
+      const moved = flat / (steps * STEP);
+      if (moved < speedNow * 0.7) {
+        const k = Math.max(0.35, moved / speedNow);
+        human.vx = vel.x *= k;
+        human.vz = vel.z *= k;
+      }
+    }
     if (body.grounded && flat > 0.01) walkGrade += (Math.max(-0.4, Math.min(0.4, (t.y - BODY_CENTRE - pos.y) / flat)) - walkGrade) * Math.min(1, dt * 4);
   }
   if (t.y < -20) placeBody(0, 0, 72); // safety net: fell out of the world
@@ -1820,6 +1836,17 @@ function walkFrame(dt, now) {
     lastImpact = body.impact; // a big drop: stumble or go down
     landHuman(human, body.impact);
   }
+  // falling: an inverted pendulum about the feet (theta'' = g/L sin theta) until the body is on the
+  // ground, then it lies there; in the last 1.4 s it pushes back up
+  if (human.fallen > 0) {
+    if (human.fallen < 1.4) fall.th = Math.max(0, fall.th - dt * (Math.PI / 2) / 1.2);
+    else if (fall.th < Math.PI / 2) {
+      if (fall.th === 0) { fall.th = 0.08; fall.w = 0.8; }
+      fall.w += (GRAVITY / 0.95) * Math.sin(fall.th) * dt;
+      fall.th += fall.w * dt;
+      if (fall.th >= Math.PI / 2) { fall.th = Math.PI / 2; fall.w = 0; }
+    }
+  } else fall.th = Math.max(0, fall.th - dt * 1.5);
   if (hero) {
     // Who to look at: the closest person within a few metres
     let nearest = null;
@@ -1832,6 +1859,10 @@ function walkFrame(dt, now) {
       grounded: jumpState.phase === "air" ? false : airTime < 0.15,
       jump: { phase: jumpState.phase, t: jumpState.t, crouch: jumpState.crouch, run: jumpState.run, vy: body.vy, launchV: jumpState.launchV || Math.sqrt(2 * GRAVITY * JUMP_HEIGHT.stand) },
       turnRate,
+      leanFwd: human.leanFwd,
+      leanSide: human.leanSide,
+      down: fall.th,
+      stagger: human.stagger > 0,
       facing: me.group.rotation.y,
       lookAt: nearest ? lookTarget.set(nearest.group.position.x, nearest.group.position.y + 1.8, nearest.group.position.z) : null,
       friendly: Boolean(nearest),
@@ -1987,10 +2018,11 @@ window.__tiu = {
   hero: () => Boolean(hero),
   // push the player (impulse in N*s, world x/z): __tiu.push(60, 0) is a shoulder bump
   push: (jx, jz) => pushHuman(human, jx, jz),
-  body: () => ({ v: +Math.hypot(human.vx, human.vz).toFixed(2), state: human.state, stamina: +human.stamina.toFixed(2), leanFwd: +human.leanFwd.toFixed(3), leanSide: +human.leanSide.toFixed(3) }),
+  body: () => ({ v: +Math.hypot(human.vx, human.vz).toFixed(2), state: human.state, stamina: +human.stamina.toFixed(2), leanFwd: +human.leanFwd.toFixed(3), leanSide: +human.leanSide.toFixed(3), fallen: +human.fallen.toFixed(2), th: +fall.th.toFixed(2) }),
   // run the getting-on/off sequence ahead without drawing: __tiu.advance(1.5); returns the step
   advance(seconds) {
     for (let t = 0; t < seconds && seq; t += 1 / 30) seqFrame(1 / 30);
+    if (!seq && !riding) for (let t = 0; t < seconds; t += 1 / 30) walkFrame(1 / 30, performance.now());
     return seq ? seq.steps[seq.i]?.name : riding ? "riding" : "walking";
   },
   ride: () => riding && { v: +riding.r.v.toFixed(2), heading: riding.r.heading, design: riding.bike.model.design },
