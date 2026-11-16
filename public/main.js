@@ -4,6 +4,7 @@ import { buildWorld } from "/world.js";
 import { loadCharacterKit, loadCrowdBody, makeCharacter } from "/character.js";
 import { buildBicycle, newRide, stepBike, BICYCLE_KINDS } from "/bicycle.js";
 import { buildDaylight } from "/daylight.js";
+import { newHuman, stepHuman, pushHuman, landHuman } from "/humanphys.js";
 import { buildMotorcycle, MOTORCYCLE_KINDS, MOTORCYCLE_DESIGNS, makeEngineSound, setMotorcycleNight } from "/motorcycle.js";
 import { buildTraffic } from "/traffic.js";
 import { buildPeople } from "/people.js";
@@ -931,6 +932,10 @@ const clock = new THREE.Clock();
 let physicsTime = 0;
 let airTime = 0;
 const vel = { x: 0, z: 0 };
+const human = newHuman(0); // the player's body physics (humanphys.js)
+let walkGrade = 0;
+let lastImpact = 0;
+const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 // The jump, in the phases a person goes through:
 //   prep  dip at the knees and hips, arms swing back, then drive up (the push-off)
 //   air   ballistic flight: momentum kept, almost no steering
@@ -1776,14 +1781,22 @@ function walkFrame(dt, now) {
     wantX *= 1 - 0.6 * give;
     wantZ *= 1 - 0.6 * give;
   }
-  const accel = 1 - Math.exp(-dt * (inAir ? 0.4 : len > 0.05 ? 6 : 9));
-  vel.x += (wantX - vel.x) * accel;
-  vel.z += (wantZ - vel.z) * accel;
+  // the body's own physics (humanphys.js): grip-limited speeding up, braking and turning, slopes,
+  // tiredness, staggering after a push
+  const running = keys.has("ShiftLeft") || keys.has("ShiftRight");
+  const wish = len > 0.05 ? Math.hypot(wantX, wantZ) / (running ? RUN_SPEED : WALK_SPEED) : 0;
+  const dirLen = Math.hypot(wantX, wantZ) || 1;
+  human.vx = vel.x;
+  human.vz = vel.z;
+  if (Math.abs(wrapAngle(human.heading - me.group.rotation.y)) > 0.5) human.heading = me.group.rotation.y; // teleported or turned by a sequence
+  stepHuman(human, { x: (wantX / dirLen) * wish, z: (wantZ / dirLen) * wish, run: running }, { grounded: !inAir, grade: walkGrade }, dt);
+  vel.x = human.vx;
+  vel.z = human.vz;
   const vx = vel.x;
   const vz = vel.z;
   const speedNow = Math.hypot(vx, vz);
   const facingBefore = me.group.rotation.y;
-  if (speedNow > 0.25 && !inAir) me.group.rotation.y = lerpAngle(facingBefore, Math.atan2(-vx, -vz), 1 - Math.exp(-dt * 9));
+  me.group.rotation.y = human.heading;
   const turnRate = Math.atan2(Math.sin(me.group.rotation.y - facingBefore), Math.cos(me.group.rotation.y - facingBefore)) / Math.max(dt, 1e-3);
   const launchNow = updateJump(dt, keys.has("Space") || jumpHeld, speedNow);
   if (launchNow) pendingLaunch = launchNow; // used by the next physics step, which may come a frame later
@@ -1795,9 +1808,18 @@ function walkFrame(dt, now) {
   }
   if (physicsTime > STEP) physicsTime = 0; // fell too far behind (tab was in the background)
   const t = body.rigid.translation();
+  // the slope under the feet, from how far the body rose per metre walked (for the walking speed)
+  {
+    const flat = Math.hypot(t.x - pos.x, t.z - pos.z);
+    if (body.grounded && flat > 0.01) walkGrade += (Math.max(-0.4, Math.min(0.4, (t.y - BODY_CENTRE - pos.y) / flat)) - walkGrade) * Math.min(1, dt * 4);
+  }
   if (t.y < -20) placeBody(0, 0, 72); // safety net: fell out of the world
   pos.set(t.x, t.y - BODY_CENTRE, t.z);
   airTime = body.grounded ? 0 : airTime + dt;
+  if (body.impact > 5 && body.grounded && body.impact !== lastImpact) {
+    lastImpact = body.impact; // a big drop: stumble or go down
+    landHuman(human, body.impact);
+  }
   if (hero) {
     // Who to look at: the closest person within a few metres
     let nearest = null;
@@ -1963,6 +1985,9 @@ window.__tiu = {
   },
   entranceYaw,
   hero: () => Boolean(hero),
+  // push the player (impulse in N*s, world x/z): __tiu.push(60, 0) is a shoulder bump
+  push: (jx, jz) => pushHuman(human, jx, jz),
+  body: () => ({ v: +Math.hypot(human.vx, human.vz).toFixed(2), state: human.state, stamina: +human.stamina.toFixed(2), leanFwd: +human.leanFwd.toFixed(3), leanSide: +human.leanSide.toFixed(3) }),
   // run the getting-on/off sequence ahead without drawing: __tiu.advance(1.5); returns the step
   advance(seconds) {
     for (let t = 0; t < seconds && seq; t += 1 / 30) seqFrame(1 / 30);
