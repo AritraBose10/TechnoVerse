@@ -1153,12 +1153,22 @@ function stepsOn(bike) {
   const P = {}; // the pose being built this frame (see seqFrame)
   const relaxed = (side) => false;
   if (motor && hung) {
+    // The helmet is held by its rim, one hand each side (the left hand alone while picking it up).
+    // The grips are points on the helmet itself, so the hands and the helmet move as one piece:
+    // the helmet goes where the path says and the wrists follow it through the arm IK.
+    const rim = (pos, quat, side, out) => out.set(side * 0.155, -0.045, 0.02).applyQuaternion(quat).add(pos); // side +1 is the helmet's left
+    // where it is held above the head before going on: straight above its worn place, a clear gap
+    const above = (out) => out.copy(_h.p1).addScaledVector(UPV, 0.16);
     steps.push({
       name: "take the helmet", dur: 0.75,
+      start() {
+        this.from = handNow.L.clone();
+      },
       run(k) {
         helmetHung(hung, _h.pos, _h.quat);
-        P.handL = V().copy(_m.at).addScaledVector(UPV, 0.86).addScaledVector(_m.right, -0.22).lerp(V().copy(_h.pos).addScaledVector(UPV, 0.13), ss(k * 1.2));
-        P.handR = relaxed(1);
+        // the left hand reaches the left side of the rim as it hangs, and takes hold
+        P.handL = V().copy(this.from).lerp(rim(_h.pos, _h.quat, 1, V()), ss(Math.min(1, k * 1.15)));
+        P.handR = false;
         P.stoop = 0.12 * Math.sin(Math.PI * k);
       },
     });
@@ -1166,33 +1176,35 @@ function stepsOn(bike) {
       name: "lift it up", dur: 0.8,
       start() {
         helmetHung(hung, _h.p0, _h.q0);
+        this.fromR = handNow.R.clone();
       },
       run(k) {
+        // Stage 1: up from the handlebar in a smooth arc out in front, turning upright on the way,
+        // and arriving above the head (Stage 2) with a clear gap
         helmetWorn(_h.p1, _h.q1);
-        const front = V().copy(_m.head).addScaledVector(_m.fwd, 0.34).addScaledVector(UPV, 0.08);
-        bez(_h.p0, V().copy(_h.p0).lerp(front, 0.5).addScaledVector(UPV, 0.25), front, ss(k), _h.pos);
-        _h.quat.slerpQuaternions(_h.q0, _h.q1, ss(k));
+        const top = above(V());
+        const ctrl = V().copy(_h.p0).lerp(top, 0.5).addScaledVector(UPV, 0.18).addScaledVector(_m.fwd, 0.22);
+        bez(_h.p0, ctrl, top, ss(k), _h.pos);
+        _h.quat.slerpQuaternions(_h.q0, _h.q1, ss(Math.min(1, k * 1.25)));
         placeHelmet(hung.helmet, _h.pos, _h.quat);
-        P.handL = V().copy(_h.pos).addScaledVector(_m.right, -0.15).addScaledVector(UPV, -0.03);
-        P.handR = k < 0.35 ? relaxed(1) : V().copy(_h.pos).addScaledVector(_m.right, 0.15).addScaledVector(UPV, -0.03);
+        P.handL = rim(_h.pos, _h.quat, 1, V());
+        // the right hand comes up from the side and takes the other side of the rim
+        const w = span(k, 0.25, 0.7);
+        P.handR = V().copy(this.fromR).lerp(rim(_h.pos, _h.quat, -1, V()), w);
       },
     });
     steps.push({
       name: "put it on", dur: 0.7,
-      start() {
-        _h.p0.copy(hung.helmet.group.position);
-      },
       run(k) {
+        // Stage 2 then 3: a moment held above the head, then straight down onto it
         helmetWorn(_h.p1, _h.q1);
-        // over the head first, then pulled down onto it
-        const over = V().copy(_h.p1).addScaledVector(UPV, 0.12).addScaledVector(_m.fwd, 0.05);
-        bez(_h.p0, over, _h.p1, ss(k), _h.pos);
+        above(_h.pos).lerp(_h.p1, span(k, 0.18, 0.9));
         placeHelmet(hung.helmet, _h.pos, _h.q1);
-        P.handL = V().copy(_h.pos).addScaledVector(_m.right, -0.16).addScaledVector(UPV, -0.06);
-        P.handR = V().copy(_h.pos).addScaledVector(_m.right, 0.16).addScaledVector(UPV, -0.06);
+        P.handL = rim(_h.pos, _h.q1, 1, V());
+        P.handR = rim(_h.pos, _h.q1, -1, V());
       },
       end() {
-        // now it sits on the head and moves with it
+        // on the head: it moves with the head from now on, and the hands let go
         hero.model.getObjectByName("Head").attach(hung.helmet.group);
         const ref = hero.model.getObjectByName("gear-helmet");
         hung.helmet.group.position.copy(ref.position);
@@ -1202,21 +1214,41 @@ function stepsOn(bike) {
     });
     steps.push({
       name: "fasten the strap", dur: 0.7,
+      start() {
+        this.fromL = handNow.L.clone();
+        this.fromR = handNow.R.clone();
+      },
       run(k) {
+        // from the rim down the outside of the cheeks to the buckle under the chin and back: each
+        // hand's path bows outwards and forwards, clear of the face, neck and chest
         const chin = V().copy(_m.head).addScaledVector(UPV, -0.1).addScaledVector(_m.fwd, 0.1);
-        const w = Math.sin(Math.PI * Math.min(1, k * 1.1));
-        P.handL = V().copy(_m.at).addScaledVector(UPV, 0.86).addScaledVector(_m.right, -0.22).lerp(V().copy(chin).addScaledVector(_m.right, -0.025), w);
-        P.handR = V().copy(_m.at).addScaledVector(UPV, 0.86).addScaledVector(_m.right, 0.0).lerp(V().copy(chin).addScaledVector(_m.right, 0.025), w);
+        const go = span(k, 0, 0.45);
+        const back = span(k, 0.75, 1);
+        for (const [key, side, from] of [["handL", -1, this.fromL], ["handR", 1, this.fromR]]) {
+          const buckle = V().copy(chin).addScaledVector(_m.right, side * 0.065); // fingertips meet at the buckle; the wrists stay a hand's width apart
+          const bow = V().copy(from).lerp(buckle, 0.5).addScaledVector(_m.right, side * 0.07).addScaledVector(_m.fwd, 0.1);
+          const there = bez(from, bow, buckle, go, V());
+          // done: the hands drop forward and down, toward where the bars are
+          P[key] = back > 0 ? there.lerp(V().copy(buckle).addScaledVector(_m.fwd, 0.18).addScaledVector(UPV, -0.22).addScaledVector(_m.right, side * 0.14), back) : there;
+        }
         if (k > 0.5) hung.helmet.strap(true);
       },
     });
   }
   steps.push({
     name: "hands on the bars", dur: 0.55,
+    start() {
+      this.fromL = handNow.L.clone();
+      this.fromR = handNow.R.clone();
+    },
     run(k) {
-      const rest = (side) => V().copy(_m.at).addScaledVector(UPV, 0.86).addScaledVector(_m.right, side * 0.22);
-      P.handL = rest(-1).lerp(V().copy(_m.gripL).addScaledVector(_m.back, 0.05), ss(k));
-      P.handR = rest(1).lerp(V().copy(_m.gripR).addScaledVector(_m.back, 0.05), ss(k));
+      // from wherever the hands are (by the chin after the strap, at the sides otherwise) out to
+      // the grips, in front of the body
+      for (const [key, grip, from] of [["handL", _m.gripL, this.fromL], ["handR", _m.gripR, this.fromR]]) {
+        const to = V().copy(grip).addScaledVector(_m.back, 0.05);
+        const ctrl = V().copy(from).lerp(to, 0.5).addScaledVector(_m.fwd, 0.1);
+        P[key] = bez(from, ctrl, to, ss(k), V());
+      }
       P.stoop = 0.15 * ss(k);
     },
   });
@@ -1458,9 +1490,12 @@ function toggleRide() {
   myGreet.code = 0;
   jumpState.phase = null;
   camYaw = b.heading;
+  hero.model.getObjectByName("LeftHand").getWorldPosition(handNow.L);
+  hero.model.getObjectByName("RightHand").getWorldPosition(handNow.R);
   const { steps, P } = stepsOn(b);
   seq = { bike: b, steps, P, i: -1, t: 0, off: false, lean: b.model.spec.parkLean, kickK: 1 };
 }
+const handNow = { L: new THREE.Vector3(), R: new THREE.Vector3() }; // wrists, last frame of the sequence
 function seqFrame(dt) {
   const q = seq;
   const m = q.bike.model;
@@ -1505,6 +1540,8 @@ function seqFrame(dt) {
     talk: 0,
     ride: { ..._m, crank: m.spec.motor ? 0.6 : 0, effort: 0, footDown: 0, backing: 0, backDist: 0, posture: m.spec.posture, stand: P.stand, at: _m.at, lift: P.lift || 0, stoop: P.stoop || 0, handL: P.handL, handR: P.handR, footL: P.footL, footR: P.footR },
   });
+  hero.model.getObjectByName("LeftHand").getWorldPosition(handNow.L);
+  hero.model.getObjectByName("RightHand").getWorldPosition(handNow.R);
 }
 // Rode into a car, auto or bus: the bike stops dead and falls on its side, the rider is on their feet
 // beside it, the other driver stops, puts the hazards on and gets out (people.js "argue").
