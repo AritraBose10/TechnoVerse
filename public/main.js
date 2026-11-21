@@ -9,6 +9,7 @@ import { newHuman, stepHuman, pushHuman, landHuman } from "/humanphys.js";
 import { buildMotorcycle, MOTORCYCLE_KINDS, MOTORCYCLE_DESIGNS, makeEngineSound, setMotorcycleNight } from "/motorcycle.js";
 import { buildTraffic } from "/traffic.js";
 import { buildPeople } from "/people.js";
+import { createTrack, pushSample, sampleTrack } from "/interp.js";
 import { loadCrowdBodies, crowdBodies } from "/crowdbodies.js";
 import { EffectComposer } from "/vendor/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "/vendor/jsm/postprocessing/RenderPass.js";
@@ -224,6 +225,8 @@ function makeAvatar(info) {
     ty: info.y || 0,
     tz: info.z,
     try: info.ry,
+    track: createTrack(info.x, info.y || 0, info.z, info.ry),
+    vy: 0,
     bikeOn: info.bike | 0,
     tlean: info.lean || 0,
     bubble: null,
@@ -486,7 +489,7 @@ function animateRemote(a, dt, moved, turned, now) {
   c.update(dt, {
     speed: phase === "air" ? a.spd : a.spd < 0.15 ? 0 : a.spd,
     grounded: phase !== "air",
-    jump: { phase, t: phase === "prep" ? 0.5 : 0, crouch: a.crouch || 0, run: a.spd > 2.5 ? 1 : 0, vy: (a.ty - a.group.position.y) * 10, launchV: 3 },
+    jump: { phase, t: phase === "prep" ? 0.5 : 0, crouch: a.crouch || 0, run: a.spd > 2.5 ? 1 : 0, vy: a.vy, launchV: 3 },
     turnRate: turned / Math.max(dt, 1e-3),
     facing: a.group.rotation.y,
     lookAt: null,
@@ -547,6 +550,7 @@ function connect(profile) {
           players.set(p.id, a);
           attachCharacter(a);
         }
+        document.body.classList.add("playing"); // the canvas fades in, the join screen and its flyover go
         $("#join").hidden = true;
         $("#join").style.display = "none";
         $("#hud").hidden = false;
@@ -572,6 +576,7 @@ function connect(profile) {
       case "snap":
         for (const [id, x, y, z, ry, bk, lean, jump, crouch, gest] of msg.p) {
           const a = players.get(id);
+          if (a) pushSample(a.track, x, y, z, ry, performance.now());
           if (a) Object.assign(a, { tx: x, ty: y, tz: z, try: ry, bikeOn: bk | 0, tlean: lean || 0, jump: jump || 0, crouch: crouch || 0, gest: gest || 0 });
         }
         break;
@@ -2122,6 +2127,7 @@ let camNow = 5.5;
 let sendTimer = 0;
 let slowTimer = 0;
 let lastSent = "";
+const _interp = { x: 0, y: 0, z: 0, ry: 0, vx: 0, vy: 0, vz: 0 };
 const lerpAngle = (a, b, t) => a + Math.atan2(Math.sin(b - a), Math.cos(b - a)) * t;
 
 function frame() {
@@ -2131,19 +2137,7 @@ function frame() {
   const dt = rawDt * timeScale * FX.slowK;
   const now = performance.now();
 
-  if (!me) {
-    if (!appReady) return; // the loading screen is up: nothing is drawn behind it
-    daylight.update(dt, camera.position);
-    sun.position.copy(camera.position).add(SUN_OFFSET);
-    sun.target.position.copy(camera.position);
-    // Slow fly-around behind the join screen
-    const t = now / 9000;
-    camera.position.set(focus.x + Math.sin(t) * 120, 55, focus.z + Math.cos(t) * 120);
-    camera.lookAt(focus.x, focus.height * 0.4, focus.z);
-    draw();
-    return;
-  }
-
+  if (!me) return; // the join screen has a pre-rendered flyover (CSS): nothing is drawn in 3D until the player is in
   const pos = me.group.position;
   if (seq && hero) seqFrame(dt);
   else if (crash && hero) crashFrame(dt);
@@ -2353,25 +2347,25 @@ function afterMove(dt, now, pos) {
     p.mesh.quaternion.copy(p.body.rotation());
   }
 
-  // Other people: glide toward their latest known position
-  const k = 1 - Math.exp(-dt * 12);
+  // Other people: drawn ~120 ms in the past, interpolated between real snapshots (see interp.js)
   for (const a of players.values()) {
     const p = a.group.position;
-    p.x += (a.tx - p.x) * k;
-    p.y += (a.ty - p.y) * k;
-    p.z += (a.tz - p.z) * k;
-    const moved = Math.hypot(a.tx - p.x, a.tz - p.z);
+    const px = p.x, pz = p.z;
+    sampleTrack(a.track, performance.now(), _interp, dt);
+    p.set(_interp.x, _interp.y, _interp.z);
+    a.vy = _interp.vy;
+    const moved = Math.hypot(p.x - px, p.z - pz);
     const before = a.group.rotation.y;
-    a.group.rotation.y = lerpAngle(a.group.rotation.y, a.try, k);
+    a.group.rotation.y = _interp.ry;
     a.dist = Math.hypot(p.x - pos.x, p.z - pos.z);
-    showRemoteBike(a, dt, moved * k);
+    showRemoteBike(a, dt, moved);
     // someone beside me offers a hand: take it
     if (a.gest === 3 && a.dist < 1.9 && !riding && now > myGreet.until && now > myGreet.cool && partnerOf(a) === me) {
       greet(3, true);
       myGreet.cool = now + 6000;
       logLine(`You shook hands with ${a.name}.`, true);
     }
-    animateRemote(a, dt, moved * k, Math.atan2(Math.sin(a.group.rotation.y - before), Math.cos(a.group.rotation.y - before)), now);
+    animateRemote(a, dt, moved, Math.atan2(Math.sin(a.group.rotation.y - before), Math.cos(a.group.rotation.y - before)), now);
   }
   for (const a of [me, ...players.values()]) {
     if (a.bubble && now > a.bubbleUntil) {
@@ -2431,7 +2425,7 @@ function afterMove(dt, now, pos) {
 // then the drone shot fades in and the button turns on, so it starts smooth instead of stuttering in view.
 let appReady = false;
 (function loading() {
-  const bar = $("#loadBar"), txt = $("#loadText"), btn = $("#enterBtn");
+  const bar = $("#loadBar"), txt = $("#loadText"), pct = $("#loadPct"), tipEl = $("#loadTip"), btn = $("#enterBtn");
   const jobs = [
     ["the people", kitLoading],
     ["the crowd", bodiesLoading],
@@ -2441,17 +2435,43 @@ let appReady = false;
   ].filter(([, p]) => p);
   const total = jobs.length + 1; // and the graphics warm-up
   let done = 0;
+  const show = (n) => {
+    const v = Math.max(4, Math.min(100, Math.round(n * 100)));
+    bar.style.width = v + "%";
+    pct.textContent = v + "%";
+  };
+  txt.textContent = "Loading the campus…";
   const tick = (label) => {
     done++;
-    bar.style.width = Math.max(4, Math.round((done / total) * 100)) + "%";
+    show(done / total);
     if (label) txt.textContent = label;
   };
+  // a line of advice under the bar, changing every few seconds
+  const TIPS = [
+    "Press <b>T</b> to step through the day, from dawn to midnight.",
+    "Say hello with <b>1</b> (nomoshkar), <b>2</b> (wave) or <b>3</b> (handshake).",
+    "Hold <b>V</b> to talk to whoever is standing near you.",
+    "Autos and buses stop at the kerb to pick people up and drop them off.",
+    "Stand in a car's way for a few seconds and the driver will get out to argue.",
+    "Chat reaches everyone within 15 metres.",
+  ];
+  let tipAt = Math.floor(Math.random() * TIPS.length);
+  tipEl.innerHTML = TIPS[tipAt];
+  const tipTimer = setInterval(() => {
+    tipEl.style.opacity = 0;
+    setTimeout(() => {
+      tipAt = (tipAt + 1) % TIPS.length;
+      tipEl.innerHTML = TIPS[tipAt];
+      tipEl.style.opacity = 1;
+    }, 450);
+  }, 4200);
   const reveal = () => {
     if (appReady) return;
     appReady = true;
-    document.body.classList.remove("booting"); // the canvas fades in
+    clearInterval(tipTimer);
+    document.body.classList.remove("booting"); // the loader fades out, the join screen fades in
     btn.disabled = false;
-    $("#loadBox").classList.add("done");
+    setTimeout(() => $("#name").focus(), 400);
   };
   Promise.all(jobs.map(([name, p]) => Promise.resolve(p).catch(() => {}).then(() => tick(`Loaded ${name}`))))
     .then(async () => {
@@ -2463,14 +2483,14 @@ let appReady = false;
         camera.updateMatrixWorld(true);
         if (renderer.compileAsync) await renderer.compileAsync(scene, camera);
         else renderer.compile(scene, camera);
-        draw(); // two real frames: shaders, shadow map and the AO buffers are made here, hidden
+        draw(); // two real frames: shaders, shadow map and the AO buffers are made here, hidden, so the first frame in the game is smooth
         draw();
       } catch (e) {
         console.warn("warm-up failed", e);
       }
       tick("Ready");
     })
-    .then(() => new Promise((r) => setTimeout(r, 200)))
+    .then(() => new Promise((r) => setTimeout(r, 450)))
     .then(reveal);
   setTimeout(reveal, 45000); // never hang on a failed download
 })();

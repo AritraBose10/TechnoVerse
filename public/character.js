@@ -1270,6 +1270,7 @@ export function makeCharacter(kit, opts = {}) {
   const arms = [bone("LeftArm"), bone("RightArm")];
   const forearms = [bone("LeftForeArm"), bone("RightForeArm")];
   const hands = [bone("LeftHand"), bone("RightHand")];
+  const handRest = hands.map((h) => h.quaternion.clone()); // the wrist straight, as in the bind pose
   const neck = bone("Neck");
   const head = bone("Head");
   const eyes = [bone("LeftEye"), bone("RightEye")].filter(Boolean);
@@ -1356,7 +1357,7 @@ export function makeCharacter(kit, opts = {}) {
     solveChain(leg.up, leg.knee, leg.foot, target);
   }
   // The same two-bone solver for any limb: root (hip/shoulder), hinge (knee/elbow), end (ankle/wrist).
-  function solveChain(upBone, midBone, endBone, target) {
+  function solveChain(upBone, midBone, endBone, target, pole = null) {
     const leg = { up: upBone, knee: midBone, foot: endBone };
     const a = leg.up.getWorldPosition(new THREE.Vector3());
     const b = leg.knee.getWorldPosition(new THREE.Vector3());
@@ -1385,6 +1386,28 @@ export function makeCharacter(kit, opts = {}) {
     if (swingAxis.lengthSq() > 1e-8) leg.up.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(swingAxis.normalize().applyQuaternion(upWorldInv), swing));
     leg.knee.quaternion.multiply(r1);
     leg.up.updateMatrixWorld(true);
+    if (pole) {
+      // turn the whole limb about the root-to-end line until the middle joint (elbow) points toward the pole:
+      // without this the elbow keeps whatever bend the walk cycle gave it, and a raised arm folds across the face
+      const A = leg.up.getWorldPosition(new THREE.Vector3());
+      const B = leg.knee.getWorldPosition(new THREE.Vector3());
+      const E = leg.foot.getWorldPosition(new THREE.Vector3());
+      const axis = E.sub(A).normalize();
+      const bp = B.sub(A);
+      bp.addScaledVector(axis, -bp.dot(axis));
+      const pp = new THREE.Vector3().copy(pole).sub(A);
+      pp.addScaledVector(axis, -pp.dot(axis));
+      if (bp.lengthSq() > 1e-8 && pp.lengthSq() > 1e-8) {
+        bp.normalize();
+        pp.normalize();
+        const ang = Math.atan2(new THREE.Vector3().crossVectors(bp, pp).dot(axis), bp.dot(pp));
+        const upW = leg.up.getWorldQuaternion(new THREE.Quaternion());
+        const parentW = leg.up.parent.getWorldQuaternion(new THREE.Quaternion());
+        const turned = new THREE.Quaternion().setFromAxisAngle(axis, ang).multiply(upW);
+        leg.up.quaternion.copy(parentW.invert().multiply(turned));
+        leg.up.updateMatrixWorld(true);
+      }
+    }
     // keep the foot at the angle the animation gave it
     leg.foot.quaternion.copy(leg.knee.getWorldQuaternion(qa).invert()).multiply(footWorld);
     leg.foot.updateMatrixWorld(true);
@@ -1521,6 +1544,7 @@ export function makeCharacter(kit, opts = {}) {
   const hand = new THREE.Vector3();
   const tgt = new THREE.Vector3();
   const sum = new THREE.Vector3();
+  const pole = new THREE.Vector3();
   function gestures(dt, g) {
     let any = false;
     for (const k in gw) {
@@ -1551,7 +1575,17 @@ export function makeCharacter(kit, opts = {}) {
       const blend = Math.min(1, total);
       tgt.copy(sum).multiplyScalar(1 / total);
       hand.lerp(tgt, blend);
-      solveChain(arms[side], forearms[side], hands[side], hand);
+      // where the elbow should point: down and a little out and back for most actions; out to the side, at shoulder
+      // height, when the hand goes up beside the head (a wave, a salute, a stretch) or onto the hip
+      const s = side === 1 ? 1 : -1;
+      const up = Math.min(1, gw.wave + gw.stretch);
+      const out = Math.min(1, up + gw.hip + gw.lean);
+      arms[side].getWorldPosition(pole);
+      pole.addScaledVector(rightW, s * (0.18 + 0.32 * out) * k).addScaledVector(UP, (-0.45 + 0.1 * up) * k).addScaledVector(fwdW, (-0.12 - 0.1 * gw.hip) * k);
+      solveChain(arms[side], forearms[side], hands[side], hand, pole);
+      // the wrist follows the forearm instead of hanging limp at the angle the walk cycle left it
+      hands[side].quaternion.slerp(handRest[side], blend);
+      hands[side].updateMatrixWorld(true);
     };
     const at = g.at || P;
     const sin = Math.sin;
@@ -1573,7 +1607,7 @@ export function makeCharacter(kit, opts = {}) {
       [gw.wipe, (o) => o.copy(at).addScaledVector(rightW, sin(t * 2.3) * 0.22).addScaledVector(fwdW, Math.cos(t * 1.7) * 0.06).addScaledVector(UP, 0.06)],
       [gw.serve, (o) => S(o, C, 0.48, -0.12, 0.1)], // handing something across
       [gw.count, (o) => S(o, C, 0.27, -0.2 + 0.015 * sin(t * 7), 0.03)], // thumbing through notes
-      [gw.wave, (o) => S(o, H, 0.08, 0.1, 0.3 + 0.09 * sin(t * 9))],
+      [gw.wave, (o) => S(o, H, 0.05, 0.16, 0.4 + 0.08 * sin(t * 9))], // hand up beside the head, swinging
       [gw.point, (o) => (g.at ? o.copy(C).lerp(at, 0.5).addScaledVector(UP, 0.05) : S(o, C, 0.55, 0.05, 0.2))],
       [gw.scratch, (o) => S(o, H, -0.09, 0.07 + 0.012 * sin(t * 11), 0.07)], // back of the head
       [gw.brow, (o) => S(o, H, 0.11, 0.07, 0.07 * sin(t * 2.6))], // wiping the forehead

@@ -3,49 +3,114 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>People of TIU (prototype)</title>
+<title>TechnoVerse · People of TIU</title>
 <style>
   :root { --ink:#14202e; --panel:rgba(16,24,36,.82); --line:rgba(255,255,255,.14); --accent:#ffb53d; --text:#f2f5f9; --muted:#a9b4c2; }
   * { box-sizing:border-box; }
-  html,body { margin:0; height:100%; overflow:hidden; background:#9fd0ee; color:var(--text);
+  html,body { margin:0; height:100%; overflow:hidden; background:#05070b; color:var(--text);
     font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; -webkit-tap-highlight-color:transparent; }
-  canvas#scene { position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none; }
+  canvas#scene { position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none; opacity:0; visibility:hidden; transition:opacity .9s ease; }
+  body.playing canvas#scene { opacity:1; visibility:visible; }
   button { font:inherit; cursor:pointer; }
   .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; backdrop-filter:blur(8px); }
 
-  /* Boot: the name form is there at once; the drone shot behind it fades in when the city has loaded */
-  body.booting { background:#0b1522; }
-  body.booting canvas#scene { opacity:0; }
-  canvas#scene { transition:opacity 1.2s ease; }
-  #loadBox { margin:0 0 14px; }
-  #loadText { margin:0 0 8px; font-size:13px; color:var(--muted); }
-  #loadTrack { height:5px; border-radius:3px; background:rgba(255,255,255,.14); overflow:hidden; position:relative; }
-  #loadBar { height:100%; width:4%; border-radius:3px; background:var(--accent); transition:width .35s ease; }
-  /* a shimmer on the compositor, so it keeps moving while the page is busy building the world */
-  #loadTrack::after { content:""; position:absolute; top:0; left:0; width:40%; height:100%;
-    background:linear-gradient(90deg,transparent,rgba(255,255,255,.35),transparent); animation:loadSlide 1.2s linear infinite; }
-  #loadBox.done { display:none; }
-  .primary:disabled { opacity:.45; cursor:wait; }
-  @keyframes loadSlide { from { transform:translateX(-100%); } to { transform:translateX(260%); } }
+  /* ---------- Boot: a game loader on a blank screen ---------- */
+  #loader { position:fixed; inset:0; z-index:40; display:grid; place-items:center; background:#05070b;
+    transition:opacity .7s ease, visibility .7s; }
+  body:not(.booting) #loader { opacity:0; visibility:hidden; pointer-events:none; }
+  #loader::before { content:""; position:absolute; inset:0;
+    background:radial-gradient(60% 55% at 50% 46%, rgba(255,181,61,.10), transparent 70%),
+               radial-gradient(90% 70% at 50% 120%, rgba(214,32,32,.14), transparent 70%); }
+  .ld { position:relative; width:min(420px,86vw); text-align:center; }
+  .ld-mark { position:relative; width:112px; height:112px; margin:0 auto 26px; }
+  .ld-mark img { position:absolute; inset:18px; width:76px; height:76px; border-radius:50%; object-fit:cover; transform:scale(1.04); }
+  .ld-ring { position:absolute; inset:0; border-radius:50%; border:2px solid rgba(255,255,255,.08); border-top-color:var(--accent); border-right-color:rgba(255,181,61,.35);
+    animation:ldSpin 1.1s linear infinite; }
+  .ld-ring.b { inset:9px; border-top-color:transparent; border-right-color:transparent; border-bottom-color:rgba(255,255,255,.5); border-left-color:rgba(255,255,255,.12);
+    animation-duration:1.9s; animation-direction:reverse; }
+  .ld h2 { margin:0; font-size:28px; font-weight:300; letter-spacing:.42em; text-indent:.42em; }
+  .ld h2 b { font-weight:700; color:var(--accent); }
+  .ld .sub { margin:8px 0 34px; font-size:12px; letter-spacing:.26em; text-indent:.26em; text-transform:uppercase; color:var(--muted); }
+  #loadTrack { position:relative; height:6px; border-radius:3px; background:rgba(255,255,255,.09); overflow:hidden; }
+  #loadBar { height:100%; width:4%; border-radius:3px; background:linear-gradient(90deg,#ff8a2b,var(--accent),#ffe08a); transition:width .6s cubic-bezier(.2,.7,.2,1); box-shadow:0 0 14px rgba(255,181,61,.7); }
+  #loadTrack::after { content:""; position:absolute; top:0; left:0; width:35%; height:100%;
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,.4),transparent); animation:loadSlide 1.3s linear infinite; }
+  .ld-row { display:flex; justify-content:space-between; align-items:baseline; margin-top:12px; font-size:13px; color:var(--muted); }
+  #loadText { text-align:left; }
+  #loadText::before { content:""; display:inline-block; width:7px; height:7px; margin-right:9px; border-radius:50%; background:var(--accent); animation:ldPulse 1s ease-in-out infinite; }
+  #loadPct { font-variant-numeric:tabular-nums; color:var(--text); letter-spacing:.06em; }
+  #loadTip { margin:46px 0 0; min-height:2.6em; font-size:13px; color:rgba(255,255,255,.55); transition:opacity .5s ease; }
+  #loadTip b { color:var(--accent); font-weight:600; }
+  .ld-dots i { position:absolute; width:3px; height:3px; border-radius:50%; background:rgba(255,181,61,.55); opacity:0; animation:ldRise 7s linear infinite; }
+  @keyframes ldSpin { to { transform:rotate(360deg); } }
+  @keyframes ldPulse { 50% { opacity:.25; } }
+  @keyframes loadSlide { from { transform:translateX(-100%); } to { transform:translateX(300%); } }
+  @keyframes ldRise { 0% { transform:translateY(0); opacity:0; } 15% { opacity:.9; } 100% { transform:translateY(-70vh); opacity:0; } }
 
-  /* Join screen */
-  #join { position:fixed; inset:0; display:grid; place-items:center; padding:16px; overflow:auto;
-    background:linear-gradient(180deg,rgba(15,30,50,.55),rgba(15,30,50,.85)); z-index:20; }
-  #join form { width:min(380px,100%); padding:24px; }
-  #join h1 { margin:0 0 4px; font-size:26px; letter-spacing:-.01em; }
-  #join p { margin:0 0 18px; color:var(--muted); }
-  label { display:block; margin:0 0 12px; font-size:13px; color:var(--muted); }
-  input[type=text] { display:block; width:100%; margin-top:4px; padding:10px 12px; border-radius:8px;
-    border:1px solid var(--line); background:rgba(255,255,255,.08); color:var(--text); font:inherit; outline:none; }
-  input[type=text]:focus { border-color:var(--accent); }
-  .swatches { display:flex; gap:8px; margin-top:6px; }
-  .swatches button { width:30px; height:30px; border-radius:50%; border:2px solid transparent; padding:0; }
-  .swatches button[aria-pressed=true] { border-color:#fff; }
-  .shirts { display:flex; gap:8px; margin-top:6px; }
-  .shirts button { padding:6px 10px; border-radius:8px; border:2px solid transparent; background:rgba(255,255,255,.12); color:inherit; cursor:pointer; }
-  .shirts button[aria-pressed=true] { border-color:#fff; }
-  .primary { width:100%; padding:12px; border:0; border-radius:8px; background:var(--accent); color:#1b1300; font-weight:600; }
-  #joinError { color:#ff9c9c; min-height:1.4em; margin:8px 0 0; font-size:13px; }
+  /* ---------- Join screen: a slow pre-rendered flyover behind the form (compositor only, no 3D drawing) ---------- */
+  #bg { position:fixed; inset:0; z-index:5; background:#0b1522; overflow:hidden; }
+  body.playing #bg, body.playing #join, body.playing .jbrand { display:none; }
+  #bg i { position:absolute; inset:-4%; background-size:cover; background-position:center; opacity:0; will-change:transform,opacity;
+    animation:bgShow 36s linear infinite; }
+  #bg i:nth-child(1) { background-image:url(/join/a.jpg); animation-delay:0s; }
+  #bg i:nth-child(2) { background-image:url(/join/b.jpg); animation-delay:-27s; }
+  #bg i:nth-child(3) { background-image:url(/join/c.jpg); animation-delay:-18s; }
+  #bg i:nth-child(4) { background-image:url(/join/d.jpg); animation-delay:-9s; }
+  @keyframes bgShow {
+    0% { opacity:0; transform:scale(1.02) translate3d(-1.2%,0,0); }
+    6% { opacity:1; }
+    25% { opacity:1; }
+    31% { opacity:0; }
+    100% { opacity:0; transform:scale(1.14) translate3d(1.8%,-.8%,0); }
+  }
+  #bg::after { content:""; position:absolute; inset:0;
+    background:radial-gradient(75% 85% at 50% 50%, transparent 30%, rgba(5,8,14,.62) 100%),
+               linear-gradient(180deg, rgba(8,14,24,.55), rgba(8,14,24,.15) 40%, rgba(8,14,24,.75)); }
+  #join { position:fixed; inset:0; z-index:20; display:grid; place-items:center; padding:20px; overflow:auto;
+    opacity:0; transform:translateY(14px); transition:opacity .8s ease .15s, transform .8s ease .15s; }
+  body:not(.booting) #join { opacity:1; transform:none; }
+  .jbrand { position:fixed; left:28px; top:22px; z-index:21; display:flex; align-items:center; gap:12px; text-shadow:0 1px 8px rgba(0,0,0,.5); }
+  .jbrand img { width:34px; height:34px; border-radius:50%; object-fit:cover; transform:scale(1.04); }
+  .jbrand span { font-size:13px; letter-spacing:.32em; font-weight:300; }
+  .jbrand b { font-weight:700; color:var(--accent); }
+  #join form { position:relative; width:min(430px,100%); padding:30px 30px 22px; border-radius:20px;
+    background:rgba(9,14,22,.80); border:1px solid rgba(255,255,255,.12);
+    box-shadow:0 30px 80px rgba(0,0,0,.55), 0 0 0 1px rgba(255,181,61,.08), inset 0 1px 0 rgba(255,255,255,.08); }
+  #join form::before { content:""; position:absolute; left:30px; right:30px; top:-1px; height:2px; border-radius:2px;
+    background:linear-gradient(90deg,transparent,var(--accent),transparent); }
+  #join h1 { margin:0 0 6px; font-size:30px; font-weight:700; letter-spacing:-.02em; line-height:1.1;
+    background:linear-gradient(90deg,#fff 30%,#ffd994); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  #join .lead { margin:0 0 22px; color:var(--muted); font-size:14px; }
+  .fld { position:relative; margin:0 0 14px; }
+  .fld input { display:block; width:100%; padding:20px 14px 7px; border-radius:11px; border:1px solid rgba(255,255,255,.14);
+    background:rgba(255,255,255,.06); color:var(--text); font:inherit; font-size:15px; outline:none; transition:border-color .2s, background .2s, box-shadow .2s; }
+  .fld input:focus { border-color:var(--accent); background:rgba(255,181,61,.07); box-shadow:0 0 0 3px rgba(255,181,61,.16); }
+  .fld label { position:absolute; left:15px; top:14px; margin:0; font-size:15px; color:var(--muted); pointer-events:none; transition:all .18s ease; }
+  .fld input:focus + label, .fld input:not(:placeholder-shown) + label { top:6px; font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--accent); }
+  .grp { margin:6px 0 16px; }
+  .grp > span.t { display:block; margin:0 0 9px; font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
+  .swatches { display:flex; flex-wrap:wrap; gap:10px; }
+  .swatches button { position:relative; width:32px; height:32px; border-radius:50%; border:0; padding:0; box-shadow:inset 0 0 0 2px rgba(255,255,255,.18); transition:transform .15s; }
+  .swatches button:hover { transform:scale(1.14); }
+  .swatches button[aria-pressed=true] { box-shadow:0 0 0 2px #0a0f17, 0 0 0 4px #fff, 0 0 14px rgba(255,255,255,.35); transform:scale(1.08); }
+  .shirts { display:grid; grid-template-columns:repeat(3,1fr); gap:9px; }
+  .shirts button { display:flex; flex-direction:column; align-items:center; gap:7px; padding:11px 6px 9px; border-radius:12px; color:var(--text);
+    border:1px solid rgba(255,255,255,.12); background:rgba(255,255,255,.05); font-size:12px; line-height:1.2; text-align:center; transition:all .18s; }
+  .shirts button:hover { background:rgba(255,255,255,.10); transform:translateY(-1px); }
+  .shirts button[aria-pressed=true] { border-color:var(--accent); background:rgba(255,181,61,.12); box-shadow:0 0 0 1px var(--accent), 0 6px 18px rgba(255,181,61,.12); }
+  .shirts svg { width:34px; height:34px; }
+  .primary { position:relative; width:100%; margin-top:6px; padding:14px; border:0; border-radius:12px; font-size:16px; font-weight:700; letter-spacing:.02em; color:#1b1300;
+    background:linear-gradient(135deg,#ffcf6b,var(--accent) 45%,#ff8f2b); box-shadow:0 10px 28px rgba(255,150,40,.32), inset 0 1px 0 rgba(255,255,255,.5);
+    transition:transform .15s, box-shadow .15s, filter .15s; }
+  .primary:hover:not(:disabled) { transform:translateY(-1px); box-shadow:0 14px 34px rgba(255,150,40,.45), inset 0 1px 0 rgba(255,255,255,.5); }
+  .primary:active:not(:disabled) { transform:translateY(1px); }
+  .primary:disabled { opacity:.5; cursor:wait; filter:grayscale(.4); }
+  .primary i { font-style:normal; display:inline-block; margin-left:8px; transition:transform .15s; }
+  .primary:hover:not(:disabled) i { transform:translateX(4px); }
+  #joinError { color:#ff9c9c; min-height:1.3em; margin:9px 0 0; font-size:13px; text-align:center; }
+  .jfoot { margin:6px 0 0; text-align:center; font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:rgba(255,255,255,.38); }
+  @media (max-width:520px) { .jbrand { display:none; } #join form { padding:24px 20px 18px; } }
+  @media (prefers-reduced-motion:reduce) { #bg i { animation:none; } #bg i:nth-child(1) { opacity:1; } }
 
   /* Heads-up display */
   #hud { position:fixed; inset:0; pointer-events:none; z-index:10; }
@@ -76,7 +141,8 @@
   #chatLog .sys { color:var(--muted); font-style:italic; }
   #chatLog b { color:var(--accent); font-weight:600; }
   #chatForm { display:flex; gap:6px; }
-  #chatForm input { margin:0; flex:1; }
+  #chatForm input { margin:0; flex:1; display:block; width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--line); background:rgba(255,255,255,.08); color:var(--text); font:inherit; outline:none; }
+  #chatForm input:focus { border-color:var(--accent); }
   #chatForm button { border:0; border-radius:8px; padding:0 14px; background:var(--accent); color:#1b1300; font-weight:600; }
 
   #voice { position:absolute; right:12px; bottom:12px; padding:10px; display:flex; flex-direction:column; gap:6px; align-items:stretch; width:230px; }
@@ -106,21 +172,38 @@
 <body class="booting">
 <canvas id="scene"></canvas>
 
+<div id="loader" role="status" aria-live="polite">
+  <div class="ld-dots" aria-hidden="true"><i style="left:14%;bottom:8%;animation-delay:0s"></i><i style="left:27%;bottom:14%;animation-delay:1.4s"></i><i style="left:41%;bottom:6%;animation-delay:3.1s"></i><i style="left:58%;bottom:12%;animation-delay:.7s"></i><i style="left:72%;bottom:7%;animation-delay:2.4s"></i><i style="left:86%;bottom:13%;animation-delay:4.2s"></i></div>
+  <div class="ld">
+    <div class="ld-mark"><div class="ld-ring"></div><div class="ld-ring b"></div><img src="/logo.png" alt=""></div>
+    <h2>TECHNO<b>VERSE</b></h2>
+    <p class="sub">The Metaverse of TIU</p>
+    <div id="loadTrack"><div id="loadBar"></div></div>
+    <div class="ld-row"><span id="loadText">Starting up…</span><span id="loadPct">0%</span></div>
+    <p id="loadTip"></p>
+  </div>
+</div>
+
+<div id="bg" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+<div class="jbrand" aria-hidden="true"><img src="/logo.png" alt=""><span>TECHNO<b>VERSE</b></span></div>
+
 <div id="join">
-  <form class="panel" id="joinForm" autocomplete="off">
-    <h1>People of TIU</h1>
-    <p>Walk the campus. Chat and talk with whoever is nearby.</p>
-    <label>Name <input type="text" id="name" maxlength="24" required placeholder="Your name"></label>
-    <label>Department <input type="text" id="dept" maxlength="32" placeholder="e.g. CSE, 3rd year"></label>
-    <label>Colour
-      <span class="swatches" id="swatches"></span>
-    </label>
-    <label>T-shirt
-      <span class="shirts" id="shirts"><button type="button" data-shirt="tiu">TIU polo</button><button type="button" data-shirt="reboot">Reboot Reality</button><button type="button" data-shirt="sof">School of the Future</button></span>
-    </label>
-    <div id="loadBox"><p id="loadText">Loading the campus…</p><div id="loadTrack"><div id="loadBar"></div></div></div>
-    <button class="primary" type="submit" id="enterBtn" disabled>Enter campus</button>
+  <form id="joinForm" autocomplete="off">
+    <h1>Enter the campus</h1>
+    <p class="lead">Walk the streets of TIU. Chat and talk with whoever is nearby.</p>
+    <div class="fld"><input type="text" id="name" maxlength="24" required placeholder=" "><label for="name">Your name</label></div>
+    <div class="fld"><input type="text" id="dept" maxlength="32" placeholder=" "><label for="dept">Department · e.g. CSE, 3rd year</label></div>
+    <div class="grp"><span class="t">Your colour</span><span class="swatches" id="swatches"></span></div>
+    <div class="grp"><span class="t">Your T-shirt</span>
+      <span class="shirts" id="shirts">
+        <button type="button" data-shirt="tiu"><svg viewBox="0 0 40 40"><path d="M14 5l-9 5 3 7 5-2v20h14V15l5 2 3-7-9-5c-1 3-3 4-6 4s-5-1-6-4z" fill="#f4f6fa"/><path d="M14 5l-9 5 3 7 5-2v20h14V15l5 2 3-7-9-5" fill="none" stroke="#1b3a73" stroke-width="2"/><path d="M12 20l16 8M12 28l16 8" stroke="#1b3a73" stroke-width="2.2" opacity=".75"/></svg>TIU polo</button>
+        <button type="button" data-shirt="reboot"><svg viewBox="0 0 40 40"><path d="M14 5l-9 5 3 7 5-2v20h14V15l5 2 3-7-9-5c-1 3-3 4-6 4s-5-1-6-4z" fill="#15171c" stroke="#5b6270" stroke-width="1.6"/><circle cx="20" cy="22" r="4" fill="none" stroke="#ff4b4b" stroke-width="2"/></svg>Reboot Reality</button>
+        <button type="button" data-shirt="sof"><svg viewBox="0 0 40 40"><path d="M14 5l-9 5 3 7 5-2v20h14V15l5 2 3-7-9-5c-1 3-3 4-6 4s-5-1-6-4z" fill="#15171c" stroke="#5b6270" stroke-width="1.6"/><path d="M22 17l5 0M22 20l4 0" stroke="#ffb53d" stroke-width="2"/></svg>School of the Future</button>
+      </span>
+    </div>
+    <button class="primary" type="submit" id="enterBtn" disabled>Enter campus<i>→</i></button>
     <p id="joinError" role="alert"></p>
+    <p class="jfoot">Techno India University · School of the Future</p>
   </form>
 </div>
 
