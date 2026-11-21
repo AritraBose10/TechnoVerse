@@ -1,0 +1,49 @@
+<!doctype html><meta charset="utf-8"><title>Helmet</title>
+<style>body{margin:0;background:#8a9099}canvas{display:block}</style>
+<script type="importmap">{ "imports": { "three": "/vendor/three.module.js" } }</script>
+<canvas id="c"></canvas>
+<script type="module">
+// Test page: the helmet on its own, worn by a character, and hanging on a motorcycle's handlebar.
+import * as THREE from "three";
+import { makeHelmet } from "/helmet.js";
+import { buildMotorcycle } from "/motorcycle.js";
+import { loadCharacterKit, makeCharacter } from "/character.js";
+const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("c"), antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.9;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color("#9aa3ad");
+scene.add(new THREE.HemisphereLight("#dfe9ff", "#6b5a48", 1.4));
+const sun = new THREE.DirectionalLight("#fff2dd", 2.6);
+sun.position.set(2, 4, 3);
+scene.add(sun);
+const pm = new THREE.PMREMGenerator(renderer);
+{ const e = new THREE.Scene(); e.background = new THREE.Color("#b8c4d0"); e.add(new THREE.Mesh(new THREE.PlaneGeometry(40, 40).rotateX(-Math.PI / 2).translate(0, -1, 0), new THREE.MeshBasicMaterial({ color: "#6b6152" }))); scene.environment = pm.fromScene(e, 0.02).texture; }
+const a = makeHelmet({ color: "#1b1d22" });
+a.group.position.set(-0.9, 1.3, 0);
+a.group.rotation.y = 0.6;
+scene.add(a.group);
+const b = makeHelmet({ color: "#c41e24", accent: "#e8e8e4" });
+b.group.position.set(-0.9, 1.75, 0);
+b.group.rotation.y = -0.9;
+scene.add(b.group);
+const kit = await loadCharacterKit(renderer);
+const c = makeCharacter(kit, { uniform: true, gear: [{ kind: "helmet", color: "#e8e8e4" }] });
+const g = new THREE.Group();
+g.position.set(0, 0, 0);
+g.rotation.y = Math.PI * 0.85;
+g.add(c.model);
+scene.add(g);
+for (let k = 0; k < 20; k++) c.update(1 / 30, { speed: 0, grounded: true, turnRate: 0, facing: g.rotation.y });
+const m = buildMotorcycle({ design: "commuter" });
+m.group.position.set(1.4, 0, 0.2);
+m.group.rotation.set(0, Math.PI / 2 + 0.6, 0.16);
+m.pose({ steerAngle: -0.35, kickstand: true });
+scene.add(m.group);
+const camera = new THREE.PerspectiveCamera(30, innerWidth / innerHeight, 0.05, 50);
+camera.position.set(0.3, 1.55, 3.6);
+camera.lookAt(0.2, 1.15, 0);
+renderer.render(scene, camera);
+window.__done = ["ok"];
+</script>

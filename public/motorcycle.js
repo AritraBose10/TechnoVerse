@@ -23,6 +23,7 @@
 // about 87 km/h against air drag), thrust-limited in first gear, engine braking on a closed
 // throttle, 0.7 g of brakes.
 import * as THREE from "three";
+import { makeHelmet } from "/helmet.js";
 import { P, tubeGeo, pathGeo, bandGeo, loftGeo, slabGeo, Parts, canvasTexture } from "/vparts.js";
 
 const G = 9.81;
@@ -117,7 +118,7 @@ function plateMat(text) {
   return plateTextures.get(text);
 }
 
-export function buildMotorcycle({ design = "commuter", color, accent, plate = "WB 06 AF 6627", detail = true } = {}) {
+export function buildMotorcycle({ design = "commuter", color, accent, plate = "WB 06 AF 6627", detail = true, helmet = true, helmetColor } = {}) {
   const D = MOTORCYCLE_DESIGNS[design] || MOTORCYCLE_DESIGNS.commuter;
   const S = mats();
   const pair = D.colors.find((c) => c[0] === color) || D.colors[0];
@@ -513,6 +514,24 @@ export function buildMotorcycle({ design = "commuter", color, accent, plate = "W
     size = { L: 1.78, W: 0.72, H: 1.14 };
   }
 
+  // The rider's helmet hangs by its chin strap from the left end of the handlebar, crown down and
+  // open side up, swinging a little as the bars turn (it turns with them).
+  let hung = null;
+  if (helmet) {
+    const h = makeHelmet({ color: helmetColor || ["#1b1d22", "#e8e8e4", "#c41e24", "#1e3a8a", "#d9b01e"][(plate.length + plate.charCodeAt(plate.length - 1)) % 5], detail });
+    h.strap(false);
+    const hang = new THREE.Group(); // at the grip, in the steering frame
+    hang.position.copy(grips[0].position);
+    steer.add(hang);
+    h.group.rotation.set(Math.PI - 0.15, 0.4, 0.12); // crown down, face turned out a little
+    h.group.position.set(-0.03, -0.27, 0.0);
+    hang.add(h.group);
+    // the strap from the grip down into the helmet
+    const strap = new THREE.Mesh(new THREE.CylinderGeometry(0.004, 0.004, 0.14, 4).translate(0, -0.07, 0), shared.black);
+    hang.add(strap);
+    hung = { helmet: h, hang, strap, home: { position: h.group.position.clone(), quaternion: h.group.quaternion.clone() } };
+  }
+
   const spec = motorcycleSpec(design);
   let wheelAngle = 0;
   const spin = (roll) => {
@@ -521,12 +540,24 @@ export function buildMotorcycle({ design = "commuter", color, accent, plate = "W
     frontWheel.rotation.x = wheelAngle;
   };
   const stand = (down) => {
-    if (centreStand) kick.rotation.x = down ? 0.12 : -1.4;
+    const k = +down; // 0 up .. 1 down
+    if (centreStand) kick.rotation.x = -1.4 + 1.52 * k;
     else {
-      kick.rotation.x = down ? 0.3 : -1.42;
-      kick.rotation.z = down ? -0.42 : 0;
+      kick.rotation.x = -1.42 + 1.72 * k;
+      kick.rotation.z = -0.42 * k;
     }
   };
+  // where the key goes (the ignition by the instruments) and, on the 350, the kick-start lever
+  const keyAt = D.scooter ? P(0.23, 0.87, 0.07) : col(0.66).add(new THREE.Vector3(0.05, 0.05, 0.03));
+  const kickLever = D.heavy ? new THREE.Group() : null;
+  if (kickLever) {
+    kickLever.position.copy(P(-0.18 * (L / 1.235), 0.36, 0.17));
+    const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.011, 0.011, 0.22, 6).translate(0, 0.11, 0), S.engine);
+    const pad = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.014, 0.07, 8).rotateZ(Math.PI / 2).translate(0.04, 0.22, 0), S.matte);
+    kickLever.add(arm, pad);
+    kickLever.rotation.x = -1.2; // folded back along the engine
+    root.add(kickLever);
+  }
   stand(false);
   return {
     kind: "motorcycle",
@@ -542,8 +573,14 @@ export function buildMotorcycle({ design = "commuter", color, accent, plate = "W
     size,
     paint,
     lights: { tail, indL, indR, head: S.head },
+    /** the helmet hanging on the handlebar (null if none): { helmet, hang, strap, home } */
+    hung,
+    key: marker(keyAt),
+    kick, // the stand
+    kickLever, // the 350's kick-start (null on the others): rotation.x -1.2 folded .. 0.35 kicked through
+    centreStand,
     spin,
-    /** steerAngle (rad, + turns right), roll (m travelled this frame), kickstand (bool), brake (bool) */
+    /** steerAngle (rad, + turns right), roll (m travelled this frame), kickstand (bool or 0..1), brake (bool) */
     pose({ steerAngle = 0, roll = 0, kickstand = false, brake = false }) {
       steer.rotation.y = -steerAngle;
       spin(roll);
@@ -564,7 +601,7 @@ export function setMotorcycleNight(k) {
  * axles, lights, where the rider and pillion sit).
  */
 export function makeTrafficMotorcycle(opts) {
-  const m = buildMotorcycle({ ...opts, detail: false });
+  const m = buildMotorcycle({ ...opts, detail: false, helmet: false }); // the rider wears it
   const g = new THREE.Group();
   m.group.rotation.y = -Math.PI / 2; // forward (-z) along +x
   g.add(m.group);
@@ -648,6 +685,38 @@ export function makeEngineSound() {
         if (!on || !start()) return;
       }
       hornGain.gain.setTargetAtTime(on ? 0.09 : 0, ctx.currentTime, 0.012);
+    },
+    /** the key turning in the ignition */
+    click() {
+      if (!ctx && !start()) return;
+      const t = ctx.currentTime;
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = "square";
+      o.frequency.value = 2400;
+      g.gain.setValueAtTime(0.05, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.03);
+      o.connect(g).connect(ctx.destination);
+      o.start(t);
+      o.stop(t + 0.04);
+    },
+    /** the engine catching: a few turns over, then settling to idle */
+    start() {
+      if (!ctx && !start()) return;
+      const t = ctx.currentTime;
+      osc1.frequency.setValueAtTime(30, t);
+      osc2.frequency.setValueAtTime(15, t);
+      gain.gain.setValueAtTime(0.03, t);
+      osc1.frequency.linearRampToValueAtTime(70, t + 0.35);
+      osc2.frequency.linearRampToValueAtTime(35, t + 0.35);
+      gain.gain.linearRampToValueAtTime(0.09, t + 0.45);
+      osc1.frequency.setTargetAtTime(22, t + 0.45, 0.2);
+      osc2.frequency.setTargetAtTime(11, t + 0.45, 0.2);
+      gain.gain.setTargetAtTime(0.035, t + 0.5, 0.3);
+    },
+    stop() {
+      if (!ctx) return;
+      gain.gain.setTargetAtTime(0, ctx.currentTime, 0.15);
     },
   };
 }

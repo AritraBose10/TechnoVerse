@@ -4,6 +4,7 @@
 // Everything random uses a fixed seed, so every player gets exactly the same world.
 import * as THREE from "three";
 import { mergeGeometries } from "/vendor/jsm/utils/BufferGeometryUtils.js";
+import { mergeStaticChunks } from "/chunks.js";
 import { makeTrees } from "/trees.js";
 import { buildTIU } from "/tiu.js";
 import { buildOpposite } from "/opposite.js";
@@ -373,6 +374,13 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     };
     return mat;
   };
+  let sharedInfill = null;
+  const makeInfill = () => {
+    const t = tex.brick.clone();
+    t.repeat.set(3, 2);
+    t.needsUpdate = true;
+    return new THREE.MeshStandardMaterial({ map: t, roughness: 1 });
+  };
   const wallMat = (map, glassy) => lightWindows(new THREE.MeshStandardMaterial({ map, roughness: glassy ? 0.35 : 0.85, metalness: glassy ? 0.25 : 0, envMapIntensity: glassy ? 1.1 : 0.5 }));
   const mats = {
     tiuStrip: wallMat(facades.tiuStrip, true),
@@ -454,10 +462,13 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
 
   // ---------- geometry helpers ----------
   const solidBox = (w, h, d, x, y, z, yaw = 0) => world.createCollider(RAPIER.ColliderDesc.cuboid(w / 2, h / 2, d / 2).setTranslation(x, y, z).setRotation(yawQuat(yaw)));
+  // Static meshes from here are merged into 100 m chunks at the end (see chunks.js).
+  const staticMeshes = [];
   function add(mesh, { cast = true, receive = true } = {}) {
     mesh.castShadow = cast;
     mesh.receiveShadow = receive;
     scene.add(mesh);
+    staticMeshes.push(mesh);
     return mesh;
   }
   // Flat shape on the ground. `tile` is the size in metres of one texture repeat.
@@ -828,10 +839,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
           part(0.6, levels * 3.6, 0.6, x, (levels * 3.6) / 2, z, mats.concrete);
           for (let k = 0; k < 4; k++) part(0.05, 1.6, 0.05, x + (k % 2 ? 0.2 : -0.2), levels * 3.6 + 0.9, z + (k < 2 ? 0.2 : -0.2), mats.tank); // bare steel bars
         }
-      const brickTex = tex.brick.clone();
-      brickTex.repeat.set(3, 2);
-      brickTex.needsUpdate = true;
-      const infill = new THREE.MeshStandardMaterial({ map: brickTex, roughness: 1 });
+      const infill = sharedInfill ||= makeInfill(); // one material for every building: they can merge
       for (let l = 0; l < 3; l++)
         for (let ix = 0; ix < 4; ix++) {
           if ((ix + l) % 3 === 2) continue;
@@ -1158,8 +1166,17 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
   }
 
   flushWalls();
+  // the opposite side's stalls, trees and walls are static too (their group is flagged in opposite.js)
+  for (const g of scene.children.filter((c) => c.userData.staticGroup)) {
+    g.updateMatrixWorld(true);
+    g.traverse((o) => {
+      if (o.isMesh) staticMeshes.push(o);
+    });
+  }
+  const chunks = mergeStaticChunks(scene, staticMeshes);
 
   return {
+    chunks,
     places,
     props,
     // where the fly-over camera looks, and which way a new arrival faces (toward the entrance)

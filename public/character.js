@@ -8,6 +8,8 @@
 // The body is models/avatar.glb. The animations come from models/anims.glb, which has the same
 // bones in a different resting pose, so each animation is converted when it loads.
 import * as THREE from "three";
+import { makeHelmet } from "/helmet.js";
+import { rebootPrints } from "/shirt.js";
 import { GLTFLoader } from "/vendor/jsm/loaders/GLTFLoader.js";
 import { clone as cloneSkinned } from "/vendor/jsm/utils/SkeletonUtils.js";
 
@@ -24,24 +26,72 @@ const cleanName = (n) => n.replace(/^mixamorig:?/, "");
 // Which child a bone "points at". Used to line up the two skeletons' resting poses.
 const POINTS_AT = { Hips: "Spine", Spine: "Spine1", Spine1: "Spine2", Spine2: "Neck", Neck: "Head", Head: "HeadTop_End", LeftHand: "LeftHandMiddle1", RightHand: "RightHandMiddle1" };
 
-function dressInUniform(model) {
+function dressInUniform(model, shirt = "tiu") {
+  const reboot = shirt === "reboot";
   model.traverse((o) => {
     if (!o.isMesh) return;
     const name = o.material.name;
     if (name === "Wolf3D_Headwear" || name === "Wolf3D_Beard") o.visible = false;
     if (name === "Wolf3D_Outfit_Bottom") {
       o.material.map = null;
-      o.material.color.set("#1d212b");
+      o.material.color.set(reboot ? "#2a2c31" : "#1d212b");
       o.material.roughness = 0.85;
     }
     if (name === "Wolf3D_Outfit_Top") {
       // Colours are decided from where each point sits on the body in its resting pose, so the
       // diagonal stays put on the shirt while the character moves.
-      const m = o.material;
+      const m = o.material.clone(); // each wearer's shirt is their own
+      o.material = m;
       m.map = null;
       m.color.set("#ffffff");
       m.roughness = 0.9;
       m.metalness = 0;
+      if (reboot) {
+        // The School of the Future polo: black cotton pique (a fine knit you can just see), the
+        // chest print on the wearer's left (10.5 x 3.2 cm), the big print on the back (25 x 42 cm,
+        // its top 8 cm below the collar). Prints are slightly raised and less rough than the knit.
+        const pr = rebootPrints();
+        m.roughness = 0.92;
+        m.onBeforeCompile = (shader) => {
+          shader.uniforms.uFront = { value: pr.front };
+          shader.uniforms.uBack = { value: pr.back };
+          shader.vertexShader = shader.vertexShader
+            .replace("#include <common>", "#include <common>\nvarying vec3 vRestPos;")
+            .replace("#include <begin_vertex>", "#include <begin_vertex>\nvRestPos = position;");
+          shader.fragmentShader = shader.fragmentShader
+            .replace("#include <common>", "#include <common>\nvarying vec3 vRestPos;\nuniform sampler2D uFront; uniform sampler2D uBack;")
+            .replace(
+              "#include <map_fragment>",
+              `
+              if (vRestPos.y < 0.9 && abs(vRestPos.x) < 0.3) discard; // shirt hem at the hips
+              // pique knit: tiny alternating cells
+              vec2 k = floor(vec2(vRestPos.x + vRestPos.z, vRestPos.y) * 900.0);
+              float knit = mod(k.x + k.y, 2.0);
+              vec3 shirt = vec3(0.016, 0.016, 0.018) * (0.9 + 0.2 * knit);
+              // chest print (wearer's left is +x; seen from the front, u runs with +x)
+              if (vRestPos.z > 0.03) {
+                vec2 uv = vec2((vRestPos.x - 0.032) / 0.105, (vRestPos.y - 1.355) / 0.032);
+                if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0) {
+                  vec4 p = texture2D(uFront, uv);
+                  shirt = mix(shirt, p.rgb, p.a);
+                }
+              }
+              // back print (seen from behind, u runs with -x)
+              if (vRestPos.z < -0.02) {
+                vec2 uv = vec2((0.125 - vRestPos.x) / 0.25, (vRestPos.y - 1.03) / 0.42);
+                if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0) {
+                  vec4 p = texture2D(uBack, uv);
+                  shirt = mix(shirt, p.rgb, p.a);
+                }
+              }
+              diffuseColor.rgb = shirt;
+              `,
+            );
+        };
+        m.customProgramCacheKey = () => "shirt-reboot";
+        m.needsUpdate = true;
+        return;
+      }
       m.onBeforeCompile = (shader) => {
         shader.vertexShader = shader.vertexShader
           .replace("#include <common>", "#include <common>\nvarying vec3 vRestPos;")
@@ -353,12 +403,64 @@ function addAccessories(model, list = []) {
       }
       at("Head", g, new THREE.Vector3(0, 0.085, 0.092));
     } else if (kind === "helmet") {
-      const shell = new THREE.Mesh(new THREE.SphereGeometry(0.135, 18, 12, 0, Math.PI * 2, 0, Math.PI * 0.58), std(color || "#1b1d22", 0.35, { metalness: 0.2 }));
-      shell.scale.set(1, 0.95, 1.12);
-      at("Head", shell, new THREE.Vector3(0, 0.1, -0.005));
-      const visor = new THREE.Mesh(new THREE.SphereGeometry(0.138, 18, 8, -0.9, 1.8, 1.0, 0.75), gearMat("visor", () => new THREE.MeshStandardMaterial({ color: "#0b0d10", roughness: 0.05, metalness: 0.7, transparent: true, opacity: 0.85 })));
-      visor.scale.set(1, 0.95, 1.12);
-      at("Head", visor, new THREE.Vector3(0, 0.1, -0.005));
+      // the open-face helmet (helmet.js), worn with the strap fastened under the chin
+      const h = makeHelmet({ color: color || "#1b1d22", accent: item.accent || "#c8202a", detail: !item.lite });
+      h.strap(true);
+      h.group.name = "gear-helmet";
+      h.group.userData.helmet = h;
+      at("Head", h.group, new THREE.Vector3(0, 0.072, 0.004));
+    } else if (kind === "polocollar") {
+      // A polo T-shirt's knitted collar, folded down over a short stand, open at the front over a
+      // two-button placket. Built round the base of the neck in the resting pose and carried by
+      // the upper chest.
+      const mat = std(color || "#141416", 0.9, { side: THREE.DoubleSide });
+      const neck = bone("Neck").getWorldPosition(new THREE.Vector3());
+      const chest = bone("Spine2").getWorldPosition(new THREE.Vector3());
+      const base = neck.clone().lerp(chest, 0.18); // where the collar sits on the neck
+      const g = new THREE.Group();
+      const ring = (r, y, a) => new THREE.Vector3(Math.sin(a) * r * 1.05, y, Math.cos(a) * r * 0.95);
+      const strip = (rows) => {
+        const pos = [];
+        const idx = [];
+        const N = 28;
+        for (let i = 0; i <= N; i++) {
+          // from the front left round the back to the front right, leaving the opening at the front
+          const a = 0.38 + (i / N) * (Math.PI * 2 - 0.76);
+          rows.forEach(([r, y], j) => {
+            // the collar points: the fall comes forward and down at the front
+            const front = Math.max(0, Math.cos(a)) ** 3;
+            const p = ring(r + (j > 1 ? 0.012 * front : 0), y - (j > 1 ? 0.018 * front : 0), a);
+            pos.push(p.x, p.y, p.z);
+          });
+        }
+        const R = rows.length;
+        for (let i = 0; i < N; i++) for (let j = 0; j < R - 1; j++) {
+          const q = i * R + j;
+          idx.push(q, q + R, q + 1, q + 1, q + R, q + R + 1);
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+        geo.setIndex(idx);
+        geo.computeVertexNormals();
+        return new THREE.Mesh(geo, mat);
+      };
+      // stand: up the neck 3 cm; fall: folded back down and out to rest on the shirt
+      g.add(strip([[0.079, -0.01], [0.081, 0.03], [0.088, 0.035], [0.125, -0.012]]));
+      // placket: a strip down the front with two buttons
+      const placket = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.12, 0.004), mat);
+      placket.position.set(0, -0.07, 0.097);
+      placket.rotation.x = -0.18;
+      g.add(placket);
+      const btn = std("#e8e6e0", 0.4);
+      for (const y of [-0.045, -0.095]) {
+        const b = new THREE.Mesh(new THREE.CylinderGeometry(0.0055, 0.0055, 0.003, 10).rotateX(Math.PI / 2), btn);
+        b.position.set(0, y + 0.005, 0.1 - (y + 0.045) * 0.18);
+        g.add(b);
+      }
+      g.traverse((m) => (m.castShadow = true));
+      g.position.copy(base);
+      g.name = "gear-polocollar";
+      bone("Spine2").attach(g);
     } else if (kind === "cap") {
       const crown = new THREE.Mesh(new THREE.SphereGeometry(0.115, 16, 8, 0, Math.PI * 2, 0, Math.PI * 0.5), std(color || "#a52a22", 0.8));
       crown.scale.set(1, 0.7, 1.08);
@@ -464,7 +566,26 @@ export function loadCharacterKit(renderer) {
 
 const gltfLoader = new GLTFLoader();
 let animsPromise = null;
-const loadAnims = () => (animsPromise ||= gltfLoader.loadAsync("/models/anims.glb"));
+const CRASH_CLIPS = []; // the fall is procedural now (hero.applyTip); the Mixamo clips came out crooked on this rig
+const loadAnims = () =>
+  (animsPromise ||= (async () => {
+    const a = await gltfLoader.loadAsync("/models/anims.glb");
+    await Promise.all(
+      CRASH_CLIPS.map(async (n) => {
+        try {
+          const g = await gltfLoader.loadAsync(`/models/crash/${n}.glb`);
+          const c = g.animations[0];
+          if (c) {
+            c.name = n;
+            a.animations.push(c);
+          }
+        } catch (e) {
+          console.warn("crash clip missing", n, e);
+        }
+      }),
+    );
+    return a;
+  })());
 
 async function buildKit(renderer) {
   const [avatar, anims] = await Promise.all([gltfLoader.loadAsync("/models/avatar.glb"), loadAnims()]);
@@ -538,6 +659,351 @@ export async function loadCrowdBody(renderer, url) {
   return prepareBody(model, anims, { hair: false, kind: "rocketbox" });
 }
 
+/**
+ * Makes one crowd person's clothes their own, so no two people in the street look the same even
+ * when they share a body: the shirt or top is re-coloured (its hue turned and tinted, folds and
+ * print kept), the trousers or skirt tinted separately, and skin is left untouched (skin is found
+ * by its colour). v: { hue (radians), sat, top: [r, g, b], bottom: [r, g, b] }.
+ */
+// ---------------------------------------------------------------------------------------------
+// The polo shirts (tools/polo/polo_make.py): real garments, not paint. Each is a mesh of its own, with
+// a collar, placket, buttons, ribbed cuffs and hem, and the prints as separate decals, skinned to the
+// same skeleton as the Rocketbox body so it moves with every animation.
+//   reboot: black, Reboot Reality on the back (event edition)   sof: black, School of the Future
+//   tiu:    white and navy on the diagonal, red t on the chest
+const POLOS = ["reboot", "sof", "tiu"];
+const poloCache = {};
+export function loadPolo(variant) {
+  const v = POLOS.includes(variant) ? variant : "tiu";
+  return (poloCache[v] ||= gltfLoader.loadAsync(`/models/polo/polo_${v}.glb`).catch((e) => {
+    console.warn("polo shirt missing", v, e);
+    return null;
+  }));
+}
+const boneKey = (n) => RB_NAMES[n.replace(/_/g, " ")] || n;
+// The body's own photographed T-shirt must not show through the cloth. Where the polo covers the torso
+// the body's skin is not drawn (the neck, arms and hands stay). Measured in metres from the feet, on a
+// 1.75 m body, as in dressRocketboxShirt.
+function hideBodyShirt(model) {
+  model.traverse((o) => {
+    if (!o.isSkinnedMesh || o.material.name !== "body") return;
+    const bindPos = (name) => {
+      const i = o.skeleton.bones.findIndex((b) => b.name === name);
+      const v = new THREE.Vector3();
+      if (i >= 0) new THREE.Matrix4().copy(o.skeleton.boneInverses[i]).invert().decompose(v, new THREE.Quaternion(), new THREE.Vector3());
+      return v;
+    };
+    if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+    const head = bindPos("Head");
+    const feet = bindPos("LeftFoot").add(bindPos("RightFoot")).multiplyScalar(0.5);
+    const up = head.clone().sub(feet).normalize();
+    const eye = bindPos("LeftEye").add(bindPos("RightEye")).multiplyScalar(0.5);
+    const fwd = eye.clone().sub(head);
+    fwd.addScaledVector(up, -fwd.dot(up)).normalize();
+    const left = new THREE.Vector3().crossVectors(up, fwd).normalize();
+    let lowest = Infinity;
+    let highest = -Infinity;
+    const pos = o.geometry.attributes.position;
+    const t = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i += 7) {
+      t.fromBufferAttribute(pos, i);
+      const h = t.dot(up);
+      lowest = Math.min(lowest, h);
+      highest = Math.max(highest, h);
+    }
+    const scale = 1.75 / (highest - lowest);
+    const centre = head.clone().addScaledVector(up, -head.dot(up));
+    const m = o.material;
+    m.onBeforeCompile = (sh) => {
+      Object.assign(sh.uniforms, { uHUp: { value: up }, uHLeft: { value: left }, uHMid: { value: centre }, uHFloor: { value: lowest }, uHScale: { value: scale } });
+      sh.vertexShader = sh.vertexShader
+        .replace("#include <common>", "#include <common>\nvarying vec3 vHide;\nuniform vec3 uHUp; uniform vec3 uHLeft; uniform vec3 uHMid; uniform float uHFloor; uniform float uHScale;")
+        .replace("#include <begin_vertex>", "#include <begin_vertex>\nvec3 hrel = position - uHMid;\nvHide = vec3(dot(hrel, uHLeft), dot(position, uHUp) - uHFloor, 0.0) * uHScale;");
+      sh.fragmentShader = sh.fragmentShader
+        .replace("#include <common>", "#include <common>\nvarying vec3 vHide;")
+        .replace("#include <map_fragment>", "#include <map_fragment>\nif (vHide.y > 1.0 && vHide.y < 1.56 && abs(vHide.x) < 0.2 && !(vHide.y > 1.47 && abs(vHide.x) < 0.075)) discard;");
+    };
+    m.customProgramCacheKey = () => "hide-shirt";
+    m.needsUpdate = true;
+  });
+}
+function attachPolo(model, gltf) {
+  hideBodyShirt(model);
+  let body = null;
+  model.traverse((o) => {
+    if (o.isSkinnedMesh && !body && o.material.name === "body") body = o;
+  });
+  if (!body) return;
+  const index = new Map(body.skeleton.bones.map((b, i) => [b.name, i]));
+  gltf.scene.traverse((o) => {
+    if (!o.isSkinnedMesh) return;
+    const geo = o.geometry;
+    if (!geo.userData.remapped) {
+      const to = o.skeleton.bones.map((b) => index.get(boneKey(b.name)) ?? 0);
+      // The garment was exported from the same body in another coordinate frame. One bone's bind pose in
+      // both skeletons gives the frame change; apply it to the cloth (positions and normals).
+      const gi = o.skeleton.bones.findIndex((b) => boneKey(b.name) === "Hips");
+      if (gi >= 0) {
+        const T = new THREE.Matrix4().copy(body.skeleton.boneInverses[to[gi]]).invert().multiply(o.skeleton.boneInverses[gi]);
+        geo.applyMatrix4(T);
+      }
+      const si = geo.attributes.skinIndex;
+      for (let i = 0; i < si.array.length; i++) si.array[i] = to[si.array[i]];
+      geo.userData.remapped = true;
+    }
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) {
+      m.envMapIntensity = 0.5;
+      m.side = THREE.DoubleSide; // the collar and cuffs are single sheets folded over: seen from both sides
+      if (m.name && m.name.startsWith("decal_")) {
+        m.transparent = true;
+        m.depthWrite = false;
+        m.polygonOffset = true;
+        m.polygonOffsetFactor = -2;
+      }
+    }
+    const mesh = new THREE.SkinnedMesh(geo, o.material);
+    mesh.name = "polo-" + o.name;
+    mesh.position.copy(body.position);
+    mesh.quaternion.copy(body.quaternion);
+    mesh.scale.copy(body.scale);
+    mesh.castShadow = true;
+    mesh.frustumCulled = false;
+    body.parent.add(mesh);
+    mesh.bind(body.skeleton, body.bindMatrix);
+  });
+}
+
+/**
+ * The player's shirt on a photographic (Rocketbox) body that wears a short-sleeved collared shirt:
+ * the shirt is re-dyed and printed, keeping the folds, collar, placket and seams of the original
+ * photo texture, and leaving skin and trousers alone.
+ *   "reboot": black pique, School of the Future print on the left chest, the big print on the back
+ *   "tiu":    navy and off-white split on the diagonal, red TIU badge on the left chest
+ * Positions are taken in the body's resting pose and measured in metres from the feet (wearer's
+ * left +x, forward +z), whatever axes the model came with.
+ */
+function dressRocketboxShirt(model, shirt = "tiu") {
+  const pr = rebootPrints();
+  let axes = null;
+  model.traverse((o) => {
+    if (!o.isSkinnedMesh || o.material.name !== "body") return;
+    const bindPos = (name) => {
+      const i = o.skeleton.bones.findIndex((b) => b.name === name);
+      const v = new THREE.Vector3();
+      if (i >= 0) new THREE.Matrix4().copy(o.skeleton.boneInverses[i]).invert().decompose(v, new THREE.Quaternion(), new THREE.Vector3());
+      return v;
+    };
+    if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+    const bb = o.geometry.boundingBox;
+    const head = bindPos("Head");
+    const feet = bindPos("LeftFoot").add(bindPos("RightFoot")).multiplyScalar(0.5);
+    const up = head.clone().sub(feet).normalize();
+    const eye = bindPos("LeftEye").add(bindPos("RightEye")).multiplyScalar(0.5);
+    const fwd = eye.clone().sub(head);
+    fwd.addScaledVector(up, -fwd.dot(up)).normalize();
+    const left = new THREE.Vector3().crossVectors(up, fwd).normalize(); // wearer's left
+    // the ground under the feet along `up`, and metres per model unit (the body is about 1.75 m)
+    let lowest = Infinity;
+    let highest = -Infinity;
+    const pos = o.geometry.attributes.position;
+    const tmp = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i += 7) {
+      tmp.fromBufferAttribute(pos, i);
+      const h = tmp.dot(up);
+      lowest = Math.min(lowest, h);
+      highest = Math.max(highest, h);
+    }
+    const scale = 1.75 / (highest - lowest);
+    axes = { up, lowest, scale, eye: eye.dot(up) };
+    const centre = head.clone().addScaledVector(up, -head.dot(up)); // the body's midline
+    const m = o.material.clone();
+    m.onBeforeCompile = (sh) => {
+      Object.assign(sh.uniforms, {
+        uUp: { value: up },
+        uFwd: { value: fwd },
+        uLeft: { value: left },
+        uMid: { value: centre },
+        uFloor: { value: lowest },
+        uScale: { value: scale },
+        uFront: { value: pr.front },
+        uBack: { value: pr.back },
+        uSleeve: { value: pr.sleeve },
+        uReboot: { value: shirt === "reboot" ? 1 : 0 },
+      });
+      sh.vertexShader = sh.vertexShader
+        .replace("#include <common>", "#include <common>\nvarying vec3 vBody;\nvarying float vSide;\nvarying float vFace;\nuniform vec3 uUp; uniform vec3 uFwd; uniform vec3 uLeft; uniform vec3 uMid; uniform float uFloor; uniform float uScale;")
+        .replace("#include <begin_vertex>", "#include <begin_vertex>\nvec3 rel = position - uMid;\nvBody = vec3(dot(rel, uLeft), dot(position, uUp) - uFloor, dot(rel, uFwd)) * uScale;\nvSide = dot(normal, uLeft);\nvFace = dot(normal, uFwd);");
+      sh.fragmentShader = sh.fragmentShader
+        .replace("#include <common>", "#include <common>\nvarying vec3 vBody;\nvarying float vSide;\nvarying float vFace;\nuniform sampler2D uFront; uniform sampler2D uBack; uniform sampler2D uSleeve; uniform int uReboot;")
+        .replace(
+          "#include <map_fragment>",
+          `#include <map_fragment>
+          {
+            vec3 c = diffuseColor.rgb;
+            vec3 s = pow(max(c, vec3(0.0)), vec3(0.4545));
+            float Y = dot(s, vec3(0.299, 0.587, 0.114));
+            float cb = 0.5 - 0.169 * s.r - 0.331 * s.g + 0.5 * s.b;
+            float cr = 0.5 + 0.5 * s.r - 0.419 * s.g - 0.081 * s.b;
+            float skin = smoothstep(0.29, 0.33, cb) * (1.0 - smoothstep(0.48, 0.52, cb)) * smoothstep(0.52, 0.55, cr) * (1.0 - smoothstep(0.66, 0.7, cr)) * smoothstep(0.12, 0.2, Y);
+            // the shirt: above the belt (about 1.0 m on a 1.75 m body), not skin, not the head
+            float shirtK = smoothstep(0.99, 1.02, vBody.y) * (1.0 - smoothstep(1.72, 1.76, vBody.y)) * (1.0 - skin);
+            if (abs(vBody.x) > 0.22 && vBody.y < 1.25) shirtK = 0.0; // forearms and wrists (a watch) are not shirt
+            // the chest and back below the neckline are all shirt, whatever colour the old print was
+            if (abs(vBody.x) < 0.2 && vBody.y < 1.46 && vBody.y > 1.0) shirtK = 1.0;
+            // folds and seams of the original, as light and shade on the new colour
+            // only a little of the photo's light and shade, so its own printed graphic does not show through
+            float shade = 0.82 + 0.18 * clamp(Y / 0.12, 0.0, 1.6);
+            vec3 cloth;
+            if (uReboot == 1) {
+              cloth = vec3(0.02, 0.02, 0.022) * shade;
+              if (vBody.z > 0.02 && vFace > 0.3) {
+                vec2 uv = vec2((vBody.x - 0.03) / 0.105, (vBody.y - 1.43) / 0.032);
+                if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0) { vec4 p = texture2D(uFront, uv); cloth = mix(cloth, p.rgb * 0.85, p.a); }
+              }
+              if (vBody.z < -0.02 && vFace < -0.3) {
+                vec2 uv = vec2((0.11 - vBody.x) / 0.22, (vBody.y - 1.08) / 0.399);
+                if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0) { vec4 p = texture2D(uBack, uv); cloth = mix(cloth, p.rgb * 0.85, p.a); }
+              }
+              // sleeve print on the outside of the wearer's right sleeve (seen from that side, u runs forward)
+              if (vBody.x < -0.16 && vSide < -0.45) {
+                vec2 uv = vec2((vBody.z + 0.0375) / 0.075, (vBody.y - 1.31) / 0.04);
+                if (uv.x > 0.0 && uv.x < 1.0 && uv.y > 0.0 && uv.y < 1.0) { vec4 p = texture2D(uSleeve, uv); cloth = mix(cloth, p.rgb * 0.85, p.a); }
+              }
+            } else {
+              vec3 navy = vec3(0.012, 0.018, 0.05);
+              vec3 offWhite = vec3(0.8, 0.78, 0.74);
+              // diagonal from the wearer's right shoulder down to the left hip
+              float side = dot(vBody.xy - vec2(-0.075, 1.45), vec2(0.897, 0.441));
+              cloth = mix(navy, offWhite, smoothstep(-0.004, 0.004, side)) * shade;
+              vec2 badge = vec2(vBody.x - 0.088, vBody.y - 1.38);
+              if (vBody.z > 0.02 && length(badge) < 0.032) cloth = vec3(0.6, 0.02, 0.03);
+            }
+            // skin a shade warmer and browner, as on the reference (a Bengali student)
+            vec3 tone = mix(c, c * vec3(0.84, 0.7, 0.58), skin);
+            diffuseColor.rgb = mix(tone, cloth, shirtK);
+          }`,
+        );
+    };
+    m.customProgramCacheKey = () => "rb-shirt";
+    o.material = m;
+  });
+  // black hair and a matching skin tone on the face (the student in the reference sheet)
+  model.traverse((o) => {
+    if (!o.isMesh) return;
+    if (o.material.name === "hair") o.material.color.setRGB(0.16, 0.14, 0.13);
+    if (o.material.name === "skin_head") {
+      // the face and scalp share one picture: skin gets the warmer tone, the painted hair goes black
+      const m = o.material.clone();
+      m.onBeforeCompile = (sh) => {
+        sh.uniforms.uUp = { value: axes ? axes.up : new THREE.Vector3(0, 1, 0) };
+        sh.uniforms.uBrow = { value: axes ? axes.eye + 0.065 / axes.scale : 1e9 };
+        sh.vertexShader = sh.vertexShader.replace("#include <common>", "#include <common>\nvarying float vH;\nuniform vec3 uUp;").replace("#include <begin_vertex>", "#include <begin_vertex>\nvH = dot(position, uUp);");
+        sh.fragmentShader = sh.fragmentShader.replace("#include <common>", "#include <common>\nvarying float vH;\nuniform float uBrow;").replace(
+          "#include <map_fragment>",
+          `#include <map_fragment>
+          {
+            vec3 c = diffuseColor.rgb;
+            vec3 s = pow(max(c, vec3(0.0)), vec3(0.4545));
+            float Y = dot(s, vec3(0.299, 0.587, 0.114));
+            float cb = 0.5 - 0.169 * s.r - 0.331 * s.g + 0.5 * s.b;
+            float cr = 0.5 + 0.5 * s.r - 0.419 * s.g - 0.081 * s.b;
+            float skin = smoothstep(0.29, 0.33, cb) * (1.0 - smoothstep(0.48, 0.52, cb)) * smoothstep(0.52, 0.55, cr) * (1.0 - smoothstep(0.66, 0.7, cr)) * smoothstep(0.2, 0.3, Y);
+            vec3 hair = vec3(dot(c, vec3(0.333))) * vec3(0.32, 0.29, 0.27);
+            // above the brow, anything darker than forehead skin is hair
+            float isHair = max(1.0 - skin, step(uBrow, vH) * (1.0 - smoothstep(0.4, 0.52, Y)));
+            diffuseColor.rgb = mix(c * vec3(0.84, 0.7, 0.58), hair, isHair);
+          }`,
+        );
+      };
+      m.customProgramCacheKey = () => "rb-head-student";
+      o.material = m;
+    }
+  });
+  // some of these bodies carry their T-shirt graphic on the hair layer (cut-out cards): drop
+  // anything on that layer below the neck (1.5 m on a 1.75 m body, in the resting pose)
+  if (!axes) return;
+  model.traverse((o) => {
+    if (!o.isSkinnedMesh || o.material.name !== "hair") return;
+    const m = o.material.clone();
+    m.onBeforeCompile = (sh) => {
+      sh.uniforms.uUp = { value: axes.up };
+      sh.uniforms.uNeck = { value: axes.lowest + 1.5 / axes.scale };
+      sh.vertexShader = sh.vertexShader.replace("#include <common>", "#include <common>\nvarying float vH;\nuniform vec3 uUp;").replace("#include <begin_vertex>", "#include <begin_vertex>\nvH = dot(position, uUp);");
+      sh.fragmentShader = sh.fragmentShader.replace("#include <common>", "#include <common>\nvarying float vH;\nuniform float uNeck;").replace("#include <alphatest_fragment>", "#include <alphatest_fragment>\nif (vH < uNeck) discard;");
+    };
+    m.customProgramCacheKey = () => "rb-hair-cut";
+    o.material = m;
+  });
+}
+
+export function varyBody(c, v) {
+  const model = c.model;
+  model.traverse((o) => {
+    if (!o.isSkinnedMesh || o.material.name !== "body") return;
+    // the waist, in the mesh's own (bind) space, which may not be y-up (the Rocketbox bodies come
+    // from 3ds Max): the long axis of the body, pointing toward the head; the belt sits at about
+    // 57% of the height
+    if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+    const bb = o.geometry.boundingBox;
+    const size = bb.getSize(new THREE.Vector3());
+    const ax = size.x >= size.y && size.x >= size.z ? "x" : size.y >= size.z ? "y" : "z";
+    const hi = o.skeleton.bones.findIndex((b) => b.name === "Head");
+    const headAt = new THREE.Vector3();
+    if (hi >= 0) new THREE.Matrix4().copy(o.skeleton.boneInverses[hi]).invert().decompose(headAt, new THREE.Quaternion(), new THREE.Vector3());
+    const mid = (bb.min[ax] + bb.max[ax]) / 2;
+    const sign = headAt[ax] >= mid ? 1 : -1;
+    const axis = new THREE.Vector3();
+    axis[ax] = sign;
+    const H = size[ax];
+    const waist = sign > 0 ? bb.min[ax] + 0.57 * H : -(bb.max[ax] - 0.57 * H);
+    // turning the hue: a rotation about the grey axis, with the saturation scaled
+    const k = Math.cos(v.hue);
+    const sn = Math.sin(v.hue);
+    const third = 1 / 3;
+    const r3 = Math.sqrt(third);
+    const rot = new THREE.Matrix3().set(
+      k + (1 - k) * third, third * (1 - k) - r3 * sn, third * (1 - k) + r3 * sn,
+      third * (1 - k) + r3 * sn, k + third * (1 - k), third * (1 - k) - r3 * sn,
+      third * (1 - k) - r3 * sn, third * (1 - k) + r3 * sn, k + third * (1 - k),
+    );
+    const m = o.material.clone();
+    m.onBeforeCompile = (sh) => {
+      sh.uniforms.uRot = { value: rot };
+      sh.uniforms.uSat = { value: v.sat ?? 1 };
+      sh.uniforms.uTop = { value: new THREE.Vector3(...v.top) };
+      sh.uniforms.uBot = { value: new THREE.Vector3(...v.bottom) };
+      sh.uniforms.uWaist = { value: waist };
+      sh.uniforms.uAxis = { value: axis };
+      sh.uniforms.uBand = { value: H * 0.012 };
+      sh.vertexShader = sh.vertexShader.replace("#include <common>", "#include <common>\nvarying float vRestY;\nuniform vec3 uAxis;").replace("#include <begin_vertex>", "#include <begin_vertex>\nvRestY = dot(position, uAxis);");
+      sh.fragmentShader = sh.fragmentShader
+        .replace("#include <common>", "#include <common>\nvarying float vRestY;\nuniform mat3 uRot; uniform float uSat; uniform vec3 uTop; uniform vec3 uBot; uniform float uWaist; uniform float uBand;")
+        .replace(
+          "#include <map_fragment>",
+          `#include <map_fragment>
+          {
+            vec3 c = diffuseColor.rgb;
+            vec3 s = pow(max(c, vec3(0.0)), vec3(0.4545));
+            float Y = dot(s, vec3(0.299, 0.587, 0.114));
+            float cb = 0.5 - 0.169 * s.r - 0.331 * s.g + 0.5 * s.b;
+            float cr = 0.5 + 0.5 * s.r - 0.419 * s.g - 0.081 * s.b;
+            // skin: warm and moderately saturated (Cb 0.30-0.50, Cr 0.53-0.68 in YCbCr)
+            float skin = smoothstep(0.29, 0.33, cb) * (1.0 - smoothstep(0.48, 0.52, cb)) * smoothstep(0.52, 0.55, cr) * (1.0 - smoothstep(0.66, 0.7, cr)) * smoothstep(0.12, 0.2, Y);
+            float grey = dot(c, vec3(0.3333));
+            vec3 turned = max(vec3(0.0), uRot * c);
+            turned = mix(vec3(grey), turned, uSat);
+            float upper = smoothstep(uWaist - uBand, uWaist + uBand, vRestY);
+            vec3 cloth = mix(c * uBot, turned * uTop, upper);
+            diffuseColor.rgb = mix(cloth, c, skin);
+          }`,
+        );
+    };
+    m.customProgramCacheKey = () => "varied-body";
+    o.material = m;
+  });
+}
+
 function prepareBody(model, anims, { hair, kind }) {
   // ---------- convert the animations to this skeleton ----------
   model.updateMatrixWorld(true);
@@ -594,8 +1060,10 @@ function prepareBody(model, anims, { hair, kind }) {
   const hips = model.getObjectByName("Hips");
   const hipsRest = hips.position.clone();
   const clips = {};
+  let idleHipsY = null;
   for (const clip of anims.animations) {
-    if (!["idle", "walk", "run", "agree", "headShake"].includes(clip.name)) continue;
+    if (!["idle", "walk", "run", "agree", "headShake", ...CRASH_CLIPS].includes(clip.name)) continue;
+    const crash = CRASH_CLIPS.includes(clip.name);
     const tracks = [];
     for (const track of clip.tracks) {
       const [boneName, prop] = track.name.split(".");
@@ -620,6 +1088,16 @@ function prepareBody(model, anims, { hair, kind }) {
         const mean = new THREE.Vector3();
         for (let i = 0; i < track.values.length; i += 3) mean.add(new THREE.Vector3().fromArray(track.values, i));
         mean.multiplyScalar(3 / track.values.length);
+        if (crash) {
+          // keep the height the clip really has (lying is low), drop the travel: the game moves the body
+          if (idleHipsY === null) {
+            const idle = anims.animations.find((c) => c.name === "idle");
+            const it = idle && idle.tracks.find((t) => /Hips\.position$/.test(t.name));
+            idleHipsY = 0;
+            if (it) { for (let i = 1; i < it.values.length; i += 3) idleHipsY += it.values[i]; idleHipsY /= it.values.length / 3; }
+          }
+          mean.set(track.values[0], idleHipsY, track.values[2]);
+        }
         const v = new THREE.Vector3();
         const values = new Float32Array(track.values.length);
         const toParent = hips.parent.getWorldQuaternion(new THREE.Quaternion()).invert();
@@ -735,7 +1213,11 @@ export function makeCharacter(kit, opts = {}) {
   });
   const look = opts.look || {};
   const rocketbox = kit.kind === "rocketbox";
-  if (opts.uniform) dressInUniform(model);
+  if (opts.uniform && rocketbox) {
+    if (opts.polo) attachPolo(model, opts.polo);
+    else dressRocketboxShirt(model, opts.shirt);
+  }
+  else if (opts.uniform) dressInUniform(model, opts.shirt);
   else if (!rocketbox) dressInLook(model, look);
   // hair colour, or none
   const hairMesh = rocketbox ? null : model.getObjectByName("Hair");
@@ -755,6 +1237,7 @@ export function makeCharacter(kit, opts = {}) {
   // A holder around the model lets the whole figure lean without disturbing the skeleton. The model
   // faces +z, the game's "forward" is -z, so the holder is turned around.
   const holder = new THREE.Group();
+  model.position.y = 0.03; // soles sat level with the ground layers, which sit up to 2 cm above the physics floor: lift 3 cm
   holder.add(model);
   holder.rotation.y = Math.PI;
 
@@ -767,6 +1250,7 @@ export function makeCharacter(kit, opts = {}) {
     actions[name].setEffectiveWeight(name === "idle" ? 1 : 0);
   }
   actions.walk.timeScale = actions.run.timeScale = 0; // their timing is driven by ground speed below
+  for (const n of CRASH_CLIPS) if (actions[n]) { actions[n].timeScale = 0; actions[n].setEffectiveWeight(0); }
   // nobody idles in step with anyone else
   actions.idle.time = Math.random() * clips.idle.duration;
   actions.idle.timeScale = 0.85 + Math.random() * 0.3;
@@ -853,6 +1337,7 @@ export function makeCharacter(kit, opts = {}) {
   const v1 = new THREE.Vector3();
   const v2 = new THREE.Vector3();
   const v3 = new THREE.Vector3();
+  const v4 = new THREE.Vector3();
   const qa = new THREE.Quaternion();
   const qb = new THREE.Quaternion();
   const qc = new THREE.Quaternion();
@@ -910,6 +1395,7 @@ export function makeCharacter(kit, opts = {}) {
   // inclined forward (more when sprinting), head up to see the road. At a stop the left foot comes
   // down to the ground.
   let riding = false;
+  let standHipH = null;
   const footFlat = legs.map(() => new THREE.Quaternion());
   function ride(dt, s) {
     const r = s.ride;
@@ -923,9 +1409,17 @@ export function makeCharacter(kit, opts = {}) {
     holder.parent.updateMatrixWorld(true);
     // standing pose's feet: flat, pointing forward; kept to give the feet their angle on the pedals
     legs.forEach((leg, i) => leg.foot.getWorldQuaternion(footFlat[i]));
-    // sit: move the whole figure so the pelvis rests on the saddle
+    // how high the pelvis is when standing (measured once from the standing pose)
     hips.getWorldPosition(v1);
+    if (standHipH === null) standHipH = v1.y - holder.getWorldPosition(v3).y;
+    // Getting on or off: r.stand (1 standing beside the machine .. 0 seated) and r.at (the point
+    // on the ground under the standing pelvis) move the pelvis between standing beside it and the
+    // saddle, rising over the seat on the way (r.lift, metres).
+    const standK = r.stand || 0;
+    // sit: move the whole figure so the pelvis rests on the saddle
     const seat = v2.copy(r.saddle).addScaledVector(r.up, 0.085).addScaledVector(r.back, 0.03);
+    if (standK > 0 && r.at) seat.lerp(v4.copy(r.at).addScaledVector(UP, standHipH), standK);
+    if (r.lift) seat.addScaledVector(UP, r.lift);
     const parent = holder.parent;
     holder.position.add(parent.worldToLocal(seat.clone()).sub(parent.worldToLocal(v1.clone())));
     holder.updateMatrixWorld(true);
@@ -936,7 +1430,7 @@ export function makeCharacter(kit, opts = {}) {
     // trunk forward over the bars (a sprinting rider gets lower); walking the bike back, the rider
     // sits up and looks back over the right shoulder
     const back = r.backing || 0;
-    const bend = (0.42 + 0.2 * r.effort) * (1 - 0.55 * back) * (r.posture ?? 1); // posture: upright on a roadster or a motorcycle
+    const bend = (0.42 + 0.2 * r.effort) * (1 - 0.55 * back) * (r.posture ?? 1) * (1 - standK) + (r.stoop || 0); // posture: upright on a roadster or a motorcycle; stoop: bending to reach
     turn(spine, -bend * 0.55);
     turn(chest, -bend * 0.45);
     turn(neck, bend * 0.5);
@@ -947,17 +1441,27 @@ export function makeCharacter(kit, opts = {}) {
       turn(head, -0.5 * back, r.up);
     }
     // arms: reach forward with a soft elbow, then the wrists go to the grips
+    // a hand given as `false` hangs relaxed; a point puts the wrist there (taking a helmet, the key)
     arms.forEach((arm, i) => {
+      const want = i === 0 ? r.handL : r.handR;
+      if (want === false) return;
       turn(arm, 1.05);
       turn(forearms[i], 0.45);
-      const grip = i === 0 ? r.gripL : r.gripR;
-      solveChain(arm, forearms[i], hands[i], v3.copy(grip).addScaledVector(r.back, 0.05).addScaledVector(r.up, 0.02));
+      if (want) solveChain(arm, forearms[i], hands[i], want);
+      else solveChain(arm, forearms[i], hands[i], v3.copy(i === 0 ? r.gripL : r.gripR).addScaledVector(r.back, 0.05).addScaledVector(r.up, 0.02));
     });
     // legs: knees forward, ankles over the pedals (ball of the foot on the pedal)
     legs.forEach((leg, i) => {
-      turn(leg.up, 1.25);
-      turn(leg.knee, -1.5);
+      turn(leg.up, 1.25 * (1 - standK) + 0.15);
+      turn(leg.knee, -1.5 * (1 - standK) - 0.15);
       const pedal = i === 0 ? r.pedalL : r.pedalR;
+      const given = i === 0 ? r.footL : r.footR; // a foot placed by the getting-on sequence
+      if (given) {
+        solveChain(leg.up, leg.knee, leg.foot, given);
+        leg.foot.quaternion.copy(leg.knee.getWorldQuaternion(qa).invert()).multiply(footFlat[i]);
+        leg.foot.updateMatrixWorld(true);
+        return;
+      }
       const onPedal = v3.copy(pedal).addScaledVector(r.up, 0.075).addScaledVector(r.back, 0.07);
       if (back > 0.01) {
         // walking it back: feet on the ground either side, stepping in turn
@@ -1120,8 +1624,39 @@ export function makeCharacter(kit, opts = {}) {
      *           lookAt (world point or null), talk (0..1 mouth opening), friendly (true when someone is close),
      *           groundAt(x, z, fromY) -> height of the ground there, or null
      */
+    clipDuration: (n) => (clips[n] ? clips[n].duration : 1),
+    /**
+     * Tip the whole body over about the hips (call after update(), every frame of a fall).
+     * angle 0 = standing, PI/2 = lying; (lx, lz) = which way the head points when it is down, in the
+     * parent's frame; spin = a roll about the body's long axis. The limbs stay as the idle pose has them.
+     */
+    applyTip({ angle, lx, lz, spin = 0, lift = 0 }) {
+      const HIP = 0.95;
+      const l = Math.hypot(lx, lz) || 1;
+      const tilt = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(lz / l, 0, -lx / l), angle);
+      holder.quaternion.copy(tilt).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI + spin));
+      const hipY = HIP * Math.cos(angle) + 0.21 * Math.sin(angle) + lift;
+      holder.position.set(0, hipY, 0).sub(new THREE.Vector3(0, HIP, 0).applyQuaternion(tilt));
+      holder.parent?.updateMatrixWorld(true);
+    },
     update(dt, s) {
       clock += dt;
+      if (s.pose) {
+        // a scripted pose (the crash): [{ name, t (s into the clip), w }], the clips blended by weight
+        if (riding || sitting) { riding = false; sitting = false; }
+        for (const a of Object.values(actions)) a.setEffectiveWeight(0);
+        for (const p of s.pose) {
+          const a = actions[p.name];
+          if (!a) continue;
+          a.time = Math.min(p.t, clips[p.name].duration - 1e-3);
+          a.setEffectiveWeight(p.w ?? 1);
+        }
+        holder.rotation.set(0, Math.PI, 0);
+        holder.position.set(0, 0, 0);
+        mixer.update(0);
+        holder.parent?.updateMatrixWorld(true);
+        return;
+      }
       if (s.ride) {
         ride(dt, s);
         return;
@@ -1161,8 +1696,12 @@ export function makeCharacter(kit, opts = {}) {
 
       // ---- lean into turns ----
       lean += (clamp(-s.turnRate * 0.035 * clamp(s.speed / 4, 0, 1.4), -0.16, 0.16) - lean) * ease(dt, 6);
-      holder.rotation.z = lean;
-      holder.rotation.x = -0.04 * running;
+      // body lean from the physics (leaning into speeding up and turning), a wobble while
+      // staggering, and the whole body tipping about the feet when it falls
+      const wob = s.stagger ? Math.sin(phase * Math.PI * 4) * 0.08 : 0;
+      const down = s.down || 0;
+      holder.rotation.set(-0.04 * running - (s.leanFwd || 0) * 0.6 - down, Math.PI, lean + (s.leanSide || 0) * 0.6 + wob);
+      holder.position.set(0, Math.sin(down) * 0.12, 0);
       holder.parent?.updateMatrixWorld(true);
       if (s.sit) {
         sitting = true;
@@ -1221,6 +1760,23 @@ export function makeCharacter(kit, opts = {}) {
             turn(leg.foot, jp.toes + jp.knee * 0.5);
           });
         } else if (Math.abs(jp.toes) > 0.01) legs.forEach((leg) => turn(leg.foot, jp.toes));
+      }
+
+      // ---- a scripted limb pose (the crash): rotations about the body's left-right axis, per side.
+      // s.limbs = { spine, aL, aR (arms), eL, eR (elbows), tL, tR (thighs), kL, kR (knees) }; positive swings a
+      // hanging arm or thigh forward, bends the knee back. Applied on top of whatever the mixer set this frame.
+      if (s.limbs) {
+        const L = s.limbs;
+        const rightA = new THREE.Vector3(1, 0, 0).applyAxisAngle(UP, s.facing);
+        const tw = (b, a) => { if (a && Math.abs(a) > 1e-3) turnInWorld(b, new THREE.Quaternion().setFromAxisAngle(rightA, a)); };
+        tw(spine, (L.spine || 0) * 0.6);
+        tw(chest, (L.spine || 0) * 0.4);
+        tw(arms[0], L.aL); tw(arms[1], L.aR);
+        tw(forearms[0], L.eL); tw(forearms[1], L.eR);
+        tw(legs[0].up, L.tL); tw(legs[1].up, L.tR);
+        tw(legs[0].knee, -(L.kL || 0)); tw(legs[1].knee, -(L.kR || 0));
+        tw(legs[0].foot, (L.kL || 0) * 0.5); tw(legs[1].foot, (L.kR || 0) * 0.5);
+        tw(neck, (L.head || 0) * 0.4); tw(head, (L.head || 0) * 0.6);
       }
 
       // ---- head and eyes look at people nearby ----

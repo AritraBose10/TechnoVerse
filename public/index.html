@@ -13,6 +13,21 @@
   button { font:inherit; cursor:pointer; }
   .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; backdrop-filter:blur(8px); }
 
+  /* Boot: the name form is there at once; the drone shot behind it fades in when the city has loaded */
+  body.booting { background:#0b1522; }
+  body.booting canvas#scene { opacity:0; }
+  canvas#scene { transition:opacity 1.2s ease; }
+  #loadBox { margin:0 0 14px; }
+  #loadText { margin:0 0 8px; font-size:13px; color:var(--muted); }
+  #loadTrack { height:5px; border-radius:3px; background:rgba(255,255,255,.14); overflow:hidden; position:relative; }
+  #loadBar { height:100%; width:4%; border-radius:3px; background:var(--accent); transition:width .35s ease; }
+  /* a shimmer on the compositor, so it keeps moving while the page is busy building the world */
+  #loadTrack::after { content:""; position:absolute; top:0; left:0; width:40%; height:100%;
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,.35),transparent); animation:loadSlide 1.2s linear infinite; }
+  #loadBox.done { display:none; }
+  .primary:disabled { opacity:.45; cursor:wait; }
+  @keyframes loadSlide { from { transform:translateX(-100%); } to { transform:translateX(260%); } }
+
   /* Join screen */
   #join { position:fixed; inset:0; display:grid; place-items:center; padding:16px; overflow:auto;
     background:linear-gradient(180deg,rgba(15,30,50,.55),rgba(15,30,50,.85)); z-index:20; }
@@ -26,6 +41,9 @@
   .swatches { display:flex; gap:8px; margin-top:6px; }
   .swatches button { width:30px; height:30px; border-radius:50%; border:2px solid transparent; padding:0; }
   .swatches button[aria-pressed=true] { border-color:#fff; }
+  .shirts { display:flex; gap:8px; margin-top:6px; }
+  .shirts button { padding:6px 10px; border-radius:8px; border:2px solid transparent; background:rgba(255,255,255,.12); color:inherit; cursor:pointer; }
+  .shirts button[aria-pressed=true] { border-color:#fff; }
   .primary { width:100%; padding:12px; border:0; border-radius:8px; background:var(--accent); color:#1b1300; font-weight:600; }
   #joinError { color:#ff9c9c; min-height:1.4em; margin:8px 0 0; font-size:13px; }
 
@@ -34,6 +52,12 @@
   #hud > * { pointer-events:auto; }
   #top { position:absolute; top:12px; left:12px; padding:8px 12px; font-size:13px; }
   #top b { color:var(--accent); }
+  #timeBox { position:absolute; top:52px; left:12px; padding:8px 12px; width:min(300px,calc(100vw - 24px)); font-size:12px; }
+  #timeBox input[type=range] { width:100%; margin:2px 0 6px; accent-color:var(--accent); }
+  #timeBox .presets { display:flex; flex-wrap:wrap; gap:4px; }
+  #timeBox button { padding:3px 8px; border-radius:6px; border:1px solid var(--line); background:rgba(255,255,255,.1); color:inherit; font-size:12px; }
+  #timeBox button[aria-pressed=true] { border-color:#fff; }
+  #timeBox small { display:block; margin-top:4px; color:var(--muted); }
   #nearby { position:absolute; top:12px; right:12px; width:230px; max-height:45vh; overflow:auto; padding:10px 12px; }
   #nearby h2 { margin:0 0 6px; font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
   #nearbyList { list-style:none; margin:0; padding:0; }
@@ -79,7 +103,7 @@
 { "imports": { "three": "/vendor/three.module.js" } }
 </script>
 </head>
-<body>
+<body class="booting">
 <canvas id="scene"></canvas>
 
 <div id="join">
@@ -91,7 +115,11 @@
     <label>Colour
       <span class="swatches" id="swatches"></span>
     </label>
-    <button class="primary" type="submit">Enter campus</button>
+    <label>T-shirt
+      <span class="shirts" id="shirts"><button type="button" data-shirt="tiu">TIU polo</button><button type="button" data-shirt="reboot">Reboot Reality</button><button type="button" data-shirt="sof">School of the Future</button></span>
+    </label>
+    <div id="loadBox"><p id="loadText">Loading the campus…</p><div id="loadTrack"><div id="loadBar"></div></div></div>
+    <button class="primary" type="submit" id="enterBtn" disabled>Enter campus</button>
     <p id="joinError" role="alert"></p>
   </form>
 </div>
@@ -99,6 +127,11 @@
 <div id="hud" hidden>
   <div id="top" class="panel">You are near <b id="place">Main Gate</b> · <span id="count">1</span> on campus · <span id="clock"></span> IST</div>
 
+  <div id="timeBox" class="panel">
+    <input type="range" id="timeSlider" min="0" max="1439" step="5" aria-label="Time of day">
+    <div class="presets" id="timePresets"></div>
+    <small>Press T to step through the day</small>
+  </div>
   <div id="nearby" class="panel">
     <h2>Nearby</h2>
     <ul id="nearbyList"></ul>

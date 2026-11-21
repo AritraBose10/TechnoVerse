@@ -12,13 +12,29 @@
 //   - Walkers keep to their side, step round each other, lamp posts and you, and slow when they
 //     cannot pass. Each has their own pace, stride, height, build, clothes and habits (a call, a
 //     glance at the phone), so no two move alike.
+// Everyone who walks is a Detour crowd agent on the street's navmesh (nav.js): paths round railings,
+// walls, stalls and parked bikes come from the mesh, and the crowd keeps them apart; the agent's
+// height is the floor's, so nobody stands on a bike. People who step off the mesh on purpose (up
+// the university steps, into a bus or auto, behind a stall counter, onto a bench) leave the crowd for
+// that stretch and are moved by script, as before.
 // Positions are in the street's own frame ("local"): x along the street, z across it toward the
 // far side. A heading t faces local (-sin t, -cos t).
 import * as THREE from "three";
 import { makeCharacter } from "/character.js";
 import { officeLook, studentLook, localLook, shopkeeperLook, guardLook } from "/looks.js";
 import { pickBody } from "/crowdbodies.js";
+import { varyBody } from "/character.js";
 
+const CROWD_R = 0.22; // a walker's width in the crowd (the mesh keeps their bodies 0.27 m clear of walls)
+const STAND_R = 0.16; // ... and when standing about
+const SQUEEZE_R = 0.2; // ... and turned sideways to slip past (never so thin that two bodies share a place)
+// The railed tea stalls (x 24.5 to 49.4 on the far side) leave one way along the footpath: the aisle between
+// the white railing and the counters, 0.76 m wide. Nobody can pass a person standing in the middle of it, so
+// it is walked by script, in single file along the railing (the pass line); someone at a counter stands on the
+// stand line, and steps in against the counter (the aside line) to let a walker by. See aisleGo().
+// (pass: 22 cm clear of the railing and of the stalls' front posts; aside: as close as a body gets to a counter.)
+const AISLE = { x0: 24.1, x1: 49.95, pass: 26.21, stand: 26.36, aside: 26.575, bay: 26.75 };
+const inAisleX = (x) => x > AISLE.x0 && x < AISLE.x1;
 const DOMAIN = [-130, 150]; // walkers appear and leave beyond these ends of the street
 const NEAR_FOOT = { lo: 6.95, hi: 8.2 }; // between the university's railing and the kerb
 const FAR_FOOT = { lo: 26.0, hi: 29.1 }; // between the far kerb and the boundary wall
@@ -29,12 +45,14 @@ const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 const headingOf = (dx, dz) => Math.atan2(-dx, -dz);
 
-export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoading, bodiesLoading, traffic, quality = "high", camera, seed = 31 }) {
+export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoading, bodiesLoading, traffic, quality = "high", camera, nav: navLoading, seed = 31 }) {
   let s = seed;
   const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
   const range = (a, b) => a + rnd() * (b - a);
   const chance = (p) => rnd() < p;
   const low = quality === "low";
+  let nav = null; // the navmesh and crowd, once built
+  navLoading?.then((n) => (nav = n));
   const WALKERS = low ? 10 : 26;
 
   // ---------- where things are ----------
@@ -45,7 +63,7 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
   function farZ(x, dir) {
     const normal = dir > 0 ? 26.7 : 27.7;
     const zones = [
-      [23.6, 50.4, 25.62],
+      [24.0, 50.0, AISLE.pass],
       [58.5, 128.5, 25.62],
       [-6.9, 3.9, 25.72],
     ];
@@ -60,32 +78,50 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
   const bounds = (side, x) => {
     if (side === "near") return NEAR_FOOT;
     const z = farZ(x, 1);
-    return z < 26 ? { lo: z - 0.3, hi: z + 0.25 } : FAR_FOOT;
+    return z < 26 ? { lo: z - 0.3, hi: z + 0.25 } : z < 26.5 ? { lo: z - 0.1, hi: z + 0.25 } : FAR_FOOT;
   };
 
   // places to stand, sit and serve from
-  const customerSpots = [];
   const benchSeats = [];
   const keepers = [];
   stalls.forEach((st, i) => {
     const opening = openings.reduce((best, o) => (Math.abs(o - (st.cx0 + st.cx1) / 2) < Math.abs(best - (st.cx0 + st.cx1) / 2) ? o : best), openings[0]);
     st.opening = st.open ? (st.cx0 + st.cx1) / 2 : opening; // the northern row has no railing in front
     st.queue = [];
+    st.mode = st.open ? "mesh" : "aisle";
+    st.pop = st.open ? 0.25 : [3, 1, 2.5, 1, 1.5, 0.5][i % 6]; // some stalls are the ones everybody goes to
+    // The queue stands along the counter, a pace apart, the head by the kettle; with tea in hand people
+    // step into the stall's bay (beside its bench) to drink it.
+    st.standZ = st.open ? st.counterFront - 0.4 : AISLE.stand;
+    st.slots = [];
+    for (let x = st.cx0 + 0.4; x <= Math.min(st.cx1 + 0.3, st.x1 - 1.0) && st.slots.length < 3; x += 0.92) st.slots.push(x);
+    st.sips = [{ x: st.x1 - 0.55, z: st.counterFront + 0.27, taken: null }];
+    if (st.open && st.x1 - 0.55 - (st.cx1 + 0.45) > 0.7) st.sips.push({ x: st.cx1 + 0.45, z: st.counterFront + 0.3, taken: null });
     st.kind = ["tea", "snack", "drink"][i % 3]; // what this stall sells decides what changes hands
     st.qr = [(st.cx0 + st.cx1) / 2, st.counterTop, st.counterFront + 0.14]; // the payment QR code stands here
     st.stock = st.kind === "drink" ? [st.cx1 - 0.45, 1.3, st.zf + 0.62] : [(st.cx0 + st.cx1) / 2 + 0.3, st.counterTop + 0.12, st.counterFront + 0.5];
-    for (let x = st.cx0 + 0.4; x <= st.cx1 - 0.35; x += 0.72) customerSpots.push({ stall: st, x, z: st.counterFront - 0.42, face: Math.PI, taken: null });
     for (let x = st.bench.x0 + 0.25; x <= st.bench.x1 - 0.2; x += 0.62) benchSeats.push({ stall: st, x, z: st.bench.z, y: st.bench.y, taken: null });
     keepers.push({ stall: st, x: (st.cx0 + st.cx1) / 2, z: st.counterBack + 0.48, home: (st.cx0 + st.cx1) / 2, kettle: st.kettle, top: st.counterTop, front: st.counterFront });
     void i;
   });
   // the tea shed south of the gate: a long counter facing the road
   shed.queue = [];
+  shed.mode = "shed"; // between the kerb and its counter there is under a metre: customers stand close in against it (out of the crowd), walkers pass along the kerb
+  shed.pop = 3;
+  shed.standZ = shed.counterFront - 0.18;
+  shed.slots = [shed.x1 - 0.7, shed.x1 - 1.65, shed.x1 - 2.6];
+  shed.sips = [3.55, 4.5, 5.45, 6.4].map((d) => ({ x: shed.x1 - d, z: shed.counterFront - 0.18, taken: null }));
   shed.opening = null;
   shed.kind = "tea";
   shed.qr = [(shed.x0 + shed.x1) / 2, shed.counterTop, shed.counterFront + 0.14];
   shed.stock = [(shed.x0 + shed.x1) / 2 + 0.3, shed.counterTop + 0.12, shed.counterFront + 0.5];
-  for (let x = shed.x0 + 0.7; x <= shed.x1 - 0.6; x += 0.8) customerSpots.push({ stall: shed, x, z: shed.counterFront - 0.43, face: Math.PI, taken: null });
+  const counters = [...stalls, shed];
+  for (const st of counters) {
+    st.line = []; // who stands in the queue, in the order they came
+    st.coming = 0; // ... and who is on the way to join it
+  }
+  const postsX = stalls.filter((st) => st.mode === "aisle").flatMap((st) => [st.x0 + 0.1, st.x1 - 0.1]); // the front posts stand in the aisle's counter side
+  const inZone = (x, z) => inAisleX(x) && z > 25.5;
   keepers.push({ stall: shed, x: (shed.x0 + shed.x1) / 2, z: shed.counterBack + 0.45, home: (shed.x0 + shed.x1) / 2, kettle: shed.kettle, top: shed.counterTop, front: shed.counterFront });
 
   const groups = [
@@ -114,7 +150,34 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     const [wx, wz] = local(x, z);
     ray.origin = { x: wx, y: 3, z: wz };
     const hit = world.castRay(ray, 4, true, undefined, undefined, undefined, undefined, staticOnly);
-    return hit ? 3 - hit.toi : 0.04;
+    // the road surface is drawn 1-2 cm above the ground collider: stand on it, not in it
+    const gy = hit ? 3 - hit.toi : 0.04;
+    return gy < 0.05 ? gy + 0.022 : gy;
+  }
+  // is there a fixed solid at chest height at this spot (street frame)? scripted moves must not enter one
+  const chest = new RAPIER.Ball(0.22);
+  const noRot = { x: 0, y: 0, z: 0, w: 1 };
+  function solidAt(x, z) {
+    const [wx, wz] = local(x, z);
+    let hit = false;
+    world.intersectionsWithShape({ x: wx, y: 1.0, z: wz }, noRot, chest, (c) => {
+      if (c.isSensor()) return true;
+      const b = c.parent();
+      if (!b || b.isFixed()) hit = true;
+      return !hit;
+    });
+    return hit;
+  }
+  // the nearest spot to (x, z) with nothing solid in it
+  function clearSpot(x, z) {
+    if (!solidAt(x, z)) return [x, z];
+    for (let r = 0.15; r <= 1.5; r += 0.15) {
+      for (let k = 0; k < 12; k++) {
+        const a = (k / 12) * Math.PI * 2;
+        if (!solidAt(x + Math.cos(a) * r, z + Math.sin(a) * r)) return [x + Math.cos(a) * r, z + Math.sin(a) * r];
+      }
+    }
+    return [x, z];
   }
   const toWorld = (x, z, y) => {
     const [wx, wz] = local(x, z);
@@ -127,10 +190,39 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     for (const g of ITEMS) p.char.showGear(g, g === item);
   };
   const people = [];
+  // Every person gets a different set of clothes colours: shirts in the colours a Kolkata office
+  // street actually wears, trousers in navy, black, grey, khaki, denim; worked through in a
+  // sequence that does not repeat, so even two people on the same body differ.
+  const TOPS = [[1, 1, 1], [0.78, 0.86, 1], [1, 0.84, 0.86], [0.86, 1, 0.88], [1, 0.95, 0.78], [0.72, 0.74, 0.8], [1, 0.7, 0.6], [0.66, 0.78, 0.95], [0.9, 0.8, 1], [0.95, 0.95, 0.9]];
+  const BOTTOMS = [[1, 1, 1], [0.6, 0.65, 0.85], [0.55, 0.55, 0.58], [1.05, 0.95, 0.78], [0.8, 0.85, 1], [0.7, 0.62, 0.55], [0.45, 0.45, 0.5]];
+  let variantNo = 0;
+  let transitT = 3;
+  function variant(role) {
+    const n = variantNo++;
+    const plain = role === "guard"; // the guards keep their uniform
+    return {
+      hue: plain ? 0 : ((n * 0.618034) % 1) * Math.PI * 2,
+      sat: plain ? 1 : 0.5 + ((n * 0.381966) % 1) * 0.42, // muted, as worn clothes are
+      top: plain ? [1, 1, 1] : TOPS[n % TOPS.length],
+      bottom: plain ? [1, 1, 1] : BOTTOMS[Math.floor(n / 3) % BOTTOMS.length],
+    };
+  }
   const stats = { arrived: 0, vanished: 0, crossed: 0 };
   let kit = null;
   const LOOKS = { office: officeLook, student: studentLook, local: localLook, keeper: shopkeeperLook, guard: guardLook, vendor: shopkeeperLook };
-  function person(role, x, z, heading = 0) {
+  // mesh: true = must start on the walkable mesh (snapped to it; null when there is none, i.e. skip this
+// spawn), "try" = on the mesh if the spot is on it, else a scripted person, false = scripted
+function person(role, x, z, heading = 0, mesh = true) {
+  let snap = null;
+  if (mesh && nav) {
+    snap = snapPt(x, z);
+    if (snap && Math.hypot(snap.x - x, snap.z - z) > (mesh === true ? 1.6 : 0.35)) snap = null;
+    if (!snap && mesh === true) return null;
+  }
+  if (snap) {
+    x = snap.x;
+    z = snap.z;
+  }
     const look = LOOKS[role](rnd);
     // a photographic body when one has loaded: women and men alike, except at the stalls and gates
     const sex = role === "keeper" || role === "guard" || role === "vendor" ? "m" : chance(role === "local" ? 0.38 : 0.45) ? "f" : "m";
@@ -141,7 +233,13 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       if (role === "student" && chance(sex === "m" ? 0.6 : 0.4)) gear.push({ kind: "backpack", color: ["#1f2a3c", "#3a3a3a", "#6a1f22", "#24503a", "#2a2a5a", "#c0782a"][(rnd() * 6) | 0] });
       if (role === "office" && chance(0.4)) gear.push("sling");
       if (role === "local" && chance(0.3)) gear.push({ kind: "carrybag", color: ["#d9c28a", "#c84a3a", "#3a7a5a", "#e8e0d0"][(rnd() * 4) | 0] });
-      c = makeCharacter(bodyKit.kit, { gear, height: 0.97 + rnd() * 0.06, lite: true });
+      // and the small things that tell people apart at a glance
+      if (chance(role === "office" ? 0.3 : 0.18)) gear.push("glasses");
+      if ((role === "local" || role === "student") && sex === "m" && chance(0.1)) gear.push({ kind: "cap", color: ["#a52a22", "#1f2a3c", "#e8e0d0", "#2d5a3a"][(rnd() * 4) | 0] });
+      if (role === "office" && chance(0.35)) gear.push("lanyard");
+      // heights spread like a real street (about 1.52 to 1.83 m), and clothes coloured per person
+      c = makeCharacter(bodyKit.kit, { gear, height: (sex === "f" ? 0.93 : 0.95) + rnd() * 0.12, lite: true });
+      varyBody(c, variant(role));
       look.pace *= sex === "f" ? 0.95 : 1;
     } else {
       const gear = [...(look.gear || []), { kind: "cup", clay: chance(0.5) }, "phone", "glass", "packet", "softdrink", "note"];
@@ -152,7 +250,7 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     group.add(c.model);
     scene.add(group);
     const body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
-    world.createCollider(RAPIER.ColliderDesc.capsule(0.55 * look.height, 0.24).setTranslation(0, 0.85 * look.height, 0), body);
+    world.createCollider(RAPIER.ColliderDesc.capsule(0.55 * look.height, 0.24).setTranslation(0, 0.85 * look.height, 0).setCollisionGroups(0x00020002), body); // group 2: the player's body walks through (see meetPlayer), rays still hit
     const p = {
       role,
       bodyName: bodyKit ? bodyKit.name : "fallback",
@@ -161,7 +259,11 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       body,
       x,
       z,
-      y: groundAt(x, z),
+      y: snap ? snap.y - 0.018 : groundAt(x, z),
+      ag: null, // crowd agent index while on the mesh
+      tgt: null,
+      mt: null,
+      joinT: 0,
       groundT: rnd() * 0.4,
       heading,
       want: heading,
@@ -197,12 +299,26 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       cup: false,
     };
     people.push(p);
+    if (snap) {
+      p.ag = nav.addAgent(snap.x, snap.z, { radius: CROWD_R, maxSpeed: p.pace, separationWeight: 0.4, queryRange: 2.2 });
+      if (p.ag == null) stats.noAgent = (stats.noAgent || 0) + 1;
+    }
     return p;
   }
   function remove(p) {
+    leave(p);
     scene.remove(p.group);
     world.removeRigidBody(p.body);
-    for (const list of [customerSpots, benchSeats]) for (const sp of list) if (sp.taken === p) sp.taken = null;
+    for (const sp of benchSeats) if (sp.taken === p) sp.taken = null;
+    for (const st of counters) {
+      st.line = st.line.filter((q) => q !== p);
+      for (const sp of st.sips) if (sp.taken === p) sp.taken = null;
+    }
+    if (p.comingTo) p.comingTo.coming--;
+    if (p.comingStop) p.comingStop.coming--;
+    for (const st of stopSpots) st.waiting = st.waiting.filter((q) => q !== p);
+    if (p.party) p.party.members = p.party.members.filter((m) => m !== p);
+    p.inA = false;
     for (const g of groups) {
       g.members = g.members.filter((m) => m !== p);
       for (const sl of g.slots) if (sl.taken === p) sl.taken = null;
@@ -218,9 +334,11 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
   const lane = (side, dir, xTo) => ({ type: "lane", side, dir, xTo });
   const goto = (x, z, opts = {}) => ({ type: "goto", x, z, ...opts });
   function crossTasks(from, xc) {
-    if (from === "near")
-      return [goto(xc, 8.12), { type: "waitClear", road: "near", x: xc, look: [xc - 30, 12] }, goto(xc + range(-0.3, 0.3), 17.1, { road: true }), { type: "waitClear", road: "far", x: xc, look: [xc + 30, 22] }, goto(xc, 25.8, { road: true, setSide: "far" })];
-    return [goto(xc, 25.8), { type: "waitClear", road: "far", x: xc, look: [xc + 30, 22] }, goto(xc + range(-0.3, 0.3), 16.9, { road: true }), { type: "waitClear", road: "near", x: xc, look: [xc - 30, 12] }, goto(xc, 8.05, { road: true, setSide: "near" }), goto(xc, 7.45)];
+    // to the kerb; stop, look toward the traffic, the other way, and back; over the first carriageway at a
+    // brisk walk when there is a gap; a shorter look again at the median; over the second
+    const wait = (road, first) => ({ type: "waitClear", road, x: xc, look: road === "near" ? [xc - 30, 12] : [xc + 30, 22], first });
+    if (from === "near") return [goto(xc, 8.12), wait("near", true), goto(xc + range(-0.3, 0.3), 17.1, { road: true }), wait("far", false), goto(xc, 25.8, { road: true, setSide: "far" })];
+    return [goto(xc, 25.8), wait("far", true), goto(xc + range(-0.3, 0.3), 16.9, { road: true }), wait("near", false), goto(xc, 8.05, { road: true, setSide: "near" }), goto(xc, 7.45)];
   }
   // walk from one side's footpath at x to somewhere: the other end, the university, a stall...
   function planFrom(p, side, x, purpose) {
@@ -241,22 +359,15 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       const o = range(-1.3, 1.3);
       t.push(goto(gx, 6.0), goto(TIU_DOOR.x + o, 3.9), goto(TIU_DOOR.x + o, 2.6), goto(TIU_DOOR.x + o * 0.7, TIU_DOOR.z), { type: "vanish" });
     } else if (purpose === "tea") {
-      const free = customerSpots.filter((sp) => !sp.taken);
-      if (!free.length) return planFrom(p, side, x, "pass");
-      const sp = free[(rnd() * free.length) | 0];
-      sp.taken = p;
-      const st = sp.stall;
-      if (st.opening) {
-        walkTo("far", st.opening);
-        t.push(goto(st.opening, 26.32, { free: true }), goto(sp.x, sp.z, { free: true }));
-      } else {
-        walkTo("far", sp.x);
-        t.push(goto(sp.x, sp.z, { free: true }));
-      }
-      t.push({ type: "customer", spot: sp, T: range(35, 150) });
-      if (st.opening) t.push(goto(st.opening, 26.32, { free: true }), goto(st.opening, 25.62, { free: true }));
-      else t.push(goto(sp.x, 25.72, { free: true }));
-      at = { side: "far", x: st.opening || sp.x };
+      // to a stall with room in its queue, the popular ones more often; the walk ends at the back of the line
+      const open = counters.filter((c) => c.slots.length && c.line.length + c.coming < c.slots.length);
+      if (!open.length) return planFrom(p, side, x, "pass");
+      const st = pickW(open.map((c) => [c, c.pop * (c.line.length + c.coming ? 1.6 : 1)]));
+      st.coming++;
+      p.comingTo = st;
+      walkTo("far", st.slots[Math.min(st.line.length + st.coming - 1, st.slots.length - 1)]);
+      t.push({ type: "customer", st, T: range(30, 110) });
+      at = { side: "far", x: st.slots[0] };
       // then back to class, or on along the street
       if (p.role === "student" && chance(0.6)) {
         const rest = planFrom(p, "far", at.x, "university");
@@ -271,9 +382,16 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       if (!free.length) return planFrom(p, side, x, "tea");
       const seat = free[(rnd() * free.length) | 0];
       seat.taken = p;
-      walkTo("far", seat.stall.opening);
-      t.push(goto(seat.stall.opening, 26.32, { free: true }), goto(seat.x, 27.55, { free: true }), { type: "bench", seat, T: range(50, 180) }, goto(seat.x, 27.4, { free: true }), goto(seat.stall.opening, 26.32, { free: true }), goto(seat.stall.opening, 25.62, { free: true }));
-      at = { side: "far", x: seat.stall.opening };
+      if (seat.stall.mode === "aisle") {
+        // along the aisle to the stall's bay, in to the bench; afterwards out again when there is a gap
+        walkTo("far", seat.x);
+        t.push({ type: "bay", st: seat.stall, x: seat.x, z: 27.55 }, { type: "bench", seat, T: range(50, 180) }, { type: "bayOut", st: seat.stall });
+        at = { side: "far", x: seat.x };
+      } else {
+        walkTo("far", seat.stall.opening);
+        t.push(goto(seat.stall.opening, 26.32, { free: true }), goto(seat.x, 27.55, { free: true }), { type: "bench", seat, T: range(50, 180) }, goto(seat.x, 27.4, { free: true }), goto(seat.stall.opening, 26.32, { free: true }), goto(seat.stall.opening, 25.62, { free: true }));
+        at = { side: "far", x: seat.stall.opening };
+      }
       walkTo("far", chance(0.5) ? DOMAIN[1] + 5 : DOMAIN[0] - 5);
       t.push({ type: "vanish" });
     } else if (purpose === "group") {
@@ -328,7 +446,7 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     let p;
     if (source === "university" && !prefill) {
       const o = range(-1.3, 1.3);
-      p = person(role, TIU_DOOR.x + o, TIU_DOOR.z, Math.PI);
+      p = person(role, TIU_DOOR.x + o, TIU_DOOR.z, Math.PI, false); // out of the door: down the steps by script, onto the mesh at the foot
       const gx = range(9.3, 14.7);
       p.tasks.push(goto(TIU_DOOR.x + o, 2.6, { free: true }), goto(TIU_DOOR.x + o, 3.9, { free: true }), goto(gx, 6.0, { free: true }), goto(gx, 7.45, { setSide: "near" }));
       p.side = "near";
@@ -336,18 +454,41 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       p.tasks.push(...planFrom(p, "near", gx, purpose));
     } else if (source === "institute" && !prefill) {
       const gx = range(9, 15);
-      p = person(role, gx, 30.8, 0);
+      p = person(role, gx, 30.8, 0, false); // out of the institute gate
       p.tasks.push(goto(gx, 28.4, { free: true }), goto(gx, 27.2, { setSide: "far" }));
       p.side = "far";
       p.tasks.push(...planFrom(p, "far", gx, pickW(PURPOSES[role].filter(([k]) => k !== "university" || role !== "local"))));
     } else {
       const side = chance(0.5) ? "near" : "far";
       const dir = chance(0.5) ? 1 : -1;
-      const x = prefill ? range(DOMAIN[0] + 10, DOMAIN[1] - 10) : dir > 0 ? DOMAIN[0] - 2 : DOMAIN[1] + 2;
+      let x = prefill ? range(DOMAIN[0] + 10, DOMAIN[1] - 10) : dir > 0 ? DOMAIN[0] - 2 : DOMAIN[1] + 2;
+      if (side === "far" && x > AISLE.x0 - 2 && x < AISLE.x1 + 2) x = AISLE.x1 + range(2, 8); // nobody starts in the stalls' aisle
       p = person(role, x, laneZ(side, x, dir), headingOf(dir, 0));
+      if (!p) return null; // nowhere on the mesh to start from
       p.side = side;
-      p.tasks.push(...planFrom(p, side, x, pickW(PURPOSES[role])));
-      if (prefill) p.z = laneZ(side, x, Math.sign(p.tasks[0]?.xTo - x || dir)) + p.offset;
+      const purpose = pickW(PURPOSES[role]);
+      p.tasks.push(...planFrom(p, side, x, purpose));
+      // two or three friends or colleagues walking together: the others keep beside the first
+      if ((purpose === "pass" || purpose === "university") && chance(role === "student" ? 0.4 : 0.2)) {
+        const party = { leader: p, members: [p], pace: p.pace, seed: range(0, 10) };
+        const n = chance(0.3) ? 2 : 1;
+        for (let k = 1; k <= n; k++) {
+          const xq = x - dir * 0.85 * k;
+          const q = person(role, xq, laneZ(side, xq, dir), headingOf(dir, 0));
+          if (!q) break;
+          q.side = side;
+          q.habit = 0.5 + q.habit * 0.5; // talking, not on the phone
+          q.party = party;
+          q.tasks.push({ type: "follow", leader: p, k });
+          party.members.push(q);
+          party.pace = Math.min(party.pace, q.pace);
+        }
+        if (party.members.length > 1) {
+          p.party = party;
+          p.habit = 0.5 + p.habit * 0.5;
+          stats.parties = (stats.parties || 0) + 1;
+        }
+      }
     }
     return p;
   }
@@ -355,22 +496,35 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
   // ---------- the people who stay put ----------
   const residents = [];
   function settle() {
+    for (const g of groups) for (const sl of g.slots) [sl.x, sl.z] = clearSpot(sl.x, sl.z); // not inside a pillar
+    for (const sp of benchSeats) if (solidAt(sp.x, sp.z)) sp.taken = "blocked"; // a parked bike in the way
+    for (const st of counters) {
+      if (st.mode === "aisle") continue;
+      // a place at a counter must be somewhere a person can stand: on the walkable mesh, nothing parked in it
+      const ok = (x, z) => {
+        const c = snapPt(x, z);
+        return c && Math.hypot(c.x - x, c.z - z) < 0.45 && !solidAt(x, z);
+      };
+      const n = st.slots.findIndex((x) => !ok(x, st.standZ));
+      if (n >= 0) st.slots.length = n;
+      st.sips = st.sips.filter((sp) => ok(sp.x, sp.z));
+    }
     for (const k of keepers) {
-      const p = person("keeper", k.x, k.z, 0);
+      const p = person("keeper", k.x, k.z, 0, false); // behind the counter: scripted
       p.tasks.push({ type: "keeper", k, act: "idle", t: range(1, 4), target: null });
       residents.push(p);
     }
     {
       const [cx, cz] = spots.cart;
-      const p = person("vendor", cx + 0.2, cz + 0.95, 0);
+      const p = person("vendor", cx + 0.2, cz + 0.95, 0, "try");
       p.tasks.push({ type: "vendor", t: 0 });
       const [rx, rz] = spots.rickshaw;
-      const q = person("local", rx - 0.9, rz + 0.95, headingOf(1, 0));
+      const q = person("local", rx - 0.9, rz + 0.95, headingOf(1, 0), "try");
       q.tasks.push({ type: "vendor", t: 0, arms: true });
       residents.push(p, q);
     }
     for (const [gx, gz, face] of [[17.7, 4.75, Math.PI], [15.7, 30.3, 0]]) {
-      const p = person("guard", gx, gz, face);
+      const p = person("guard", gx, gz, face, "try");
       p.tasks.push({ type: "guard", home: [gx, gz], face, t: range(10, 30) });
       residents.push(p);
     }
@@ -379,7 +533,7 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       for (const sl of g.slots) {
         if (chance(0.15)) continue;
         const role = g.kind === "mixed" ? pickW([["student", 2], ["office", 1], ["local", 1]]) : g.kind;
-        const p = person(role, sl.x, sl.z, headingOf(g.c[0] - sl.x, g.c[1] - sl.z));
+        const p = person(role, sl.x, sl.z, headingOf(g.c[0] - sl.x, g.c[1] - sl.z), "try");
         sl.taken = p;
         p.tasks.push({ type: "group", g, slot: sl, T: range(20, 200) });
         const near = g.c[1] < 20;
@@ -392,25 +546,36 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
         }
       }
     }
-    for (const sp of customerSpots) {
-      if (!chance(low ? 0.25 : 0.45)) continue;
-      const role = pickW([["office", 3], ["student", 3], ["local", 3]]);
-      const p = person(role, sp.x, sp.z, sp.face);
-      sp.taken = p;
-      p.side = "far";
-      p.served = true;
-      p.tasks.push({ type: "customer", spot: sp, T: range(10, 120), started: true });
-      const opening = sp.stall.opening;
-      if (opening) p.tasks.push(goto(opening, 26.32, { free: true }), goto(opening, 25.62, { free: true }));
-      else p.tasks.push(goto(sp.x, 25.72, { free: true }));
-      p.tasks.push(...planFrom(p, "far", opening || sp.x, chance(0.5) && role === "student" ? "university" : "pass").filter((t) => t.type !== "customer"));
+    // at the counters: a queue at the popular ones, somebody with a cup in hand in the bay
+    for (const st of counters) {
+      if (!st.slots.length) continue;
+      const onward = (p, x) => p.tasks.push(...planFrom(p, "far", x, chance(0.5) && p.role === "student" ? "university" : "pass"));
+      const nq = chance(Math.min(0.85, st.pop * 0.3)) ? 1 + (chance(st.pop > 2 ? 0.7 : 0.25) ? 1 : 0) + (chance(st.pop > 2 ? 0.3 : 0) ? 1 : 0) : 0;
+      for (let i = 0; i < Math.min(nq, st.slots.length); i++) {
+        const p = person(pickW([["office", 3], ["student", 3], ["local", 3]]), st.slots[i], st.standZ, Math.PI, st.mode === "mesh" ? "try" : false);
+        p.side = "far";
+        st.line.push(p);
+        p.tasks.push({ type: "customer", st, T: range(20, 90), phase: "queue", inLine: true });
+        onward(p, st.slots[i]);
+      }
+      for (const sp of st.sips) {
+        if (!chance((low ? 0.3 : 0.5) * Math.min(1, st.pop + 0.4))) continue;
+        const p = person(pickW([["office", 3], ["student", 3], ["local", 3]]), sp.x, sp.z, st.mode === "shed" ? Math.PI : 0, st.mode === "mesh" ? "try" : false);
+        p.side = "far";
+        p.served = true;
+        sp.taken = p;
+        st.queue.push(p);
+        p.tasks.push({ type: "customer", st, T: range(10, 110), phase: "drink", sip: sp });
+        onward(p, sp.x);
+      }
     }
     for (const seat of benchSeats) {
-      if (!chance(low ? 0.3 : 0.55)) continue;
-      const p = person(pickW([["local", 3], ["office", 1], ["student", 2]]), seat.x, seat.z, 0);
+      if (seat.taken || !chance(low ? 0.3 : 0.55)) continue;
+      const p = person(pickW([["local", 3], ["office", 1], ["student", 2]]), seat.x, seat.z, 0, "try");
       seat.taken = p;
       p.side = "far";
-      p.tasks.push({ type: "bench", seat, T: range(20, 160) }, goto(seat.x, 27.4, { free: true }), goto(seat.stall.opening, 26.32, { free: true }), goto(seat.stall.opening, 25.62, { free: true }), lane("far", -1, DOMAIN[0] - 5), { type: "vanish" });
+      if (seat.stall.mode === "aisle") p.tasks.push({ type: "bench", seat, T: range(20, 160) }, { type: "bayOut", st: seat.stall }, lane("far", -1, DOMAIN[0] - 5), { type: "vanish" });
+      else p.tasks.push({ type: "bench", seat, T: range(20, 160) }, goto(seat.x, 27.4, { free: true }), goto(seat.stall.opening, 26.32, { free: true }), goto(seat.stall.opening, 25.62, { free: true }), lane("far", -1, DOMAIN[0] - 5), { type: "vanish" });
     }
     for (let i = 0; i < WALKERS * 0.8; i++) arrive(true);
   }
@@ -464,21 +629,647 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     const k = 1 - Math.exp(-dt * 5);
     p.vx += (fx - p.vx) * k;
     p.vz += (fz - p.vz) * k;
+    const ox = p.x;
+    const oz = p.z;
     p.x += p.vx * dt;
     p.z += p.vz * dt;
+    solidPush(p);
+    if (p.ag == null && solidAt(p.x, p.z) && !solidAt(ox, oz)) {
+      // a pillar or a wall in the way of a scripted move: slide along it, or stop
+      if (!solidAt(p.x, oz)) p.z = oz;
+      else if (!solidAt(ox, p.z)) p.x = ox;
+      else {
+        p.x = ox;
+        p.z = oz;
+      }
+      p.vx = (p.x - ox) / Math.max(dt, 1e-3);
+      p.vz = (p.z - oz) / Math.max(dt, 1e-3);
+    }
     if (clampSide) {
       const b = bounds(clampSide, p.x);
       p.z = clamp(p.z, b.lo, b.hi);
     }
     return dist;
   }
+  // Bodies do not pass through things: after moving, anyone overlapping a fixed thing (a post, a
+  // parked bike, a player standing still) or another person is pushed back out along the line
+  // between them. Two people share the push; a fixed thing does not move.
+  function solidPush(p) {
+    for (const o of others) {
+      if (o.p === p) continue;
+      const rx = p.x - o.x;
+      const rz = p.z - o.z;
+      const d = Math.hypot(rx, rz);
+      const need = p.radius + o.r - 0.04;
+      if (d >= need || d < 1e-5) continue;
+      const k = (need - d) * (o.p ? 0.5 : 1);
+      p.x += (rx / d) * k;
+      p.z += (rz / d) * k;
+    }
+  }
   function stand(p, dt, face) {
+    if (p.ag != null) {
+      // on the mesh: hold still, but stay in the crowd so others walk round
+      pin(p);
+      if (face !== undefined) p.want = face;
+      return;
+    }
     const k = 1 - Math.exp(-dt * 6);
     p.vx -= p.vx * k;
     p.vz -= p.vz * k;
     p.x += p.vx * dt;
     p.z += p.vz * dt;
     if (face !== undefined) p.want = face;
+  }
+
+  // ---------- the navmesh crowd ----------
+  // the nearest point of the street's main walkable region to (x, z), or null
+  function snapPt(x, z) {
+    const c = nav.closest(x, z);
+    if (c && nav.connected(c.x, c.z)) return c;
+    let best = null;
+    let bd = 1e9;
+    for (const r of [0.5, 1, 1.5]) {
+      for (let k = 0; k < 8; k++) {
+        const a = (k * Math.PI) / 4;
+        const q = nav.closest(x + Math.cos(a) * r, z + Math.sin(a) * r, 0, { x: 0.3, y: 3, z: 0.3 });
+        if (!q || !nav.connected(q.x, q.z)) continue;
+        const d = Math.hypot(q.x - x, q.z - z);
+        if (d < bd) {
+          bd = d;
+          best = q;
+        }
+      }
+      if (best) break;
+    }
+    return best;
+  }
+  // put a person on the crowd at the mesh point nearest (x, z); false when there is none close
+  function join(p, x, z) {
+    const c = snapPt(x, z);
+    if (!c || Math.hypot(c.x - x, c.z - z) > 1.6) return false;
+    const i = nav.addAgent(c.x, c.z, { radius: CROWD_R, maxSpeed: p.pace, separationWeight: 0.4, queryRange: 2.2 });
+    if (i == null) return false;
+    p.ag = i;
+    p.x = c.x;
+    p.z = c.z;
+    p.groundY = c.y - 0.018; // nav tops sit 4 cm above the ground; the road is drawn 1.4 cm up
+    p.noRay = false;
+    p.tgt = null;
+    p.jam = 0;
+    return true;
+  }
+  function tryJoin(p, dt) {
+    p.joinT -= dt;
+    if (p.joinT > 0) return false;
+    p.joinT = 0.4;
+    const at = p.joinAt || p;
+    if (!join(p, at.x, at.z)) return false;
+    p.joinAt = null;
+    return true;
+  }
+  // off the mesh for a while (a scripted move): out of the crowd
+  function leave(p) {
+    if (p.ag == null) return;
+    p.lastMesh = { x: p.x, z: p.z, y: p.y };
+    nav.removeAgent(p.ag);
+    p.ag = null;
+    p.tgt = null;
+  }
+  // Standing still: the agent stops, and narrows (people at a counter or a stop leave room to squeeze past)
+  function pin(p) {
+    if (p.ag == null) return;
+    nav.setRadius(p.ag, STAND_R);
+    if (p.tgt) {
+      nav.stop(p.ag);
+      p.tgt = null;
+    }
+  }
+  // Walking: full width, except for someone held up for a while, who turns sideways and slips past
+  function walkWidth(p, dt) {
+    if (p.ag == null) return;
+    p.slowT = p.speed < 0.15 ? (p.slowT || 0) + dt : 0;
+    if (p.slowT > 1) {
+      p.squeeze = 6;
+      p.slowT = 0;
+    }
+    if (p.squeeze > 0) p.squeeze -= dt;
+    nav.setRadius(p.ag, p.squeeze > 0 ? SQUEEZE_R : CROWD_R);
+  }
+  function follow(p, tx, tz, speed) {
+    if (!(p.squeeze > 0)) nav.setRadius(p.ag, CROWD_R);
+    nav.setSpeed(p.ag, speed);
+    if (!p.tgt || Math.hypot(p.tgt.x - tx, p.tgt.z - tz) > 0.2) {
+      nav.setTarget(p.ag, tx, tz);
+      p.tgt = { x: tx, z: tz };
+    }
+  }
+  // Walk toward a point along the mesh. Targets off the mesh by more than a metre (up the university
+  // steps, behind a counter) are walked straight, out of the crowd. Returns the distance left.
+  function moveTo(p, tx, tz, speed, dt) {
+    if (!p.mt || Math.abs(p.mt.x - tx) > 0.05 || Math.abs(p.mt.z - tz) > 0.05) {
+      const c = snapPt(tx, tz);
+      p.mt = { x: tx, z: tz, c, script: !c || Math.hypot(c.x - tx, c.z - tz) > 1 };
+    }
+    const m = p.mt;
+    if (m.script) {
+      leave(p);
+      return steer(p, tx, tz, speed, dt, null);
+    }
+    if (p.ag == null && !tryJoin(p, dt)) {
+      steer(p, m.c.x, m.c.z, speed, dt, null); // not on the mesh yet: straight toward it
+      return Math.hypot(m.c.x - p.x, m.c.z - p.z) + 0.5;
+    }
+    follow(p, m.c.x, m.c.z, speed);
+    return Math.hypot(m.c.x - p.x, m.c.z - p.z);
+  }
+  // the crowd's picture of where an agent is, each frame
+  function syncAgent(p, dt) {
+    const s = nav.agentState(p.ag);
+    if (!s) {
+      p.ag = null;
+      return;
+    }
+    p.x = s.x;
+    p.z = s.z;
+    const k = 1 - Math.exp(-dt * 10);
+    p.vx += (s.vx - p.vx) * k;
+    p.vz += (s.vz - p.vz) * k;
+    p.groundY = s.y - 0.018;
+  }
+  // people who have not moved for a while in a walking task: ask for the path again, then give up on it
+  function watchdog(p, dt, task) {
+    p.pw = (p.pw || 0) + dt;
+    if (p.pw < 5) return;
+    const moved = Math.hypot(p.x - (p.px ?? p.x), p.z - (p.pz ?? p.z));
+    p.px = p.x;
+    p.pz = p.z;
+    p.pw = 0;
+    if (moved >= 0.3) {
+      p.jam = 0;
+      return;
+    }
+    p.jam = (p.jam || 0) + 1;
+    if (p.jam === 1) {
+      p.tgt = null;
+      p.mt = null;
+      if (p.ag != null) nav.stop(p.ag);
+    } else if (p.jam >= 3) {
+      p.jam = 0;
+      stats.skipped = (stats.skipped || 0) + 1;
+      p.tgt = null;
+      p.mt = null;
+      if (task.type === "goto") p.tasks.shift();
+      else p.offset = range(-0.6, 0.6);
+    }
+  }
+  // players and the like, as still agents in the crowd, so walkers go round them
+  const proxies = [];
+  function syncProxies(extra) {
+    for (let i = 0; i < Math.max(extra.length, proxies.length); i++) {
+      const e = extra[i];
+      const c = e && nav.closest(e.x, e.z, 0, { x: 0.5, y: 3, z: 0.5 });
+      if (!c) {
+        if (proxies[i] != null) nav.removeAgent(proxies[i]);
+        proxies[i] = null;
+      } else if (proxies[i] == null) proxies[i] = nav.addAgent(c.x, c.z, { radius: 0.35, maxSpeed: 0.05 });
+      else nav.teleport(proxies[i], c.x, c.z);
+    }
+  }
+
+  // ---------- manners: pace, giving way, the step at a kerb ----------
+  let hourNow = 12; // Indian time, for the office rush
+  // How fast this person walks just now: their own pace; office people brisker (more so at rush hour), locals
+  // unhurried; slower while texting, for a moment at a kerb or step, when giving way, and never faster than
+  // the slowest of the friends they are walking with.
+  function paceOf(p) {
+    let v = p.pace;
+    const rush = (hourNow >= 8.5 && hourNow <= 10.5) || (hourNow >= 17.5 && hourNow <= 19.5);
+    if (p.role === "office") v *= rush ? 1.14 : 1.03;
+    else if (p.role === "local") v *= 0.9;
+    if (p.busy === "text") v *= 0.85;
+    if (p.party) {
+      v = Math.min(v, p.party.pace);
+      if (p.party.leader === p && p.party.members.some((m) => m !== p && Math.hypot(m.x - p.x, m.z - p.z) > 3.2)) v *= 0.45; // wait for the others
+    }
+    if (p.hesT > 0) v *= 0.6;
+    if (p.yieldT > 0) v *= p.yieldK;
+    if (p.rx && p.rx.t < 0.4 && p.rx.kind !== "flinch") v *= 0.3; // a stumble
+    if (p.rx && p.rx.knock) v = 0; // knocked: staggering, or on the ground
+    return v;
+  }
+  // A kerb, a ramp or a step underfoot: people shorten their stride for a moment. The ground is sampled every
+  // third of a metre walked; a change of more than 8 cm between samples is a step.
+  function feelStep(p, dt) {
+    if (p.hesT > 0) p.hesT -= dt;
+    if (p.yieldT > 0) p.yieldT -= dt;
+    if (p.hs && Math.hypot(p.x - p.hs.x, p.z - p.hs.z) < 0.33) return;
+    const y = groundAt(p.x, p.z);
+    if (p.hs && Math.abs(y - p.hs.y) > 0.08 && Math.hypot(p.x - p.hs.x, p.z - p.hs.z) < 1) {
+      p.hesT = 0.6;
+      stats.hes = (stats.hes || 0) + 1;
+    }
+    p.hs = { x: p.x, z: p.z, y };
+  }
+  // Two walkers whose paths meet within about 1.2 m: where they cross, the one with the other on their right
+  // slows; head-on in a tight place, the slower walker (or, between equals, the one heading up the street)
+  // nearly stops and lets the other by, instead of both pushing.
+  function giveWay(p) {
+    const sp = Math.hypot(p.vx, p.vz);
+    if (sp < 0.3) return;
+    for (const o of others) {
+      const q = o.p;
+      if (!q || q === p) continue;
+      const rx = o.x - p.x;
+      const rz = o.z - p.z;
+      const d = Math.hypot(rx, rz);
+      if (d > 1.25 || d < 1e-3) continue;
+      const so = Math.hypot(o.vx, o.vz);
+      if (so < 0.3 || (p.party && p.party === q.party)) continue;
+      if (rx * (p.vx - o.vx) + rz * (p.vz - o.vz) <= 0) continue; // already moving apart
+      const cos = (p.vx * o.vx + p.vz * o.vz) / (sp * so);
+      if (cos > 0.6) continue; // going the same way
+      const right = (-p.vz * rx + p.vx * rz) / sp; // how far to my right they are
+      if (cos < -0.6) {
+        if (Math.abs(right) > 0.5) continue; // room to pass
+        const mine = q.pace > p.pace + 0.02 || (Math.abs(q.pace - p.pace) <= 0.02 && p.vx > 0);
+        if (!mine) continue;
+        p.yieldK = d < 0.8 ? 0.12 : 0.45;
+      } else {
+        if (right <= 0) continue;
+        p.yieldK = 0.4;
+      }
+      if (!(p.yieldT > 0)) stats.yields = (stats.yields || 0) + 1;
+      p.yieldT = 0.45;
+      return;
+    }
+  }
+
+  // ---------- the aisle in front of the railed stalls ----------
+  // One line of people can walk it (along the railing); anyone standing in it (the queue at a counter, someone
+  // letting another by) is on the counter side. A walker coming up to a person in the way slows, says
+  // "excuse me" and waits the moment it takes them to step in against the counter, then slips by; they step
+  // back out when the walker has passed. Two walkers meeting head-on: the one heading up the street (+x)
+  // steps in against the counter where there is room, the other goes by. Nobody passes through anybody.
+  const aisleFolk = [];
+  let aisleY;
+  // at the aisle, on its line: in it, or within a step of one of its ends
+  const nearAisle = (p) => p.x > AISLE.x0 - 0.3 && p.x < AISLE.x1 + 0.3 && Math.abs(p.z - AISLE.pass) < 0.5;
+  // Walkers go through it one way at a time, as people do at any passage too narrow to pass in: whoever
+  // comes to its mouth while others are coming through the other way waits there, a step to one side, and
+  // goes in when they are out (those who have waited longest first, so neither end is kept waiting for ever).
+  // The same goes for someone setting off from inside it (leaving a counter or a bench).
+  const flow = { dir: 0, users: new Set(), wait: { 1: new Map(), [-1]: new Map() } };
+  function aisleMay(p, d, t) {
+    p.aLast = t;
+    if (flow.users.has(p) && flow.dir === d) return true;
+    const w = flow.wait[d];
+    if (!w.has(p)) w.set(p, t);
+    if (flow.users.size && (flow.dir !== d || !flow.users.has(p))) {
+      if (flow.dir !== d) return false;
+    }
+    const since = w.get(p);
+    for (const [q, tq] of flow.wait[-d]) if (tq < since - 0.3 && q !== p) return false; // their turn first
+    flow.dir = d;
+    flow.users.add(p);
+    w.delete(p);
+    return true;
+  }
+  const aisleDone = (p) => {
+    flow.users.delete(p);
+    flow.wait[1].delete(p);
+    flow.wait[-1].delete(p);
+  };
+  function flowTidy(t) {
+    for (const q of flow.users) if (!people.includes(q) || t - q.aLast > 1) flow.users.delete(q);
+    for (const d of [1, -1]) for (const q of flow.wait[d].keys()) if (!people.includes(q) || t - q.aLast > 1) flow.wait[d].delete(q);
+  }
+  // where to wait at a mouth of the aisle for a walker heading d: beside the way out, not in it
+  const mouthWait = (d) => ({ x: d > 0 ? AISLE.x0 - 1.1 : AISLE.x1 + 1.1, z: 26.95 });
+  function enterAisle(p) {
+    if (p.inA) return;
+    if (p.ag != null) leave(p);
+    aisleY ??= groundAt(30, AISLE.pass);
+    p.floorY = aisleY;
+    p.noRay = true;
+    p.inA = true;
+    p.joinAt = null;
+    p.astate = "walk";
+    p.adir = 0;
+    p.askT = 0;
+    p.acant = 0;
+    if (!aisleFolk.includes(p)) aisleFolk.push(p);
+  }
+  function exitAisle(p, keepFloor = false) {
+    aisleDone(p);
+    p.inA = false;
+    p.noRay = keepFloor;
+    p.joinT = 0;
+    const i = aisleFolk.indexOf(p);
+    if (i >= 0) aisleFolk.splice(i, 1);
+  }
+  // room to step in against the counter here? (not at a stall's front post, not where someone already stands)
+  function canTuck(p) {
+    for (const x of postsX) if (Math.abs(x - p.x) < 0.33) return false;
+    for (const q of aisleFolk) if (q !== p && q.z > AISLE.pass + 0.08 && Math.abs(q.x - p.x) < 0.55) return false;
+    return true;
+  }
+  const passing = (p, reach) => aisleFolk.some((q) => q !== p && q.astate !== "stand" && q.z < AISLE.pass + 0.1 && Math.abs(q.x - p.x) < reach);
+  const slideZ = (p, z, dt) => (p.z += clamp(z - p.z, -0.8 * dt, 0.8 * dt));
+  // walk along the aisle toward x = tx; returns the distance left
+  function aisleGo(p, tx, speed, dt, t) {
+    const d = tx >= p.x ? 1 : -1;
+    // a walk along it needs the way to be theirs (a step or two to a place in the queue does not)
+    if (Math.abs(tx - p.x) > 0.7 || (flow.users.has(p) && flow.dir === d)) {
+      if (!aisleMay(p, d, t)) {
+        if (p.inA) aisleStand(p, p.x, dt, t, p.want, true);
+        else stand(p, dt);
+        p.lookAt = toWorld(p.x + d * 6, AISLE.pass, 1.4); // watching for the way to clear
+        return Math.abs(tx - p.x);
+      }
+    }
+    enterAisle(p);
+    p.adir = d;
+    let v = Math.min(speed, Math.abs(tx - p.x) * 3 + 0.12);
+    let yielding = false;
+    let tuckNow = false;
+    let ask = null;
+    let cant = false;
+    const onLine = p.z <= AISLE.pass + 0.012;
+    const wait = (gap, keep = 0.8) => (v = Math.min(v, Math.max(0, (gap - keep) * 2.5)));
+    for (const q of aisleFolk) {
+      if (q === p) continue;
+      const gap = (q.x - p.x) * d; // ahead when positive
+      if (gap < -0.6 || gap > 2.8) continue;
+      const qIn = q.z > AISLE.aside - 0.04; // in against the counter
+      const headOn = q.astate !== "stand" && q.adir === -d;
+      if (headOn && gap > -0.5) {
+        if (qIn && q.astate === "yield") {
+          if (!onLine && gap > 0) wait(gap);
+          else if (Math.abs(gap) < 0.9) v = Math.min(v, 0.8);
+        } else if (d > 0 ? !(q.astate === "yield") : q.acant > 0.3 || p.astate === "yield") {
+          // mine to give way: in against the counter here, or a little further on where there is room
+          yielding = true;
+          if (p.z > AISLE.pass + 0.05 || canTuck(p)) {
+            v = 0;
+            tuckNow = true;
+          } else if (gap < 1.5) {
+            v = 0;
+            cant = true;
+          }
+        } else if (gap > 0) wait(gap, 0.9);
+      } else if (!headOn && gap > 0) {
+        if (q.astate === "walk" && q.adir === d) wait(gap); // in file behind them
+        else if (!qIn || !onLine) {
+          // standing in the way: ask, and wait for them to step in
+          if (gap < 1.4) {
+            q.askT = t + 0.8;
+            q.askBy = p;
+            ask = q;
+          }
+          wait(gap);
+        } else if (gap < 1.6) {
+          q.askT = Math.max(q.askT || 0, t + 0.5);
+          if (gap < 0.9) v = Math.min(v, 0.8);
+        }
+      } else if (!headOn && gap > -0.6 && q.astate !== "walk") q.askT = Math.max(q.askT || 0, t + 0.3); // not out again until I am by
+    }
+    // people not in the aisle's single file who are in the way at its ends (and players anywhere in it)
+    for (const o of others) {
+      if (o.p ? o.p.inA || o.p === p : !o.player) continue;
+      const gap = (o.x - p.x) * d;
+      if (gap > 0 && gap < 1.2 && Math.abs(o.z - p.z) < 0.42) wait(gap, 0.6);
+    }
+    let wantZ = AISLE.pass;
+    if (yielding) {
+      p.astate = "yield";
+      if (tuckNow) wantZ = AISLE.aside;
+      p.acant = cant ? (p.acant || 0) + dt : 0;
+      if (p.acant > 1.5 && !aisleFolk.some((q) => q !== p && (q.x - p.x) * d < 0 && (q.x - p.x) * d > -0.9)) v = -0.35; // no room here: a step back
+    } else {
+      p.acant = 0;
+      if (p.z > AISLE.pass + 0.012 && passing(p, 0.9)) {
+        // against the counter while somebody goes by: not out until they have
+        wantZ = p.z > AISLE.aside - 0.06 ? AISLE.aside : p.z;
+        v = 0;
+        p.astate = "yield";
+      } else p.astate = "walk";
+    }
+    slideZ(p, wantZ, dt);
+    if (!onLine && p.astate === "walk") v = Math.min(v, 0.5); // still stepping out to the railing
+    p.x += d * v * dt;
+    const k = 1 - Math.exp(-dt * 8);
+    p.vx += (d * v - p.vx) * k;
+    p.vz += (0 - p.vz) * k;
+    if (Math.abs(v) < 0.2) p.want = headingOf(d, p.astate === "yield" ? 0.6 : 0);
+    // "excuse me": a word and a look to the person in the way
+    if (ask) {
+      if (p.excQ !== ask) {
+        p.excQ = ask;
+        p.excT = 0;
+        stats.excuse = (stats.excuse || 0) + 1;
+      }
+      p.excT += dt;
+      if (p.excT < 1.1) {
+        p.talk = 0.45;
+        p.expr = "polite";
+        p.lookAt = toWorld(ask.x, ask.z, ask.y + 1.5);
+      }
+    } else if (p.excQ && Math.abs(p.excQ.x - p.x) > 1.6) p.excQ = null;
+    return Math.abs(tx - p.x);
+  }
+  // stand in the aisle at x = sx (shuffling up to it), stepping in against the counter for anyone going by
+  function aisleStand(p, sx, dt, t, face, waiting = false) {
+    enterAisle(p);
+    if (!waiting) aisleDone(p);
+    p.astate = "stand";
+    p.adir = 0;
+    const asked = (p.askT || 0) > t;
+    if (asked && !p.asking) p.askedAt = t;
+    p.asking = asked;
+    const by = passing(p, 0.85);
+    const tuck = by || (asked && t - p.askedAt > 0.3);
+    slideZ(p, tuck ? AISLE.aside : AISLE.stand, dt);
+    let vx = 0;
+    const dx = sx - p.x;
+    if (!tuck && Math.abs(dx) > 0.04) {
+      const d = Math.sign(dx);
+      // not into the back of the person in front
+      const room = aisleFolk.every((q) => q === p || q.z < AISLE.pass + 0.08 || (q.x - p.x) * d < 0 || (q.x - p.x) * d > 0.84);
+      if (room) vx = d * Math.min(0.55, Math.abs(dx) * 3 + 0.08);
+    }
+    p.x += vx * dt;
+    const k = 1 - Math.exp(-dt * 8);
+    p.vx += (vx - p.vx) * k;
+    p.vz -= p.vz * k;
+    p.want = face;
+    return Math.abs(dx);
+  }
+  // a glance and a nod to the person who asked to get by
+  function asideManners(p, t) {
+    if (!p.inA || !p.asking || t - p.askedAt > 1.2 || !p.askBy || !people.includes(p.askBy)) return;
+    p.lookAt = toWorld(p.askBy.x, p.askBy.z, p.askBy.y + 1.5);
+    if (t - p.askedAt > 0.25 && t - p.askedAt < 0.9) p.nod = 0.7;
+  }
+  // from the aisle into a stall's bay (to its bench, or to stand with a cup); true when there
+  function bayIn(p, st, bx, bz, dt, t) {
+    if (p.inA) {
+      if (!p.bayGo) {
+        let ex = clamp(bx, st.cx1 + 0.4, st.x1 - 0.5);
+        const stood = (x) => aisleFolk.some((q) => q !== p && q.z > AISLE.pass + 0.08 && Math.abs(q.x - x) < 0.56);
+        if (stood(ex)) ex = st.x1 - 0.5; // somebody stands across the way in: go in beside the post
+        if (Math.abs(ex - p.x) > 0.07 || p.z > AISLE.pass + 0.02) {
+          aisleGo(p, Math.abs(ex - p.x) > 0.07 ? ex : p.x + (p.adir || 1) * 0.01, paceOf(p) * 0.85, dt, t);
+          return false;
+        }
+        if (stood(p.x)) {
+          aisleGo(p, p.x + (p.adir || 1) * 0.01, 0, dt, t); // wait for the queue to move up
+          return false;
+        }
+        p.bayGo = true;
+      }
+      p.astate = "stand";
+      p.adir = 0;
+      p.vx = 0;
+      p.z += 0.8 * dt;
+      p.vz = 0.8;
+      if (p.z < AISLE.bay) return false;
+      p.bayGo = false;
+      exitAisle(p, true);
+    }
+    return steer(p, bx, bz, 0.7, dt, null) < 0.1;
+  }
+  // and out of the bay into the aisle, when there is a gap; true when in it
+  function bayOut(p, st, dt, t) {
+    if (!p.inA) {
+      const ex = clamp(p.x, st.cx1 + 0.4, st.x1 - 0.5);
+      if (Math.hypot(ex - p.x, 26.95 - p.z) > 0.08) {
+        p.noRay = true;
+        p.floorY = aisleY ??= groundAt(30, AISLE.pass);
+        steer(p, ex, 26.95, 0.7, dt, null);
+        return false;
+      }
+      if (aisleFolk.some((q) => Math.abs(q.x - p.x) < (q.astate === "stand" ? 0.56 : 1.2))) {
+        stand(p, dt, 0);
+        return false;
+      }
+      enterAisle(p);
+      p.astate = "stand";
+    }
+    p.z = Math.max(AISLE.aside, p.z - 0.8 * dt);
+    p.vx = 0;
+    p.vz = -0.8;
+    return p.z <= AISLE.aside + 0.005;
+  }
+
+  // ---------- friends walking together ----------
+  // The others of a party keep beside the first when the footpath has room (one on each side), drop into
+  // single file behind where it is narrow or somebody is coming, and close up again after. They stop at
+  // the kerb with the first, look with them, and cross with them.
+  const onMesh = (x, z) => {
+    const c = nav.closest(x, z, 0, { x: 0.15, y: 3, z: 0.15 });
+    return c && Math.hypot(c.x - x, c.z - z) < 0.15;
+  };
+  function accompany(p, task, dt, t) {
+    const L = task.leader;
+    if (!people.includes(L)) {
+      // the first has gone in, or off the end of the street: after them
+      p.party = null;
+      p.tasks = [goto(task.lx ?? p.x, task.lz ?? p.z, { free: true }), { type: "vanish" }];
+      return;
+    }
+    task.lx = L.x;
+    task.lz = L.z;
+    const lt = L.tasks[0];
+    const road = Boolean(lt && (lt.road || lt.type === "waitClear"));
+    p.side = L.side;
+    // through the stalls' aisle: in file after the first, by the aisle's own manners
+    const farSide = p.z > 25.5 && L.z > 25.5;
+    const across = farSide && (L.inA || inAisleX(L.x) || (p.x - AISLE.x0) * (L.x - AISLE.x0) < 0 || (p.x - AISLE.x1) * (L.x - AISLE.x1) < 0);
+    if (p.inA || (across && nearAisle(p))) {
+      const d = L.inA && L.adir ? L.adir : Math.sign(L.x - p.x) || 1;
+      const tx = L.inA ? L.x - d * 0.9 * task.k : L.x;
+      if ((tx - p.x) * d > 0.1) aisleGo(p, tx, paceOf(p) * 1.15, dt, t);
+      else aisleGo(p, p.x + d * 0.01, 0, dt, t);
+      if (d > 0 ? p.x >= AISLE.x1 : p.x <= AISLE.x0) exitAisle(p);
+      return;
+    }
+    if (across) {
+      const d = p.x < AISLE.x0 + 1 ? 1 : -1;
+      const ex = d > 0 ? AISLE.x0 - 0.1 : AISLE.x1 + 0.1;
+      if (Math.abs(p.x - ex) < 3 && !aisleMay(p, d, t)) {
+        const w = mouthWait(d);
+        if (Math.hypot(w.x - p.x, w.z - p.z) < 0.6) stand(p, dt, headingOf(d, 0));
+        else moveTo(p, w.x, w.z - 0.5, paceOf(p), dt);
+        return;
+      }
+      moveTo(p, ex, AISLE.pass, paceOf(p), dt);
+      walkWidth(p, dt);
+      return;
+    }
+    const fx = -Math.sin(L.heading);
+    const fz = -Math.cos(L.heading);
+    const side = task.k === 1 ? 1 : -1;
+    let sx = L.x - fz * 0.62 * side;
+    let sz = L.z + fx * 0.62 * side;
+    let abreast = !(task.fileT > t) && L.ag != null && onMesh(sx, sz);
+    if (abreast && !road) {
+      // somebody coming the other way, or standing where I would walk: fall in behind for a moment
+      for (const o of others) {
+        if (!o.p || o.p === p || o.p.party === p.party) continue;
+        const ax = o.x - sx;
+        const az = o.z - sz;
+        const along = ax * fx + az * fz;
+        if (along > -0.4 && along < 2.2 && Math.abs(-ax * fz + az * fx) < 0.5) {
+          task.fileT = t + 1.2;
+          abreast = false;
+          break;
+        }
+      }
+    }
+    if (!abreast) {
+      sx = L.x - fx * 0.85 * task.k;
+      sz = L.z - fz * 0.85 * task.k;
+    }
+    task.abreast = abreast;
+    const ex = sx - p.x;
+    const ez = sz - p.z;
+    const dist = Math.hypot(ex, ez);
+    const moving = L.speed > 0.15;
+    if (!moving && dist < 0.3) {
+      stand(p, dt, L.want);
+    } else {
+      const lead = moving ? 1.4 : 0;
+      const v = clamp((moving ? L.speed : 0.4) + (ex * fx + ez * fz) * 1.3, 0.3, p.pace * (road ? 1.5 : 1.3)) * (p.hesT > 0 ? 0.6 : 1);
+      moveTo(p, Math.round((sx + fx * lead) * 5) / 5, Math.round((sz + fz * lead) * 5) / 5, v, dt);
+      walkWidth(p, dt);
+    }
+    if (road) {
+      p.busy = null;
+      if (L.lookAt) p.lookAt = L.lookAt.clone();
+    } else {
+      walkingHabits(p, dt, t);
+      partyChat(p, t);
+    }
+  }
+  // talk on the way: one at a time, a look across to whoever is speaking, a nod, a laugh
+  function partyChat(p, t) {
+    const party = p.party;
+    if (!party || party.members.length < 2 || p.busy || p.fidgetFor > 0) return;
+    const n = party.members.length;
+    const turn = Math.floor(t / 4.5 + party.seed) % (n + 1);
+    const speaker = party.members[turn];
+    if (!speaker) return; // a lull
+    if (speaker === p) {
+      p.talk = chatter(t, party.seed * 3);
+      const to = party.members[(turn + 1) % n];
+      if (Math.sin(t * 0.9 + party.seed) > -0.2 && Math.hypot(to.x - p.x, to.z - p.z) < 1.6) p.lookAt = toWorld(to.x, to.z, to.y + 1.5);
+      p.expr = ["amused", "smile", "neutral", "skeptical", "grin"][Math.floor(t / 4.5 + party.seed * 7) % 5];
+    } else if (Math.hypot(speaker.x - p.x, speaker.z - p.z) < 1.6) {
+      if (Math.sin(t * 0.7 + p.habit * 9) > 0) p.lookAt = toWorld(speaker.x, speaker.z, speaker.y + 1.5);
+      if (Math.sin(t * 1.1 + p.habit * 5) > 0.8) p.nod = 0.8;
+      p.expr = p.humour > 0.6 && Math.sin(t * 0.5 + party.seed) > 0.5 ? "laugh" : "softSmile";
+    }
   }
 
   // ---------- behaviour ----------
@@ -523,29 +1314,155 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
           p.offset = range(-0.6, 0.6);
           p.stuck = 0;
         }
-        const z = laneZ(task.side, p.x, task.dir) + p.offset * (task.side === "near" ? 0.6 : 1);
-        steer(p, p.x + task.dir * 2.5, z, p.pace, dt, task.side);
-        if ((p.x - task.xTo) * task.dir >= 0) p.tasks.shift();
+        // (in front of the stalls the only way is the strip along the kerb: keep to its kerb side)
+        const off = laneZ(task.side, p.x, task.dir) < 26.5 && task.side === "far" ? 0 : p.offset * (task.side === "near" ? 0.6 : 1);
+        feelStep(p, dt);
+        if (task.side === "far" && (p.inA || (nearAisle(p) && (task.dir > 0 ? p.x < AISLE.x1 : p.x > AISLE.x0)))) {
+          // the stalls' aisle: single file along the railing, by its own manners
+          const end = task.dir > 0 ? AISLE.x1 + 0.3 : AISLE.x0 - 0.3;
+          const inside = (task.xTo - end) * task.dir < 0;
+          const left = aisleGo(p, inside ? task.xTo : end, paceOf(p), dt, t);
+          if (task.dir > 0 ? p.x >= AISLE.x1 : p.x <= AISLE.x0) exitAisle(p);
+          if (inside ? left < 0.5 : (p.x - task.xTo) * task.dir >= -0.4) {
+            p.tasks.shift();
+            p.tgt = null;
+          }
+          walkingHabits(p, dt, t);
+          partyChat(p, t);
+          break;
+        }
+        giveWay(p);
+        if (task.mouth && p.ag != null && Math.abs(p.x - (task.dir > 0 ? AISLE.x0 : AISLE.x1)) < 3) {
+          // coming up to the aisle: is it theirs to walk? else wait beside its mouth, watching
+          const may = aisleMay(p, task.dir, t);
+          if (!may) {
+            const w = mouthWait(task.dir);
+            const left = Math.hypot(w.x - p.x, w.z - p.z);
+            if (left < 0.5 || (task.held && left < 1.5 && p.speed < 0.08)) {
+              task.held = true;
+              stand(p, dt, headingOf(task.dir, 0));
+              p.lookAt = toWorld(p.x + task.dir * 8, AISLE.pass, 1.4);
+            } else {
+              task.held = true;
+              follow(p, w.x, w.z, paceOf(p));
+            }
+            p.tgt = null;
+            walkWidth(p, dt);
+            break;
+          }
+          if (task.held) {
+            task.held = false;
+            p.tgt = null;
+          }
+        }
+        if (smallLife(p, task, dt, t)) break;
+        if (p.ag == null && !tryJoin(p, dt)) {
+          steer(p, p.x + task.dir * 2.5, laneZ(task.side, p.x, task.dir) + off, paceOf(p), dt, task.side);
+        } else {
+          // aim at a point a few metres ahead along the footpath, on this person's line
+          const t = p.tgt;
+          nav.setSpeed(p.ag, paceOf(p));
+          if (!t || t.dir !== task.dir || t.off !== off || (!t.final && (t.x - p.x) * task.dir < 2.2)) {
+            let xa = p.x + task.dir * 6;
+            let final = (xa - task.xTo) * task.dir >= 0;
+            if (final) xa = task.xTo;
+            // the mesh does not lead through the stalls' aisle: walk to its mouth (the aisle takes over there)
+            const mouth = task.dir > 0 ? AISLE.x0 - 0.1 : AISLE.x1 + 0.1;
+            if (task.side === "far" && (mouth - p.x) * task.dir >= 0 && (xa - mouth) * task.dir > 0) {
+              xa = mouth;
+              final = true;
+            }
+            task.mouth = final && xa === mouth;
+            const c = snapPt(xa, laneZ(task.side, xa, task.dir) + off) || snapPt(xa, task.side === "near" ? 7.6 : 27.2);
+            if (c) {
+              nav.setTarget(p.ag, c.x, c.z);
+              p.tgt = { x: c.x, z: c.z, dir: task.dir, off, final };
+              p.mt = null;
+            }
+          }
+        }
+        walkWidth(p, dt);
+        if ((p.x - task.xTo) * task.dir >= -0.4) {
+          p.tasks.shift();
+          p.tgt = null;
+        } else watchdog(p, dt, task);
         walkingHabits(p, dt, t);
+        partyChat(p, t);
         break;
       }
       case "goto": {
-        const d = steer(p, task.x, task.z, task.road ? p.pace * 1.2 : p.pace * (task.free ? 0.85 : 1), dt, null);
-        if (d < (task.free ? 0.12 : 0.35)) {
+        const tol = task.free ? 0.12 : 0.35;
+        feelStep(p, dt);
+        if (!task.road) giveWay(p);
+        if (p.inA) exitAisle(p);
+        // (over the road: briskly, and no dawdling in the lane)
+        const d = moveTo(p, task.x, task.z, task.road ? Math.min(p.pace * 1.3, 2.1) * (p.hesT > 0 ? 0.75 : 1) : paceOf(p) * (task.free ? 0.85 : 1), dt);
+        walkWidth(p, dt);
+        // arrived, or as near as the crowd will let them get
+        task.still = p.speed < 0.08 && d < Math.max(0.5, tol * 3) ? (task.still || 0) + dt : 0;
+        if (d < tol || task.still > 0.7) {
           if (task.setSide) p.side = task.setSide;
           p.tasks.shift();
-        }
+        } else watchdog(p, dt, task);
         if (task.road) p.lookAt = lookPt(p.x + (p.z < 17 ? -12 : 12), p.z < 17 ? 12 : 22, 1.2);
-        else walkingHabits(p, dt, t);
+        else {
+          walkingHabits(p, dt, t);
+          partyChat(p, t);
+        }
+        break;
+      }
+      case "follow":
+        feelStep(p, dt);
+        accompany(p, task, dt, t);
+        break;
+      case "bay":
+        if (bayIn(p, task.st, task.x, task.z, dt, t)) p.tasks.shift();
+        break;
+      case "bayOut":
+        if (bayOut(p, task.st, dt, t)) p.tasks.shift();
+        break;
+      case "pause": {
+        // a moment out of the way: a message on the phone, or a look at what a stall has
+        stand(p, dt, task.look ? headingOf(task.look[0] - p.x, task.look[1] - p.z) : undefined);
+        task.T -= dt;
+        if (task.kind === "phone") {
+          p.char.showGear("phone", task.T > 0);
+          p.gesture.text = 1;
+          p.expr = "concentrating";
+          p.lookAt = toWorld(p.x - Math.sin(p.heading) * 0.5, p.z - Math.cos(p.heading) * 0.5, 0.95 * p.char.height + p.y);
+        } else {
+          p.lookAt = lookPt(task.look[0], task.look[1], 1.0);
+          p.expr = "curious";
+          if (task.T < 2.5 && p.fidget === "chin") p.gesture.chin = 1;
+        }
+        if (task.T < 0) p.tasks.shift();
         break;
       }
       case "waitClear": {
         stand(p, dt, headingOf(0, task.road === "near" ? (p.z < 12 ? 1 : -1) : p.z < 22 ? 1 : -1));
-        task.waited = (task.waited || 0) + dt;
-        p.lookAt = lookPt(task.look[0], task.look[1], 1.1);
+        if (task.waited === undefined) {
+          task.waited = 0;
+          task.need = range(0.4, 0.9);
+          task.seq = task.first ? [range(0.9, 1.3), range(0.6, 0.9), range(0.5, 0.8)] : [range(0.5, 0.7), range(0.35, 0.5), 0.2];
+          // hands free and eyes up: nobody texts their way over this road
+          p.busy = null;
+          p.fidgetFor = 0;
+          p.char.showGear("phone", false);
+        }
+        task.waited += dt;
+        // toward the traffic, the other way, and back; while waiting, mostly at the traffic with a glance back
+        const [a, b, c] = task.seq;
+        const w = task.waited;
+        const away = (w > a && w < a + b) || (w > a + b + c + 3 && (w - a - b - c) % 6 > 5.2);
+        p.lookAt = lookPt(away ? 2 * task.x - task.look[0] : task.look[0], task.look[1], 1.1);
         if (traffic.clearToCross(task.road, task.x, 6.5)) task.clear = (task.clear || 0) + dt;
         else task.clear = 0;
-        if (task.clear > range(0.4, 0.9) || task.waited > 40) p.tasks.shift();
+        // friends go over together: the first waits for the others to come up to the kerb
+        const ready = !p.party || w > 8 || p.party.members.every((m) => m === p || (Math.hypot(m.x - p.x, m.z - p.z) < 1.9 && m.speed < 0.3));
+        if ((task.clear > task.need && w > a + b + c && ready && !away) || w > 40) {
+          if (task.first) stats.crossed++;
+          p.tasks.shift();
+        }
         break;
       }
       case "customer":
@@ -566,16 +1483,624 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       case "vendor":
         vendor(p, task, dt, t);
         break;
+      case "waitTransit":
+        waitTransit(p, task, dt, t);
+        break;
+      case "board":
+        board(p, task, dt, t);
+        break;
+      case "alight":
+        alight(p, task, dt, t);
+        break;
+      case "argue":
+        argue(p, task, dt, t);
+        break;
+      case "payDriver":
+        payDriver(p, task, dt, t);
+        break;
       case "vanish":
         stats.vanished++;
         remove(p);
         return;
     }
+    if (p.carry && people.includes(p)) {
+      // walking off with the cup or the packet: finished on the way
+      p.carry.T -= dt;
+      p.gesture.hold = 1;
+      p.busy = null;
+      if (p.carry.T < 0 || p.tasks[0]?.type === "waitClear") {
+        hold(p, null);
+        p.carry = null;
+      }
+    }
+  }
+  // ---------- buses and autos: waiting, getting on, getting off ----------
+  // The stops are where the buses and shared autos pull in (traffic.js). People wait on the
+  // pavement beside them looking up the road for their vehicle; when one has stopped they walk to
+  // its door and climb in: up the bus's front step (38 cm, holding the rail), or ducking into the
+  // auto's open side. Those arriving climb down first; auto passengers walk round to the driver
+  // and pay before going on their way. The vehicle waits while anyone is still getting on or off.
+  const pavementOf = (road) => (road === "near" ? 7.85 : 25.95);
+  const kerbSide = (road) => (road === "near" ? -1 : 1); // from the road toward the pavement
+  function door(veh, inside = false) {
+    const k = kerbSide(veh.road);
+    const along = veh.kind === "bus" ? veh.L / 2 - 1.15 : (veh.mesh.userData.doorX ?? -0.25); // an auto has its side opening mid-cab
+    return { x: veh.x + veh.dir * along, z: veh.lat + k * (inside ? veh.W / 2 - 0.4 : veh.W / 2 + 0.25) };
+  }
+  const stopSpots = [];
+  for (const road of ["near", "far"]) {
+    for (const st of traffic.stops[road]) {
+      // the queue: its head a little up the road from where the vehicle's middle stops (by the door), the rest
+      // behind at a pace apart along the kerb, everyone facing the road; never back into the stalls' aisle
+      const dir = traffic.roads[road].dir;
+      const bus = st.kinds.includes("bus");
+      let tail = -dir;
+      const headX = st.x + dir * (bus ? 2 : 0.6);
+      if (road === "far" && headX + tail * 5 > AISLE.x0 - 1 && headX < AISLE.x1) tail = -1;
+      stopSpots.push({ road, x: st.x, kinds: st.kinds, waiting: [], coming: 0, cap: bus ? 5 : 3, headX, tail, z: road === "near" ? 8.27 : 25.72 });
+    }
+  }
+  function transitWaiter() {
+    const st = stopSpots[(rnd() * stopSpots.length) | 0];
+    if (st.waiting.length + st.coming >= st.cap) return;
+    const role = pickW([["office", 4], ["student", 3], ["local", 3]]);
+    const from = chance(0.5) ? -1 : 1;
+    let x0 = clamp(st.x + from * range(25, 45), DOMAIN[0] + 2, DOMAIN[1] - 2);
+    if (st.road === "far" && x0 > AISLE.x0 - 2 && x0 < AISLE.x1 + 2) x0 = AISLE.x1 + range(2, 8);
+    const p = person(role, x0, laneZ(st.road, x0, -from), headingOf(-from, 0));
+    if (!p) return;
+    p.side = st.road;
+    // to the back of the queue
+    const tailX = st.headX + st.tail * (st.waiting.length + st.coming);
+    p.tasks.push(lane(st.road, Math.sign(tailX - x0) || 1, tailX), { type: "waitTransit", stop: st, kinds: st.kinds, T: range(60, 200) });
+    st.coming++;
+    p.comingStop = st;
+  }
+  function waitTransit(p, task, dt, t) {
+    const st = task.stop;
+    if (!task.in) {
+      task.in = true;
+      if (p.comingStop === st) {
+        st.coming--;
+        p.comingStop = null;
+      }
+      if (!st.waiting.includes(p)) st.waiting.push(p); // behind the last person
+    }
+    // a place in the queue, moving up as those in front get on
+    const i = st.waiting.indexOf(p);
+    if (task.i !== i) {
+      task.i = i;
+      task.there = false;
+    }
+    if (!task.there) {
+      const left = moveTo(p, st.headX + st.tail * i, st.z, Math.min(paceOf(p), 0.9), dt);
+      walkWidth(p, dt);
+      task.still = p.speed < 0.08 && left < 0.7 ? (task.still || 0) + dt : 0;
+      if (left < 0.15 || task.still > 0.7) task.there = true;
+    }
+    // face the road, looking up it for the vehicle now and then; a phone passes the time
+    else stand(p, dt, headingOf(0, -kerbSide(st.road)));
+    task.look = (task.look || 0) - dt;
+    if (task.look < -4) task.look = range(3, 7);
+    if (task.look > 0) p.lookAt = lookPt(st.x - (st.road === "near" ? 1 : -1) * 40, st.road === "near" ? 12 : 22, 1.2);
+    else p.gesture = { text: 1 };
+    task.T -= dt;
+    for (const veh of traffic.vehicles) {
+      if (i !== 0) break; // in turn
+      if (veh.road !== st.road || !veh.atStop || !task.kinds.includes(veh.kind) || Math.abs(veh.x - st.x) > 6) continue;
+      if ((veh.seats ?? (veh.kind === "bus" ? 6 : 3)) <= 0) continue;
+      veh.seats = (veh.seats ?? (veh.kind === "bus" ? 6 : 3)) - 1;
+      veh.boarding = (veh.boarding || 0) + 1;
+      st.waiting = st.waiting.filter((q) => q !== p);
+      p.tasks[0] = { type: "board", veh, stop: st, phase: "walk", t: 0 };
+      return;
+    }
+    if (task.T < 0) {
+      // gave up waiting: walk on
+      st.waiting = st.waiting.filter((q) => q !== p);
+      p.tasks.shift();
+      p.tasks.push(lane(st.road, chance(0.5) ? 1 : -1, chance(0.5) ? DOMAIN[0] - 5 : DOMAIN[1] + 5), { type: "vanish" });
+    }
+  }
+  function board(p, task, dt, t) {
+    const veh = task.veh;
+    const gone = !traffic.vehicles.includes(veh) || !veh.atStop;
+    if (gone && task.phase === "walk") {
+      // it left without them: back to waiting
+      p.tasks[0] = { type: "waitTransit", stop: task.stop, kinds: task.stop.kinds, T: range(40, 120), in: true };
+      task.stop.waiting.unshift(p); // still first in line
+      return;
+    }
+    const d = door(veh);
+    if (task.phase === "walk") {
+      // along the kerb to the door (the doorstep itself is on the carriageway, off the mesh)
+      const left = moveTo(p, d.x, d.z, p.pace * 1.15, dt);
+      task.still = p.speed < 0.08 && left < 1.2 ? (task.still || 0) + dt : 0;
+      if ((left < 0.18 || task.still > 0.6) && (veh.kind !== "bus" || (veh.doorK ?? 1) > 0.8)) {
+        task.phase = "in";
+        task.t = 0;
+        task.from = { x: p.x, z: p.z };
+        leave(p);
+      }
+      return;
+    }
+    // climbing in: facing the door, up the step (bus) or ducking under the roof (auto)
+    task.t += dt;
+    const bus = veh.kind === "bus";
+    const dur = bus ? 1.6 : 1.1;
+    const k = Math.min(1, task.t / dur);
+    const inn = door(veh, true);
+    p.x = task.from.x + (inn.x - task.from.x) * k;
+    p.z = task.from.z + (inn.z - task.from.z) * k;
+    p.vx = k < 1 ? (inn.x - task.from.x) / dur : 0; // legs walk the step
+    p.vz = k < 1 ? (inn.z - task.from.z) / dur : 0;
+    p.want = headingOf(inn.x - task.from.x, inn.z - task.from.z);
+    if (bus) {
+      p.lift = 0.38 * sm(Math.min(1, k * 1.5 - 0.1)); // one step up into the bus, eased
+      p.gesture = { hold: 0, take: 1 };
+      p.gestureAt = null;
+    } else {
+      p.lift = -0.12 * Math.sin(Math.PI * Math.min(1, k * 1.2)); // ducking under the roof
+      p.nod = 0.6 * Math.sin(Math.PI * k);
+    }
+    if (k >= 1) {
+      veh.boarding = Math.max(0, (veh.boarding || 1) - 1);
+      veh.mesh.userData.occupants?.seatIn(); // they take a seat
+      stats.boarded = (stats.boarded || 0) + 1;
+      p.tasks = [{ type: "vanish" }];
+    }
+  }
+  // someone arrives on a bus or auto that has just stopped
+  function unload(veh) {
+    veh.unloaded = true;
+    const n = veh.kind === "bus" ? pickW([[0, 1], [1, 3], [2, 3], [3, 2], [4, 1]]) : pickW([[0, 2], [1, 3], [2, 2]]);
+    const occ = veh.mesh.userData.occupants;
+    if (occ) while (occ.count() < n && occ.seatIn()); // whoever steps off was inside already
+    for (let i = 0; i < n; i++) {
+      const inn = door(veh, true);
+      const p = person(pickW([["office", 4], ["student", 3], ["local", 3]]), inn.x, inn.z, headingOf(0, kerbSide(veh.road)), false);
+      p.side = veh.road;
+      p.lift = veh.kind === "bus" ? 0.38 : -0.12;
+      p.hidden = true;
+      veh.boarding = (veh.boarding || 0) + 1;
+      p.tasks.push({ type: "alight", veh, wait: i * (veh.kind === "bus" ? 1.3 : 1.6), t: 0 });
+      if (veh.kind === "auto") p.tasks.push({ type: "payDriver", veh, t: 0 });
+      const dir = chance(0.5) ? 1 : -1;
+      p.tasks.push(goto(p.x + dir * 0.8, pavementOf(veh.road) + kerbSide(veh.road) * 0.2), ...planFrom(p, veh.road, p.x + dir * 0.8, pickW([["pass", 5], ["university", veh.road === "near" ? 3 : 1], ["tea", 1]])));
+    }
+  }
+  function alight(p, task, dt, t) {
+    const veh = task.veh;
+    if (task.wait > 0) {
+      task.wait -= dt;
+      p.hidden = true; // still inside, behind the one in front
+      if (!traffic.vehicles.includes(veh) || !veh.atStop) task.wait = 0; // it is leaving: off now
+      return;
+    }
+    if (!task.out) {
+      task.out = true;
+      veh.mesh.userData.occupants?.seatOut(); // their seat empties as they get up
+    }
+    if (veh.kind === "bus" && veh.atStop && traffic.vehicles.includes(veh) && (veh.doorK ?? 0) < 0.8) {
+      p.hidden = true; // the door is still opening
+      return;
+    }
+    p.hidden = false;
+    task.t += dt;
+    const bus = veh.kind === "bus";
+    const dur = bus ? 1.7 : 1.0;
+    const k = Math.min(1, task.t / dur);
+    if (!task.from) {
+      const inn = traffic.vehicles.includes(veh) ? door(veh, true) : { x: p.x, z: p.z };
+      task.from = inn;
+      task.to = traffic.vehicles.includes(veh) ? door(veh) : { x: p.x, z: pavementOf(veh.road) };
+    }
+    p.x = task.from.x + (task.to.x - task.from.x) * k;
+    p.z = task.from.z + (task.to.z - task.from.z) * k;
+    p.vx = k < 1 ? (task.to.x - task.from.x) / dur : 0; // legs walk down the step
+    p.vz = k < 1 ? (task.to.z - task.from.z) / dur : 0;
+    p.want = headingOf(task.to.x - task.from.x, task.to.z - task.from.z);
+    p.lift = bus ? 0.38 * (1 - sm(Math.min(1, k * 1.4))) : -0.12 * Math.sin(Math.PI * Math.min(1, 0.5 + k * 0.5));
+    if (bus) p.gesture = { take: 1 - k };
+    if (k >= 1) {
+      p.lift = 0;
+      veh.boarding = Math.max(0, (veh.boarding || 1) - 1);
+      stats.alighted = (stats.alighted || 0) + 1;
+      p.tasks.shift();
+    }
+  }
+  // ---------- bumps, near misses and arguments ----------
+  const isWalking = (p) => !p.hidden && !p.sit && !p.rx && p.tasks[0] && (p.tasks[0].type === "lane" || p.tasks[0].type === "goto") && p.speed > 0.25;
+  const ready = (p, t) => !(t - (p.bumpAt ?? -99) < 20);
+  // p is shoved d metres away from (ox, oz), stumbles, glances back, then says sorry, scowls or has a word
+  function startBump(p, ox, oz, t, kind = "bump") {
+    let dx = p.x - ox;
+    let dz = p.z - oz;
+    const d = Math.hypot(dx, dz) || 1;
+    if (d < 1e-3) dx = 1;
+    const push = kind === "bump" ? range(0.1, 0.2) : kind === "hit" ? 0.35 : 0.3;
+    p.rx = { kind, t: 0, ox, oz, mx: (dx / d) * push, mz: (dz / d) * push, out: kind === "bump" ? pickW([["polite", 6], ["annoyed", 3], ["word", 1]]) : kind };
+    p.bumpAt = t;
+  }
+  function shove(p, dx, dz) {
+    p.x += dx;
+    p.z += dz;
+    if (p.ag != null) nav.teleport(p.ag, p.x, p.z);
+  }
+  // runs after act(): the reaction overrides face and body for its moment
+  const sm = (x) => { x = Math.max(0, Math.min(1, x)); return x * x * (3 - 2 * x); };
+  // pose of someone the player has knocked: stagger (reel back, arms out) or fall (down in 0.45 s, lie, get up)
+  function knockPose(p) {
+    const r = p.rx, t = r.t, sev = r.knock;
+    const fl = Math.sin(t * 15 + (p.id ?? 0));
+    let angle, lift = 0;
+    if (sev > 0.5) angle = t < 0.45 ? 1.5 * sm(t / 0.45) : t < 2.0 ? 1.5 : 1.5 * (1 - sm((t - 2.0) / 1.5));
+    else angle = 0.4 * Math.sin(Math.PI * Math.min(1, t / 1.4));
+    const air = t < 0.6 ? 1 : Math.max(0, 1 - (t - 0.6) / 0.5);
+    const limbs = { spine: 0.05, aL: (1.2 + 0.6 * fl) * air + 0.3, aR: (1.2 - 0.6 * fl) * air + 0.2, eL: 0.4, eR: 0.4, tL: 0.3 * fl * air, tR: -0.3 * fl * air + 0.2, kL: 0.3, kR: 0.4, head: -0.3 * air };
+    return { angle, lift, limbs };
+  }
+  function reaction(p, dt) {
+    const r = p.rx;
+    r.t += dt;
+    const span = r.knock ? 0.45 : 0.3;
+    if (r.t < span) shove(p, (r.mx * dt) / span, (r.mz * dt) / span);
+    p.lookAt = toWorld(r.ox, r.oz, 1.5);
+    if (r.knock) {
+      // hit by the player riding: a stumble back with arms flung out, or (hard) down on the ground and up again
+      p.expr = "surprised";
+      p.nod = 0;
+      p.talk = 0;
+      if (r.t > (r.knock > 0.5 ? 3.6 : 1.5)) p.rx = null;
+      return;
+    }
+    if (r.kind === "flinch") {
+      p.expr = "surprised";
+      p.nod = 0;
+      if (r.t > 1.2) p.rx = null;
+      return;
+    }
+    if (r.t < 0.4) {
+      p.nod = 0.3;
+      p.expr = "surprised";
+    } else if (r.kind === "hit") {
+      p.expr = "angry";
+      p.talk = r.t < 2 ? 0.5 : 0;
+      p.gesture.point = 1;
+      p.shake = 0.6;
+    } else if (r.out === "polite") {
+      p.expr = "polite";
+      p.nod = r.t < 1.4 ? 1 : 0;
+    } else if (r.out === "annoyed") p.expr = "annoyed";
+    else {
+      p.expr = "annoyed";
+      if (r.t < 1.2) p.talk = 0.4;
+      p.gesture.hip = 1;
+    }
+    if (r.t > (r.kind === "hit" ? 2.6 : 2.0)) p.rx = null;
+  }
+  // ---------- the player on foot meets people ----------
+  // Nobody is a wall. Someone in the player's path steps aside (sooner and quicker the faster the player comes), looking
+  // at them; touch at a walk and both give way with a word; touch at a run and the other is knocked back while the
+  // player is thrown back too (crowdApi.playerBump, applied in main.js).
+  function sideStep(p, dx, dz) {
+    const nx = p.x + dx, nz = p.z + dz;
+    if (p.ag != null) {
+      const c = nav.closest(nx, nz, 0, { x: 0.4, y: 3, z: 0.4 });
+      if (!c) return false;
+      p.x = c.x;
+      p.z = c.z;
+      nav.teleport(p.ag, p.x, p.z);
+    } else {
+      p.x = nx;
+      p.z = nz;
+    }
+    return true;
+  }
+  function meetPlayer(dt, t, e) {
+    if (!e || e.riding) return;
+    const sp = Math.hypot(e.vx || 0, e.vz || 0);
+    if (sp < 0.4) return;
+    const ux = e.vx / sp, uz = e.vz / sp;
+    for (const p of people) {
+      if (p.hidden || p.sit || p.rx) continue;
+      const tt = p.tasks[0]?.type;
+      if (tt === "board" || tt === "alight" || tt === "vanish" || tt === "payDriver") continue;
+      const dx = p.x - e.x, dz = p.z - e.z, d = Math.hypot(dx, dz);
+      if (d > 2.4 || d < 1e-3) continue;
+      const along = (dx * ux + dz * uz); // how far ahead of the player
+      const lat = -dx * uz + dz * ux; // how far off their line, to the side
+      if (along < -0.3) continue; // behind
+      if (d < 0.55 && ready(p, t)) {
+        stats.bumps = (stats.bumps || 0) + 1;
+        if (sp > 3.4) {
+          // a run into someone: they are knocked back, the player recoils
+          stats.hits = (stats.hits || 0) + 1;
+          startBump(p, e.x, e.z, t, "hit");
+          const sev = Math.max(0.15, Math.min(1, (sp - 2.6) / 4));
+          p.rx.knock = sev;
+          const k = 1 + 3 * sev;
+          p.rx.mx *= k;
+          p.rx.mz *= k;
+          const w0 = local(0, 0), w1 = local(p.rx.mx, p.rx.mz);
+          p.rx.wdx = w1[0] - w0[0];
+          p.rx.wdz = w1[1] - w0[1];
+          crowdApi.playerBump = { p, sp, hard: true };
+        } else {
+          startBump(p, e.x, e.z, t);
+          crowdApi.playerBump = { p, sp, hard: false };
+        }
+        continue;
+      }
+      if (d < 2.2 && along > 0 && Math.abs(lat) < 0.95) {
+        const side = Math.abs(lat) < 0.08 ? ((p.id ?? 0) % 2 ? 1 : -1) : Math.sign(lat);
+        const urgency = Math.max(0.35, Math.min(1, (2.2 - d) / 1.5 + sp / 7));
+        const v = 1.7 * urgency;
+        const vx = -uz * side * v + ux * 0.35 * v;
+        const vz = ux * side * v + uz * 0.35 * v;
+        if (sideStep(p, vx * dt, vz * dt)) {
+          p.dodge = { vx, vz, t: 0.3 };
+          p.lookAt = toWorld(e.x, e.z, 1.6);
+          if (p.wantPre === undefined) p.wantPre = p.want;
+        }
+      }
+    }
+  }
+  const rectGap = (p, v) => Math.hypot(Math.max(0, Math.abs(p.x - v.x) - v.L / 2), Math.max(0, Math.abs(p.z - v.lat) - v.W / 2));
+  function collisions(t, extra) {
+    const walkers = people.filter((p) => isWalking(p) && ready(p, t));
+    for (let i = 0; i < walkers.length; i++) {
+      const a = walkers[i];
+      if (a.rx) continue;
+      for (let j = i + 1; j < walkers.length; j++) {
+        const b = walkers[j];
+        if (b.rx || (a.party && a.party === b.party)) continue;
+        if (Math.hypot(a.x - b.x, a.z - b.z) < 0.45) {
+          stats.bumps = (stats.bumps || 0) + 1;
+          startBump(a, b.x, b.z, t);
+          startBump(b, a.x, a.z, t);
+          break;
+        }
+      }
+    }
+    // the player, walking or riding, into someone
+    const e = extra[0];
+    if (e) {
+      playerAt = e;
+      const sp = Math.hypot(e.vx || 0, e.vz || 0);
+      for (const p of walkers) {
+        if (p.rx) continue;
+        const d = Math.hypot(p.x - e.x, p.z - e.z);
+        if (e.riding && sp > 1.5 && d < 0.85) {
+          stats.hits = (stats.hits || 0) + 1;
+          startBump(p, e.x, e.z, t, "hit");
+          // how hard: nothing under ~2 m/s, a stagger to ~4, down on the ground above
+          const sev = Math.max(0, Math.min(1, (sp - 2) / 5));
+          if (sev > 0.05) {
+            p.rx.knock = sev;
+            const k = 1 + 3 * sev;
+            p.rx.mx *= k;
+            p.rx.mz *= k;
+            const w0 = local(0, 0), w1 = local(p.rx.mx, p.rx.mz);
+            p.rx.wdx = w1[0] - w0[0]; // the push, in the world frame
+            p.rx.wdz = w1[1] - w0[1];
+          }
+          crowdApi.playerHit = { p, sev };
+        }
+      }
+    }
+    // someone on a carriageway right beside a moving vehicle: the driver stands on the brake, they step back
+    for (const p of people) {
+      if (p.hidden || p.rx || p.sit || !((p.z > 8.4 && p.z < 15.6) || (p.z > 19.3 && p.z < 25.6)) || !ready(p, t)) continue;
+      for (const v of traffic.vehicles) {
+        if (v.state === "parked" || v.state === "crash" || v.v < 0.2 || (v.road === "near") !== p.z < 17) continue;
+        if (rectGap(p, v) >= 0.6) continue;
+        const front = (p.x - v.x) * v.dir > v.L / 2 - 0.3;
+        v.hardBrake = 0.8;
+        p.bumpAt = t - 14; // a shorter cooldown than a bump
+        stats.flinches = (stats.flinches || 0) + 1;
+        startBump(p, v.x, v.lat, t, "flinch");
+        p.bumpAt = t - 14;
+        if (!front) p.rx.mx = p.rx.mz = 0;
+        else {
+          p.rx.mx = 0;
+          p.rx.mz = (p.z - v.lat > 0 ? 1 : -1) * 0.3;
+        }
+        break;
+      }
+    }
+  }
+  let playerAt = null;
+  // the drivers of a crash get out, stand between the vehicles and argue (or face the player), then get back in
+  function stepOut(c) {
+    c.drivers = [];
+    stats.argues = (stats.argues || 0) + 1;
+    const vs = [c.a, c.b].filter((v) => v && CAR_LIKE.includes(v.kind));
+    vs.forEach((veh, i) => {
+      const inn = door(veh, true);
+      const p = person(pickW([["office", 4], ["local", 4], ["student", 1]]), inn.x, inn.z, headingOf(0, kerbSide(veh.road)), false);
+      if (!p) return;
+      p.side = veh.road;
+      p.hidden = true;
+      p.lift = veh.kind === "bus" ? 0.38 : -0.12;
+      p.tasks = [{ type: "argue", crash: c, veh, i, n: vs.length, t: -0.5 - i * 0.7, other: null }, { type: "vanish" }];
+      c.drivers.push(p);
+    });
+    for (const p of c.drivers) p.tasks[0].other = c.drivers.find((q) => q !== p) || null;
+  }
+  const CAR_LIKE = ["hatch", "sedan", "suv", "taxi", "auto", "bus"];
+  function argue(p, task, dt, t) {
+    const { veh, crash } = task;
+    task.t += dt;
+    const k = kerbSide(veh.road);
+    const ended = crash.done || crash.ending || !traffic.vehicles.includes(veh);
+    const carDoor = traffic.vehicles.includes(veh) && veh.mesh.userData.door?.kind === "car";
+    if (task.t < 0) {
+      p.hidden = true;
+      p.vx = p.vz = 0;
+      if (carDoor && task.t > -0.55) veh.carDoor = 1; // the door swings open first
+      if (task.t > -0.2) veh.mesh.userData.occupants?.setDriver(false); // then the driver is out of the seat
+      return;
+    }
+    p.hidden = false;
+    // where this one stands: on the kerb side between the two vehicles (or beside their own door when alone)
+    const inn = traffic.vehicles.includes(veh) ? door(veh, true) : { x: p.x, z: p.z };
+    const out = traffic.vehicles.includes(veh) ? door(veh) : { x: p.x, z: p.z };
+    if (carDoor) {
+      // the driver's door is on the road side, a little behind the front wheel
+      out.x = veh.x + veh.dir * 0.3;
+      out.z = veh.lat - k * (veh.W / 2 + 0.3);
+      inn.x = out.x;
+      inn.z = veh.lat - k * veh.W * 0.22;
+    }
+    let sx = out.x;
+    const other = task.other;
+    if (other && task.n > 1 && crash.a && crash.b) {
+      const mx = (crash.a.x + crash.b.x) / 2;
+      sx = mx + (task.i ? 0.5 : -0.5);
+    } else sx = out.x - veh.dir * 0.8;
+    const stand = { x: sx, z: out.z + k * 0.55 };
+    if (crash.block) {
+      // stands about 1.3 m from the player, where they were when he got there (he does not trail them about)
+      if (task.arrivedAt) {
+        stand.x = task.arrivedAt.x;
+        stand.z = task.arrivedAt.z;
+      } else if (playerAt) {
+        const bx = out.x - playerAt.x, bz = out.z - playerAt.z, bl = Math.hypot(bx, bz) || 1;
+        stand.x = playerAt.x + (bx / bl) * 1.3;
+        stand.z = playerAt.z + (bz / bl) * 1.3;
+      }
+    }
+    task.k = task.k ?? 0;
+    const prev = { x: p.x, z: p.z };
+    if (!ended) {
+      // out of the door, then a few steps to the spot
+      if (task.t < 1.0) {
+        const f = task.t / 1.0;
+        p.x = inn.x + (out.x - inn.x) * f;
+        p.z = inn.z + (out.z - inn.z) * f;
+        p.lift = (veh.kind === "bus" ? 0.38 : -0.12) * (1 - f);
+        p.want = headingOf(out.x - inn.x, out.z - inn.z);
+      } else if (carDoor && task.t < 2.1) {
+        // out, they turn and push the door shut: the hand goes to the handle and follows it round
+        p.lift = 0;
+        p.vx = p.vz = 0;
+        p.want = headingOf(inn.x - p.x, inn.z - p.z);
+        veh.carDoor = task.t < 1.45 ? 1 : 0;
+        p.gesture.take = 1;
+        p.gesture.at = veh.mesh.userData.door.handle(new THREE.Vector3());
+        return;
+      } else {
+        p.lift = 0;
+        const d = Math.hypot(stand.x - p.x, stand.z - p.z);
+        if (crash.block && d < 0.15 && !task.arrivedAt) task.arrivedAt = { x: stand.x, z: stand.z };
+        const step = Math.min(d, (crash.block ? 1.5 : 1.1) * dt);
+        if (d > 0.02) {
+          p.x += ((stand.x - p.x) / d) * step;
+          p.z += ((stand.z - p.z) / d) * step;
+        }
+      }
+    } else {
+      // crash over: back to the door and inside
+      task.back = (task.back || 0) + dt;
+      // a car: first to the door, then the hand to the handle, the door opens, and only then in
+      const aim = carDoor && !task.inside ? out : inn;
+      const d = Math.hypot(aim.x - p.x, aim.z - p.z);
+      let step = Math.min(d, (crash.block ? 2.0 : 1.2) * dt);
+      if (carDoor && !task.inside && d < 0.15) {
+        task.rt = (task.rt || 0) + dt;
+        p.want = headingOf(inn.x - p.x, inn.z - p.z);
+        p.gesture.take = 1;
+        p.gesture.at = veh.mesh.userData.door.handle(new THREE.Vector3());
+        veh.carDoor = task.rt > 0.45 ? 1 : 0;
+        if (task.rt > 0.45 && (veh.doorK || 0) > 0.7) task.inside = true;
+        step = 0;
+      }
+      if (d > 0.02) {
+        p.x += ((aim.x - p.x) / d) * step;
+        p.z += ((aim.z - p.z) / d) * step;
+        if (step > 0) p.want = headingOf(aim.x - p.x, aim.z - p.z);
+      }
+      const dIn = Math.hypot(inn.x - p.x, inn.z - p.z);
+      p.lift = (veh.kind === "bus" ? 0.38 : -0.12) * Math.max(0, 1 - dIn / 0.8);
+      if (d < 0.02 && carDoor && !task.inside) { /* waiting at the door */ } else if (!carDoor && d < 1.4) veh.carDoor = 1;
+      if ((carDoor ? task.inside && dIn < 0.08 : d < 0.08) || task.back > (crash.block ? 14 : 8)) {
+        veh.mesh.userData.occupants?.setDriver(true); // back in the seat
+        veh.carDoor = 0;
+        crash.seated = true; // the car may move off
+        p.hidden = true;
+        p.lift = 0;
+        p.tasks.shift();
+        return;
+      }
+    }
+    const moved = Math.hypot(p.x - prev.x, p.z - prev.z);
+    p.vx = (p.x - prev.x) / Math.max(dt, 1e-3);
+    p.vz = (p.z - prev.z) / Math.max(dt, 1e-3);
+    if (moved > 0.2 * dt || ended || task.t < 1.0) return;
+    // standing: face the other, and have it out
+    p.vx = p.vz = 0;
+    const faceAt = other ? { x: other.x, z: other.z } : playerAt ? { x: playerAt.x, z: playerAt.z } : { x: veh.x, z: veh.lat };
+    p.want = headingOf(faceAt.x - p.x, faceAt.z - p.z);
+    p.lookAt = toWorld(faceAt.x, faceAt.z, 1.5);
+    const turn = Math.floor((task.t - 1) / 2.4);
+    const mine = turn % 2 === task.i || task.n === 1 ? 1 : 0;
+    p.expr = (turn + task.i) % 3 === 0 ? "angry" : "annoyed";
+    if (mine) {
+      p.talk = 0.6 + 0.3 * Math.sin(t * 9);
+      p.gesture[(turn >> 1) % 2 ? "hip" : "point"] = 1;
+    } else p.shake = 0.7;
+  }
+  // an auto passenger pays the driver through the side before going: a note held out, change back
+  function payDriver(p, task, dt, t) {
+    const veh = task.veh;
+    if (!traffic.vehicles.includes(veh)) return p.tasks.shift();
+    const k = kerbSide(veh.road);
+    const at = { x: veh.x + veh.dir * (veh.mesh.userData.doorX != null ? veh.mesh.userData.doorX + 0.1 : 0.75), z: veh.lat + k * (veh.W / 2 + 0.35) };
+    leave(p); // beside the auto, on the carriageway: scripted
+    if (!task.there) {
+      if (steer(p, at.x, at.z, p.pace * 0.8, dt, null) < 0.2) task.there = true;
+      return;
+    }
+    task.t += dt;
+    stand(p, dt, headingOf(0, -k));
+    p.lookAt = lookPt(veh.x + veh.dir * (veh.mesh.userData.doorX != null ? 0.15 : 0.9), veh.lat, 1.1);
+    p.char.showGear("note", task.t > 0.4 && task.t < 2.2);
+    p.gesture = task.t < 0.4 ? { pocket: 1 } : task.t < 2.2 ? { serve: 1 } : task.t < 3.0 ? { take: 0.6, pocket: task.t > 2.6 ? 1 : 0 } : {};
+    p.talk = task.t > 0.6 && task.t < 1.6 ? 0.3 : 0;
+    p.expr = "polite";
+    if (task.t > 3.3) p.tasks.shift();
+  }
+
+  // Now and then a walker stops for a few seconds: to answer a message, or to look at what a stall has. They
+  // step to the wall side of the footpath first, out of the way. Never at the crossing, in the narrow places
+  // in front of the stalls, or when walking with friends. Returns true when a pause has just begun.
+  function smallLife(p, task, dt, t) {
+    p.pauseT = (p.pauseT ?? range(15, 70)) - dt;
+    if (p.pauseT > 0) return false;
+    p.pauseT = range(35, 110);
+    if (p.ag == null || p.party || p.carry || p.speed < 0.5 || Math.abs(task.xTo - p.x) < 8 || (p.x > CROSS_X[0] - 4 && p.x < CROSS_X[1] + 4)) return false;
+    if (task.side === "far" && (counters.some((st) => p.x > st.x0 - 2.5 && p.x < st.x1 + 2.5) || nearAisle(p))) return false;
+    const wallZ = task.side === "near" ? 7.05 : 28.75;
+    const c = snapPt(p.x + task.dir * 1.2, wallZ);
+    if (!c || Math.abs(c.z - wallZ) > 0.35 || Math.abs(c.z - p.z) < 0.4 || Math.hypot(c.x - p.x, c.z - p.z) > 2.6) return false;
+    if (others.some((o) => o.p !== p && Math.hypot(o.x - c.x, o.z - c.z) < 0.8)) return false; // somebody is there
+    // a stall in sight (their own side, or across the road)?
+    let stall = null;
+    for (const st of counters) if (Math.abs((st.x0 + st.x1) / 2 - p.x) < 12 && (!stall || Math.abs((st.x0 + st.x1) / 2 - p.x) < Math.abs((stall.x0 + stall.x1) / 2 - p.x))) stall = st;
+    const kind = stall && chance(0.55) ? "stall" : "phone";
+    p.busy = null;
+    p.char.showGear("phone", false);
+    p.tgt = null;
+    p.tasks.unshift(goto(c.x, c.z), { type: "pause", kind, T: range(2, 6), look: kind === "stall" ? [stall.stock[0], stall.stock[2]] : null });
+    stats.pauses = (stats.pauses || 0) + 1;
+    return true;
   }
   // phones while walking, a glance at a passer-by
   function walkingHabits(p, dt, t) {
     if (p.role === "keeper" || p.role === "guard") return;
     p.habitT -= dt;
+    if (p.carry) p.habitT = Math.max(p.habitT, 1);
     if (p.habitT < 0) {
       p.busy = p.busy ? null : p.habit < 0.18 ? "text" : p.habit < 0.28 ? "call" : null;
       p.habitT = p.busy ? range(6, 22) : range(10, 40);
@@ -616,29 +2141,128 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       if (p.glance && t < p.glanceUntil && people.includes(p.glance)) {
         p.lookAt = toWorld(p.glance.x, p.glance.z, p.glance.y + 1.55);
         // someone they know: a smile and a wave
-        if ((p.habit * 7 + p.glance.habit * 5) % 1 < 0.22) {
+        if ((p.habit * 7 + p.glance.habit * 5) % 1 < 0.05) {
           p.expr = "smile";
-          p.gesture.wave = 1;
+          if ((p.habit * 13) % 1 < 0.5) p.gesture.wave = 1;
+          else if (t > p.glanceUntil - 0.7) p.nod = 0.9;
         }
       }
     }
   }
   function customer(p, task, dt, t) {
-    const sp = task.spot;
-    const st = sp.stall;
-    stand(p, dt, sp.face);
+    const st = task.st;
+    const aisle = st.mode === "aisle";
+    const sp = { x: st.slots[0] }; // (a number of this stall's own, for the rhythm of the talk)
+    const FACE = Math.PI; // toward the counter
     p.busy = null;
+    if (!task.init) {
+      task.init = true;
+      if (p.comingTo === st) {
+        st.coming--;
+        p.comingTo = null;
+      }
+      if (!task.phase) {
+        task.phase = "queue";
+        st.line.push(p); // the back of the queue: nobody cuts in
+        hold(p, null);
+      }
+      stats.queueMax = Math.max(stats.queueMax || 0, st.line.length);
+    }
+    // standing at (x, z) by this stall: in the aisle by its manners, elsewhere in the crowd
+    const standAt = (x, z, face, key) => {
+      if (aisle && z < AISLE.bay) return aisleStand(p, x, dt, t, face);
+      const left = Math.hypot(x - p.x, z - p.z);
+      if (task.at === key) {
+        stand(p, dt, face);
+        return 0;
+      }
+      if (st.mode === "shed" && (p.ag == null || left < 0.7)) {
+        // the last step in to the shed's counter is off the walkable strip: taken out of the crowd
+        if (p.ag != null) {
+          p.floorY = p.groundY ?? p.y;
+          leave(p);
+          p.noRay = true;
+        }
+        if (steer(p, x, z, 0.6, dt, null) < 0.06) task.at = key;
+        return task.at === key ? 0 : left;
+      }
+      const d = moveTo(p, x, z, paceOf(p) * 0.8, dt);
+      walkWidth(p, dt);
+      task.still = p.speed < 0.08 && d < 0.6 ? (task.still || 0) + dt : 0;
+      if (d < 0.12 || task.still > 0.7) {
+        task.at = key;
+        task.still = 0;
+      }
+      return task.at === key ? 0 : left;
+    };
     const keeperP = residents.find((r) => r.tasks[0]?.k?.stall === st);
     const item = st.kind === "tea" ? (p.clay ? "cup" : "glass") : st.kind === "snack" ? "packet" : "softdrink";
     const qr = toWorld(st.qr[0], st.qr[2], st.qr[1]);
     const toKeeper = keeperP ? toWorld((p.x + keeperP.x) / 2, (p.z + keeperP.z) / 2 - 0.1, st.counterTop + 0.32) : qr;
-    if (!task.started) {
-      task.started = true;
-      p.served = false;
-      p.deal = { stage: "order", t: 0, pay: chance(0.68) ? "upi" : "cash", kind: st.kind };
-      st.queue.push(p);
-      task.since = 0;
-      hold(p, null);
+    if (task.phase === "queue") {
+      // in line, in the order of coming; the place moves up as those in front are served
+      const i = Math.max(0, st.line.indexOf(p));
+      const sx = st.slots[Math.min(i, st.slots.length - 1)];
+      let left;
+      if (aisle && !task.inLine && Math.abs(sx - p.x) > 0.5) left = aisleGo(p, sx, paceOf(p) * 0.85, dt, t); // up to the back of it
+      else {
+        task.inLine = true;
+        left = standAt(sx, st.standZ, FACE, "q" + i);
+      }
+      task.queued = (task.queued || 0) + dt;
+      // watching the one being served; a look at the watch, the phone
+      const head = st.line[0];
+      if (keeperP && Math.sin(t * 0.3 + sx) > -0.3) p.lookAt = toWorld(keeperP.x, keeperP.z, keeperP.y + 1.45);
+      else if (head && head !== p) p.lookAt = toWorld(head.x, head.z, head.y + 1.4);
+      if (i > 0 && task.inLine && left < 0.2) {
+        if (p.fidget === "watch" && task.queued % 13 > 10.5) {
+          p.gesture.watch = 1;
+          p.expr = "concentrating";
+        } else if (p.habit < 0.3 && task.queued % 17 > 9) {
+          p.gesture.text = 1;
+          p.lookAt = toWorld(p.x - Math.sin(p.heading) * 0.5, p.z - Math.cos(p.heading) * 0.5, 0.95 * p.char.height + p.y);
+        }
+      }
+      p.char.showGear("phone", Boolean(p.gesture.text));
+      asideManners(p, t);
+      if (i === 0 && task.inLine && left < 0.15) {
+        task.phase = "deal";
+        p.served = false;
+        p.deal = { stage: "order", t: 0, pay: chance(0.68) ? "upi" : "cash", kind: st.kind };
+        st.queue.push(p);
+        task.since = 0;
+        hold(p, null);
+      } else if (task.queued > 120) {
+        // not worth the wait
+        st.line = st.line.filter((q) => q !== p);
+        p.tasks.shift();
+      }
+      return;
+    }
+    if (task.phase === "away") {
+      // tea in hand: out of the queue's way to drink it
+      const s2 = task.sip;
+      hold(p, item);
+      p.gesture.hold = 1;
+      const there = aisle ? bayIn(p, st, s2.x, s2.z, dt, t) : standAt(s2.x, s2.z, 0, "sip") === 0;
+      if (there) task.phase = "drink";
+      return;
+    }
+    if (task.phase === "leave") {
+      if (!aisle || bayOut(p, st, dt, t)) {
+        if (st.mode === "shed") p.noRay = false;
+        p.tasks.shift();
+      }
+      return;
+    }
+    if (task.phase === "deal") standAt(st.slots[0], st.standZ, FACE, "q0");
+    else if (p.ag != null) stand(p, dt, st.mode === "shed" ? FACE : task.face ?? 0);
+    else {
+      stand(p, dt, task.face ?? 0);
+      if (aisle) {
+        p.noRay = true;
+        p.floorY = aisleY ??= groundAt(30, AISLE.pass);
+      }
     }
     task.since = (task.since || 0) + dt;
     const d = p.deal;
@@ -721,10 +2345,26 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
           break;
       }
       if (task.since > 70) p.served = true; // something went wrong at the counter: don't wait for ever
+      asideManners(p, t);
       if (!p.served) return;
     }
     hold(p, item);
     p.deal = null;
+    if (task.phase === "deal") {
+      // served: the next in line moves up; a free place to stand with it, or take it along
+      st.line = st.line.filter((q) => q !== p);
+      const free = st.sips.filter((q) => !q.taken);
+      if (!free.length) {
+        st.queue = st.queue.filter((q) => q !== p);
+        p.carry = { item, T: range(15, 40) };
+        p.tasks.shift();
+        return;
+      }
+      task.sip = free[(rnd() * free.length) | 0];
+      task.sip.taken = p;
+      task.phase = "away";
+      return;
+    }
     task.T -= dt;
     // tea is sipped (and blown on when hot), snacks eaten, cold drinks tipped back; chat in between
     task.sipT = (task.sipT ?? range(3, 8)) - dt;
@@ -738,8 +2378,9 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       } else if (st.kind === "snack") p.gesture.eat = lift;
       else p.gesture.bottle = lift;
     }
-    const mate = nearestTo(p, 1.7, (o) => o.p && o.p.tasks[0]?.type === "customer");
+    const mate = nearestTo(p, 1.7, (o) => o.p && o.p.tasks[0]?.type === "customer" && o.p.tasks[0].phase === "drink");
     if (mate) {
+      task.face = headingOf(mate.x - p.x, mate.z - p.z);
       p.lookAt = toWorld(mate.x, mate.z, mate.p.y + 1.55);
       const turn = Math.sin(t * 0.35 + sp.x * 3) > 0;
       if (turn && task.sipT > 2.4) {
@@ -754,9 +2395,9 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     } else if (lift === 0 && st.kind === "tea") p.expr = "relief";
     if (task.T < 0) {
       hold(p, null);
-      sp.taken = null;
+      if (task.sip) task.sip.taken = null;
       st.queue = st.queue.filter((q) => q !== p);
-      p.tasks.shift();
+      task.phase = "leave";
     }
   }
   function bench(p, task, dt, t) {
@@ -764,6 +2405,12 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     // walk the last steps, turn round, sit
     const d = Math.hypot(seat.x - p.x, seat.z - 0.05 - p.z);
     if (!task.seated) {
+      if (p.ag != null) {
+        // the last steps onto the seat are scripted (the seat is not a place to walk to)
+        p.floorY = p.groundY ?? p.y;
+        leave(p);
+        p.noRay = true;
+      }
       if (d > 0.08) {
         steer(p, seat.x, seat.z - 0.05, 0.6, dt, null);
         return;
@@ -789,6 +2436,7 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     if (task.T < 0) {
       hold(p, null);
       seat.taken = null;
+      p.joinAt = seat.stall.mode === "aisle" ? null : p.lastMesh; // stands up where they came from, not on the seat
       p.tasks.shift();
     }
   }
@@ -797,8 +2445,10 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     const sl = task.slot;
     if (!g.members.includes(p)) g.members.push(p);
     stand(p, dt, headingOf(g.c[0] - sl.x, g.c[1] - sl.z));
-    p.x += (sl.x - p.x) * Math.min(1, dt * 2);
-    p.z += (sl.z - p.z) * Math.min(1, dt * 2);
+    if (p.ag == null) {
+      p.x += (sl.x - p.x) * Math.min(1, dt * 2);
+      p.z += (sl.z - p.z) * Math.min(1, dt * 2);
+    }
     // whose turn to talk
     if (t > g.until || !g.members[g.speaker]) {
       g.speaker = (g.speaker + 1 + ((rnd() * Math.max(1, g.members.length - 1)) | 0)) % Math.max(1, g.members.length);
@@ -1057,8 +2707,10 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       task.t = range(18, 40);
     }
     if (task.walk) {
-      const d = steer(p, task.walk[0], task.walk[1], 0.7, dt, null);
-      if (d < 0.1) {
+      const d = moveTo(p, task.walk[0], task.walk[1], 0.7, dt);
+      task.still = p.speed < 0.08 && d < 0.6 ? (task.still || 0) + dt : 0;
+      if (d < 0.1 || task.still > 1) {
+        task.still = 0;
         task.walk = null;
         task.back = !task.back;
       }
@@ -1106,9 +2758,14 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     setTimeout(() => (bodiesIn = true), new URLSearchParams(location.search).has("waitbodies") ? 1e9 : 90000); // very slow connection: start with what there is
   });
   bodiesLoading?.then(() => (bodiesIn = true));
-  return {
+  const crowdApi = {
     people,
     stats,
+    playerHit: null,
+    playerBump: null, // set when the player on foot touches someone; main.js reads and clears it
+    aisle: AISLE,
+    counters,
+    stops: stopSpots,
     deals: () => people.filter((q) => q.deal).map((q) => q.deal.stage + ":" + q.deal.pay + ":" + q.deal.kind),
     /** people standing or walking on a carriageway, for the traffic (street frame) */
     onRoad() {
@@ -1121,17 +2778,31 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
      * [{x, z, r, vx, vz}] in the street frame; camPos: the camera in world space.
      */
     update(dt, t, extra = []) {
-      if (!kit || !bodiesIn) return;
+      if (!kit || !bodiesIn || !nav) return;
       if (!started) {
         started = true;
         settle();
       }
       frameNo++;
+      syncProxies(extra);
       // who is where, for keeping clear of each other
       others.length = 0;
       for (const p of people) others.push({ p, x: p.x, z: p.z, r: p.radius, vx: p.vx, vz: p.vz });
       for (const pole of poles) others.push({ p: null, x: pole.x, z: pole.z, r: pole.r, vx: 0, vz: 0 });
-      for (const e of extra) others.push({ p: null, x: e.x, z: e.z, r: e.r || 0.35, vx: e.vx || 0, vz: e.vz || 0 });
+      for (const e of extra) others.push({ p: null, player: true, x: e.x, z: e.z, r: e.r || 0.35, vx: e.vx || 0, vz: e.vz || 0 });
+      hourNow = globalThis.__tiu?.daylight?.()?.hour ?? hourNow;
+      for (let i = aisleFolk.length - 1; i >= 0; i--) if (!aisleFolk[i].inA || !people.includes(aisleFolk[i])) aisleFolk.splice(i, 1);
+      flowTidy(t);
+      // buses and autos: people waiting at the stops, and those arriving get off
+      transitT -= dt;
+      if (transitT < 0) {
+        transitT = range(4, 10) * (quality === "low" ? 2 : 1);
+        transitWaiter();
+      }
+      collisions(t, extra);
+      meetPlayer(dt, t, extra[0]);
+      for (const c of traffic.crashes) if (!c.drivers && !c.done) stepOut(c);
+      for (const veh of traffic.vehicles) if (veh.atStop && !veh.unloaded && (veh.kind === "bus" || veh.kind === "auto")) unload(veh);
       // new walkers keep the street busy
       const walking = people.filter((p) => p.tasks[0] && (p.tasks[0].type === "lane" || p.tasks[0].type === "goto")).length;
       arriveT -= dt;
@@ -1144,8 +2815,21 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
       frustum.setFromProjectionMatrix(projScreen);
       const cam = camera.position;
       for (const p of [...people]) {
+        if (p.ag != null) syncAgent(p, dt);
         act(p, dt, t);
         if (!people.includes(p)) continue;
+        if (p.rx) reaction(p, dt);
+        if (p.dodge) {
+          // stepping aside: the legs walk the step, then they turn back to what they were doing
+          p.vx = p.dodge.vx;
+          p.vz = p.dodge.vz;
+          p.dodge.t -= dt;
+          if (p.dodge.t <= 0) {
+            p.dodge = null;
+            if (p.wantPre !== undefined) p.want = p.wantPre;
+            p.wantPre = undefined;
+          }
+        }
         // turn toward where they are going (or told to face)
         const sp = Math.hypot(p.vx, p.vz);
         if (sp > 0.2 && !p.sit && p.tasks[0]?.type !== "keeper") p.want = headingOf(p.vx, p.vz);
@@ -1153,15 +2837,15 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
         p.heading += wrap(p.want - p.heading) * Math.min(1, dt * 5);
         const turnRate = wrap(p.heading - before) / Math.max(dt, 1e-3);
         p.speed = sp;
-        // ground under the feet, every so often
+        // ground under the feet: the floor the agent walks on, or (scripted people) a ray every so often
         p.groundT -= dt;
-        if (p.groundT < 0) {
+        if (p.ag == null && !p.noRay && p.groundT < 0) {
           p.groundT = 0.35;
           p.groundY = groundAt(p.x, p.z);
-        }
+        } else if (p.noRay && p.floorY !== undefined) p.groundY = p.floorY;
         if (p.groundY !== undefined) p.y += (p.groundY - p.y) * Math.min(1, dt * 10);
         const [wx, wz] = local(p.x, p.z);
-        p.group.position.set(wx, p.y + 0.015, wz);
+        p.group.position.set(wx, p.y + 0.015 + (p.lift || 0), wz);
         p.group.rotation.y = phi + p.heading;
         q.setFromAxisAngle(UP, phi + p.heading);
         p.body.setNextKinematicTranslation({ x: wx, y: p.y, z: wz });
@@ -1169,7 +2853,7 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
         sphere.center.set(wx, p.y + 1, wz);
         const dist = cam.distanceTo(sphere.center);
         const visible = dist < 120 && frustum.intersectsSphere(sphere);
-        p.group.visible = visible;
+        p.group.visible = visible && !p.hidden;
         p.dtAcc += dt;
         if (!visible) continue;
         const every = dist < 35 ? 1 : dist < 70 ? 2 : 4;
@@ -1180,7 +2864,9 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
           p.castShadowNow = dist < 40;
           p.group.traverse((o) => o.isMesh && (o.castShadow = p.castShadowNow));
         }
+        const knock = p.rx && p.rx.knock ? knockPose(p) : null;
         p.char.update(step, {
+          limbs: knock ? knock.limbs : undefined,
           speed: sp,
           grounded: true,
           turnRate,
@@ -1194,7 +2880,14 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
           gesture: p.gesture,
           sit: p.sit,
         });
+        if (knock && p.char.applyTip) {
+          // the body tips over about the hips, head toward the way it was pushed (in the person's own frame)
+          const yaw = phi + p.heading, cy = Math.cos(yaw), sy = Math.sin(yaw);
+          const dx = p.rx.wdx ?? 0, dz = p.rx.wdz ?? 1;
+          p.char.applyTip({ angle: knock.angle, lx: dx * cy - dz * sy, lz: dx * sy + dz * cy, lift: knock.lift });
+        }
       }
     },
   };
+  return crowdApi;
 }

@@ -1,5 +1,6 @@
-// Real time of day. The clock is Indian Standard Time, wherever the visitor is; the sun and moon
-// stand where they really are over Salt Lake at that moment (their positions are worked out from
+// Time of day. The clock is NOT synced to the real time any more: it is set by the player (the time panel,
+// the T key, __tiu.time("19:30") or ?time=19:30 in the address) and stays where it is put. It is shown as
+// Indian Standard Time, and the sun and moon stand where they really are over Salt Lake at that time (their positions are worked out from
 // the date with the usual low-precision astronomical formulas, good to a fraction of a degree).
 //
 // From the sun's height everything else follows: the colour and strength of sunlight, the sky and
@@ -7,7 +8,6 @@
 // windows, headlamps and tail lamps, with the moon (at its real phase) as the only light from above.
 // The hour also sets how much traffic there is.
 //
-// ?time=19:30 in the address fixes the clock (for looking at a particular hour); __tiu.time("06:10").
 import * as THREE from "three";
 
 const RAD = Math.PI / 180;
@@ -60,7 +60,9 @@ const smooth = (a, b, x) => {
   return t * t * (3 - 2 * t);
 };
 // traffic through the day (1 = an ordinary daytime flow): [hour, flow]
-const FLOW = [[0, 0.15], [4.5, 0.1], [6, 0.35], [8, 0.95], [9.5, 1.3], [11.5, 1], [14, 0.85], [16.5, 1.05], [18.5, 1.35], [20.5, 0.9], [22, 0.5], [24, 0.15]];
+// Sector V is an office district: the street fills from about 9 to 10:30 in the morning and from
+// 5:30 to 7:30 in the evening, and is light the rest of the day.
+const FLOW = [[0, 0.08], [5, 0.06], [7, 0.25], [8.5, 0.9], [9.25, 1.5], [10.5, 1.45], [11.5, 0.6], [13, 0.55], [14, 0.6], [16.5, 0.65], [17.5, 1.3], [18.5, 1.55], [19.5, 1.35], [20.5, 0.7], [22, 0.3], [24, 0.08]];
 function flowAt(hour) {
   for (let i = 0; i < FLOW.length - 1; i++) {
     const [h0, f0] = FLOW[i];
@@ -76,16 +78,15 @@ function flowAt(hour) {
  */
 export function buildDaylight({ scene, renderer, sun, hemi, sunOffset, worldInfo, traffic, high, clockEl }) {
   const fixed = new URLSearchParams(location.search).get("time");
-  let override = null; // minutes after midnight IST, or null for the real clock
+  let override = 630; // minutes after midnight IST: 10:30 am until the player changes it
   const parse = (t) => {
     const m = /^(\d{1,2}):?(\d{2})?$/.exec(String(t || "").trim());
     return m ? (Math.min(23, +m[1]) * 60 + Math.min(59, +(m[2] || 0))) : null;
   };
-  override = parse(fixed);
+  override = parse(fixed) ?? override;
   // the moment being shown, as if the clock on the wall were Indian time
   function moment() {
-    const now = Date.now();
-    if (override === null) return now;
+    const now = Date.now(); // only the date is real: the sun's height for that day of the year
     const ist = new Date(now + 5.5 * 3600000);
     const midnight = Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate()) - 5.5 * 3600000;
     return midnight + override * 60000;
@@ -263,11 +264,14 @@ export function buildDaylight({ scene, renderer, sun, hemi, sunOffset, worldInfo
         } else for (const l of near) l.intensity = 0;
       }
     },
-    /** "HH:MM" Indian time to fix the clock, or nothing to follow the real one. */
+    /** "HH:MM" Indian time to set the clock to; it stays there. */
     setTime(t) {
-      override = t === undefined || t === null ? null : parse(t);
+      const m = parse(t);
+      if (m !== null) override = m;
       lastAlt = 99;
       timer = 0;
     },
+    /** the clock, in minutes after midnight */
+    minutes: () => override,
   };
 }

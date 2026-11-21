@@ -1,0 +1,14 @@
+{
+ "top": [
+  {
+   "label": "Test tee",
+   "mhclo": "test_tee/test_tee.mhclo"
+  }
+ ],
+ "bottom": [
+  {
+   "label": "Test jeans",
+   "mhclo": "test_jeans/test_jeans.mhclo"
+  }
+ ]
+}

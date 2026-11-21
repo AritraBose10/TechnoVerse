@@ -17,12 +17,14 @@
 //     them, so people can cross at the gap in the median.
 // Positions are in the street's own frame ("local"): x along the street, z across it.
 import * as THREE from "three";
-import { makeCar, makeAuto, makeBus, setVehicleNight } from "/street.js";
+import { setVehicleNight } from "/street.js";
+import { preloadVehicles, makeRealCar, vehiclesReady } from "/vehicles.js";
 import { makeTrafficMotorcycle, MOTORCYCLE_DESIGNS, setMotorcycleNight } from "/motorcycle.js";
 import { makeTrafficBicycle, BICYCLE_DESIGNS } from "/bicycle.js";
 import { makeCharacter } from "/character.js";
 import { riderLook } from "/looks.js";
 import { pickBody } from "/crowdbodies.js";
+import { seatCharacter } from "/seated.js";
 
 const ROADS = {
   // near side, in front of the university: travels toward +x
@@ -62,6 +64,7 @@ const TYPES = {
 };
 
 export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, quality = "high", seed = 7 }) {
+  preloadVehicles(quality === "high");
   let s = seed;
   const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
   const range = (a, b) => a + rnd() * (b - a);
@@ -77,6 +80,7 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
     return `WB ${["02", "04", "06", "08", "10", "12", "19", "20", "26"][(rnd() * 9) | 0]} ${kind === "taxi" ? "T" : two} ${d}`;
   };
   const MAX_MOVING = quality === "low" ? 14 : 36;
+  let seatBudget = 0; // real seated people that may still be made this frame
   let eye = null; // where the viewer is, in the street's frame
   let night = 0; // 0 by day, 1 at night: lamps on
   let busy = 1; // how much traffic for the hour: 1 = a normal daytime flow
@@ -90,8 +94,6 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
   const pool = {};
   function build(kind) {
     const color = pickW(COLOURS);
-    if (kind === "auto") return makeAuto({ plate: plate(kind) });
-    if (kind === "bus") return makeBus({ plate: plate(kind), route: rnd() < 0.5 ? "SECTOR V · HOWRAH STN" : "KARUNAMOYEE · ESPLANADE", livery: rnd() < 0.6 ? ["#f2f2ee", "#1c4f9c", "#c8202a"] : ["#e9d34a", "#2a6a3a", "#a32020"] });
     if (kind === "bike") {
       // the everyday mix: commuters, the older spoked kind, gearless scooters
       const design = pickW([["commuter", 5], ["classic", 2], ["scooter", 4]]);
@@ -103,8 +105,9 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
       const cols = BICYCLE_DESIGNS[design].colors;
       return makeTrafficBicycle({ design, color: cols[(rnd() * cols.length) | 0] });
     }
-    if (kind === "taxi") return makeCar("taxi", "#e8b90f", { plate: plate(kind) });
-    return makeCar(kind, color, { plate: plate(kind) });
+    // cars, taxis, autos and buses are the real Indian models only: the old procedural boxes are gone, and
+    // until a model has loaded (or if it failed to) nothing of that kind is spawned (build returns null)
+    return makeRealCar(kind, kind === "taxi" ? "#e8b90f" : color, rnd);
   }
   function seatRiders(v) {
     v.needsRider = false;
@@ -265,6 +268,96 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
   ];
   const slots = { near: PARK_SLOTS.near.map((x) => ({ x, taken: null })), far: PARK_SLOTS.far.map((x) => ({ x, taken: null })) };
   const qY = new THREE.Quaternion();
+  // collider handle -> vehicle, so the player's ray or contact can tell a car from a wall
+  const colliders = new Map();
+  // fender-benders: see maybeCrash. crashes keeps the recent ones ({a, b, t, x, road, done}).
+  const crashes = [];
+  let crashCount = 0;
+  let crashCheck = 2;
+  let forceNext = false;
+  const CRASH_KINDS = ["hatch", "sedan", "suv", "taxi", "auto", "bus"];
+  function stopCrash(veh, dur) {
+    veh.state = "crash";
+    veh.v = 0;
+    veh.ind = 0;
+    veh.stuckT = 0;
+    veh.hazard = true;
+    veh.crashT = dur;
+    veh.slot = null;
+    veh.stopX = null;
+    veh.latTarget = veh.lat;
+  }
+  // The player standing in front of a car for a long time: its driver gets out and has a word (people.js runs it as a
+  // crash with one vehicle), then gets back in once the way is clear.
+  function watchBlocked(dt) {
+    if (!eye) return;
+    for (const veh of all) {
+      if (veh.state === "crash" && veh.blockC) {
+        const c = veh.blockC;
+        // still in the way (in front of the car, within a lane's width)?
+        const ahead = (eye[0] - veh.x) * veh.dir - veh.L / 2;
+        const inWay = ahead > -0.5 && ahead < 7 && Math.abs(eye[1] - veh.lat) < veh.W / 2 + 1.3;
+        if (!c.ending) {
+          c.clear = inWay ? 0 : (c.clear || 0) + dt;
+          if (c.clear > 1.0 || veh.crashT < 6) c.ending = true; // the way is clear: the driver goes back to the car
+        } else {
+          // it waits for the driver to be seated again (a safety limit in case they never arrive)
+          c.endT = (c.endT || 0) + dt;
+          if (c.seated || c.endT > 14) {
+            veh.crashT = Math.min(veh.crashT, 0.01);
+            veh.blockC = null;
+            veh.carDoor = 0;
+            veh.blockCool = 60; // not again for a while
+          }
+        }
+        continue;
+      }
+      veh.blockCool = Math.max(0, (veh.blockCool || 0) - dt);
+      if (veh.state !== "drive" || !CRASH_KINDS.includes(veh.kind) || veh.kind === "bus" || veh.v > 0.3 || veh.blockCool > 0) {
+        veh.blockT = 0;
+        continue;
+      }
+      const ahead = (eye[0] - veh.x) * veh.dir - veh.L / 2;
+      const inPath = ahead > -0.2 && ahead < 4.5 && Math.abs(eye[1] - veh.lat) < veh.W / 2 + 0.6;
+      veh.blockT = inPath ? (veh.blockT || 0) + dt : 0;
+      if (veh.blockT > 9 && !crashes.some((c) => !c.done && c.road === veh.road && Math.abs(c.x - veh.x) < 25)) {
+        stopCrash(veh, 120);
+        const c = { a: veh, b: null, t: clock, x: veh.x, road: veh.road, v: 0, done: false, block: true };
+        veh.blockC = c;
+        crashes.push(c);
+        while (crashes.length > 30) crashes.shift();
+      }
+    }
+  }
+  function maybeCrash(dt) {
+    crashCheck -= dt;
+    if (crashCheck > 0) return;
+    crashCheck = 0.5;
+    const cands = [];
+    for (const f of all) {
+      if (f.state !== "drive" || !CRASH_KINDS.includes(f.kind) || (!forceNext && f.v >= 4)) continue;
+      for (const l of all) {
+        if (l === f || l.road !== f.road || l.state !== "drive" || (!forceNext && l.v >= 4)) continue;
+        const dx = (l.x - f.x) * f.dir;
+        if (dx <= 0 || Math.abs(f.lat - l.lat) > ((f.W + l.W) / 2) * 0.8) continue;
+        if (dx - (f.L + l.L) / 2 < (forceNext ? 40 : 8)) cands.push([f, l]);
+      }
+    }
+    if (!cands.length) return;
+    if (!forceNext && rnd() > 0.5 / 300) return; // about one eligible moment in 5 simulated minutes
+    const [f, l] = cands[(rnd() * cands.length) | 0];
+    if (crashes.some((c) => !c.done && c.road === f.road && Math.abs(c.x - f.x) < 40)) return;
+    forceNext = false;
+    f.x = l.x - l.dir * ((f.L + l.L) / 2 + 0.03); // touching: a bump at about 1.5 m/s
+    f.lat = l.lat;
+    f.latTarget = l.latTarget = l.lat;
+    const dur = range(45, 75);
+    stopCrash(f, dur);
+    stopCrash(l, dur);
+    crashCount++;
+    crashes.push({ a: l, b: f, t: clock, x: (f.x + l.x) / 2, road: f.road, v: 1.5, done: false });
+    while (crashes.length > 30) crashes.shift();
+  }
   const UP = new THREE.Vector3(0, 1, 0);
 
   function spawn(kind, road, x, { state = "drive", lane, slot, v } = {}) {
@@ -272,7 +365,9 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
     const T = TYPES[kind];
     const list = (pool[kind] ||= []);
     const mesh = list.pop() || build(kind);
+    if (!mesh) return null; // no model for this kind (yet)
     const u = mesh.userData;
+    if (u.occupants) u.occupants.refill(rnd); // a new set of passengers for this run
     if (kind !== "taxi" && kind !== "auto" && kind !== "bus" && u.paint && !u.riderSeated) u.paint.color.set(pickW(COLOURS));
     const veh = {
       kind,
@@ -311,18 +406,20 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
     veh.lane = lane ?? veh.prefLane;
     veh.kerb = kind === "cycle" ? -0.5 * Math.sign(R.lanes[1] - R.lanes[0]) : 0; // cyclists keep to the kerb side of their lane
     veh.lat = veh.latTarget = state === "parked" ? R.park : R.lanes[veh.lane] + veh.kerb + (kind === "bike" ? range(-0.6, 0.6) : range(-0.12, 0.12));
-    if (state === "drive" && kind !== "bus" && kind !== "auto" && kind !== "bike" && kind !== "cycle" && rnd() < 0.14) veh.wantsPark = true;
+    // (no car pulls in to park: see above)
     if (veh.needsRider && kit) seatRiders(veh);
     if ((u.rider || u.live) && kit) u.riderSeated = true;
     // a body for the physics, so nobody walks or rides through a vehicle
     veh.body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
-    world.createCollider(RAPIER.ColliderDesc.cuboid(veh.L / 2, veh.H / 2, Math.max(0.3, veh.W / 2)).setTranslation(0, veh.H / 2, 0), veh.body);
+    veh.collider = world.createCollider(RAPIER.ColliderDesc.cuboid(veh.L / 2, veh.H / 2, Math.max(0.3, veh.W / 2)).setTranslation(0, veh.H / 2, 0), veh.body);
+    colliders.set(veh.collider.handle, veh);
     scene.add(mesh);
     place(veh, 0);
     all.push(veh);
     return veh;
   }
   function despawn(veh) {
+    if (veh.collider) colliders.delete(veh.collider.handle);
     scene.remove(veh.mesh);
     world.removeRigidBody(veh.body);
     if (veh.slot) veh.slot.taken = null;
@@ -330,28 +427,34 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
     (pool[veh.kind] ||= []).push(veh.mesh);
   }
 
-  // parked cars at the start: most spaces are taken
-  for (const road of ["near", "far"]) {
+  // Nothing is left parked on the street: every car keeps moving (Captain's call, 15 Nov). The
+  // parking code below stays for a later choice, but no car is parked at the start or pulls in.
+  for (const road of []) {
     for (const slot of slots[road]) {
       if (rnd() < 0.62) {
         const kind = pickW([["hatch", 4], ["sedan", 3], ["suv", 3], ["taxi", 1]]);
         const v = spawn(kind, road, slot.x, { state: "parked", slot });
+        if (!v) continue;
         slot.taken = v;
         v.timer = range(15, 400);
       }
     }
   }
-  // traffic already on the road
-  for (const road of ["near", "far"]) {
-    const R = ROADS[road];
-    for (let i = 0; i < MAX_MOVING / 2 - 2; i++) {
-      const x = R.from + (R.to - R.from) * ((i + range(0.1, 0.8)) / (MAX_MOVING / 2));
-      const kind = pickW(Object.entries(TYPES).map(([k, t]) => [k, t.w]));
-      if (all.some((o) => o.road === road && Math.abs(o.x - x) < 14)) continue;
-      const v = spawn(kind, road, x, { v: 6 });
-      v.v = v.v0 * 0.7;
+  // traffic already on the road: made once the car models have loaded (otherwise the first cars would all be the
+  // procedural ones, and the pool would keep reusing them)
+  vehiclesReady().then(() => {
+    for (const road of ["near", "far"]) {
+      const R = ROADS[road];
+      for (let i = 0; i < MAX_MOVING / 2 - 2; i++) {
+        const x = R.from + (R.to - R.from) * ((i + range(0.1, 0.8)) / (MAX_MOVING / 2));
+        const kind = pickW(Object.entries(TYPES).map(([k, t]) => [k, t.w]));
+        if (all.some((o) => o.road === road && Math.abs(o.x - x) < 14)) continue;
+        const v = spawn(kind, road, x, { v: 6 });
+        if (!v) continue;
+        v.v = v.v0 * 0.7;
+      }
     }
-  }
+  });
 
   // ---------- reading the road ----------
   const overlap = (a, latB, wB, margin) => Math.min(Math.abs(a.lat - latB), Math.abs(a.latTarget - latB)) < (a.W + wB) / 2 + margin;
@@ -432,6 +535,19 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
     const R = ROADS[veh.road];
     veh.cooldown -= dt;
     veh.think -= dt;
+    if (veh.state === "crash") {
+      veh.v = 0;
+      veh.ind = 0;
+      veh.brake = 1;
+      veh.latVel = 0;
+      veh.crashT -= dt;
+      if (veh.crashT <= 0) {
+        veh.state = "drive";
+        veh.hazard = false;
+        veh.cooldown = 3;
+      }
+      return;
+    }
     if (veh.state === "parked") {
       veh.v = 0;
       veh.timer -= dt;
@@ -536,7 +652,12 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
       if (ahead < 18) veh.latTarget = veh.kind === "bus" ? R.lanes[0] + 0.5 * Math.sign(R.lanes[1] - R.lanes[0]) : R.lanes[0] - 0.4 * Math.sign(R.lanes[1] - R.lanes[0]); // tuck in to the kerb
       if ((veh.stopX - veh.x) * veh.dir - veh.L / 2 < 1.4 && veh.v < 0.1) {
         veh.stopFor -= dt;
-        if (veh.stopFor < 0) {
+        veh.atStop = true;
+        // it waits while anyone is still getting on or off (see people.js), up to half a minute more
+        if (veh.stopFor < 0 && (!(veh.boarding > 0) || veh.stopFor < -30)) {
+          veh.atStop = false;
+          veh.boarding = 0;
+          veh.unloaded = false;
           veh.stopX = null;
           veh.state = "leaving";
           veh.ind = 1;
@@ -549,15 +670,29 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
 
     // speed: keep the gap to whatever is ahead
     const { gap, vl, what } = leaderOf(veh, people);
-    if (veh.v < 0.2 && what && what !== "stop" && (what.state === "parked" || what.state === "static")) veh.stuckT = (veh.stuckT || 0) + dt;
+    if (veh.v < 0.2 && what && what !== "stop" && (what.state === "parked" || what.state === "static" || what.state === "crash")) veh.stuckT = (veh.stuckT || 0) + dt;
     else veh.stuckT = 0;
-    if (veh.stuckT > 6 && veh.state === "drive") {
-      veh.stuckT = 0;
-      veh.lane = 1;
-      veh.latTarget = R.lanes[1];
+    if (veh.stuckT > (what?.state === "crash" ? 3 : 6) && veh.state === "drive") {
+      if (what.state === "crash") {
+        // go round the wreck when the other lane is clear
+        if (laneFree(veh, R.lanes[1 - veh.lane], people)) {
+          veh.stuckT = 0;
+          veh.lane = 1 - veh.lane;
+          veh.latTarget = R.lanes[veh.lane];
+          veh.ind = Math.sign((veh.latTarget - veh.lat) * veh.dir);
+        }
+      } else {
+        veh.stuckT = 0;
+        veh.lane = 1;
+        veh.latTarget = R.lanes[1];
+      }
     }
     let acc = idm(veh, gap, vl, v0At(veh));
     acc = Math.max(-7.5, Math.min(veh.aMax, acc));
+    if (veh.hardBrake > 0) {
+      veh.hardBrake -= dt; // someone stepped right in front: stand on the brake
+      acc = -9;
+    }
     const vBefore = veh.v;
     veh.v = Math.max(0, veh.v + acc * dt);
     if (gap < 0.25) veh.v = 0;
@@ -603,21 +738,60 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
     veh.wheel -= (veh.v * dt) / u.wheelR;
     u.alloy.map.rotation = veh.wheel;
     if (u.roll) u.roll(veh.v * dt);
+    if (u.occupants && dt > 0 && kit && eye) {
+      // real seated people for vehicles near the viewer (a few made per frame); the blocky stand-ins everywhere else
+      const near = Math.hypot(veh.x - eye[0], veh.lat - eye[1]) < 60;
+      u.occupants.setNear(near, (slot) => { seatBudget--; return seatCharacter(veh.mesh, slot, kit, rnd); }, Math.max(0, seatBudget));
+    }
+    if (u.door) {
+      // the bus door opens when it has stopped for people and shuts before it moves off; a car's driver door while its driver
+      // gets out or in (people.js sets veh.carDoor)
+      const open = u.door.kind === "bus" ? (veh.atStop && veh.v < 0.1 ? 1 : 0) : veh.carDoor ? 1 : 0;
+      veh.doorK = (veh.doorK || 0) + (open - (veh.doorK || 0)) * Math.min(1, dt * (u.door.kind === "bus" ? 2.2 : 2.8));
+      u.door.set(veh.doorK);
+    }
     if (u.live && u.cyclist && dt > 0 && (!eye || Math.hypot(veh.x - eye[0], veh.lat - eye[1]) < 70)) liveRider(veh, dt);
     u.tail.emissiveIntensity = veh.brake ? 2.6 : 0.3 + night * 0.9;
     const blink = Math.sin(t * 9.4) > 0 ? 2.8 : 0;
-    u.indL.emissiveIntensity = veh.ind < 0 || (veh.state === "parked" && veh.hazard) ? blink : 0;
-    u.indR.emissiveIntensity = veh.ind > 0 ? blink : 0;
+    u.indL.emissiveIntensity = veh.ind < 0 || veh.hazard ? blink : 0;
+    u.indR.emissiveIntensity = veh.ind > 0 || veh.hazard ? blink : 0;
     qY.setFromAxisAngle(UP, phi + veh.yaw);
     veh.body.setNextKinematicTranslation({ x: wx, y: 0, z: wz });
     veh.body.setNextKinematicRotation(qY);
   }
 
   let spawnTimer = { near: 1, far: 2 };
+  let struck = null; // a moving vehicle has run into the player (see update)
   let clock = 0;
 
   return {
     vehicles: all,
+    get playerStruck() {
+      return struck;
+    },
+    set playerStruck(v) {
+      struck = v;
+    },
+    crashes,
+    get crashCount() {
+      return crashCount;
+    },
+    isVehicleCollider: (c) => colliders.has(c && c.handle !== undefined ? c.handle : c),
+    vehicleOfCollider: (c) => colliders.get(c && c.handle !== undefined ? c.handle : c) || null,
+    /** debug: the next eligible follower rear-ends its leader at once */
+    forceCrash() {
+      forceNext = true;
+      crashCheck = 0;
+    },
+    /** the player rode into this vehicle: it stops, hazards on, its driver gets out */
+    crashWithPlayer(veh, dur = range(20, 30)) {
+      if (!veh || veh.state === "crash") return null;
+      stopCrash(veh, dur);
+      crashCount++;
+      const c = { a: veh, b: null, t: clock, x: veh.x, road: veh.road, player: true, done: false };
+      crashes.push(c);
+      return c;
+    },
     /** Can someone walk across this carriageway at x for the next `seconds`? */
     clearToCross(road, x, seconds = 5) {
       for (const veh of all) {
@@ -638,6 +812,8 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
      * people: [{x, z, vx, w}] in the street's frame: anyone standing or walking on a carriageway.
      */
     signals,
+    stops: STOPS,
+    roads: ROADS,
     /** k: 0 by day .. 1 at night (lamps on). flow: traffic for the hour, 1 = normal daytime. */
     setTime(k, flow = 1) {
       night = k;
@@ -652,22 +828,41 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
       const steps = Math.ceil(dt / 0.05);
       const h = dt / steps;
       for (let i = 0; i < steps; i++) for (const veh of [...all]) drive(veh, h, people, t);
+      maybeCrash(dt);
+      watchBlocked(dt);
+      for (const c of crashes) if (!c.done && ![c.a, c.b].some((v) => v && v.state === "crash" && all.includes(v))) c.done = true;
+      seatBudget = 3;
       for (const veh of [...all]) {
         const R = ROADS[veh.road];
         if ((veh.x - R.to) * veh.dir > 0) despawn(veh);
         else place(veh, dt, clock);
       }
+      // a moving vehicle that reaches the player (who is slower): the main program turns it into a crash
+      if (viewer && !struck) {
+        for (const veh of all) {
+          if (veh.state === "parked" || veh.state === "crash" || veh.v < 3) continue;
+          const gx = Math.max(0, Math.abs(viewer[0] - veh.x) - veh.L / 2);
+          const gz = Math.max(0, Math.abs(viewer[1] - veh.lat) - veh.W / 2);
+          if (Math.hypot(gx, gz) < 0.2) {
+            struck = { veh, v: veh.v };
+            break;
+          }
+        }
+      }
       // new arrivals at the ends of the street
       for (const road of ["near", "far"]) {
         spawnTimer[road] -= dt;
         if (spawnTimer[road] > 0) continue;
-        spawnTimer[road] = (range(1.6, 4.8) * (quality === "low" ? 1.6 : 1)) / Math.max(0.08, busy);
+        spawnTimer[road] = (range(1.4, 4.4) * (quality === "low" ? 1.6 : 1)) / Math.max(0.06, busy);
         const moving = all.filter((v) => v.state !== "parked").length;
-        if (moving >= MAX_MOVING * Math.min(1, 0.25 + busy * 0.75)) continue;
+        // how many vehicles the street holds at this hour: full at the office rush, a sixth of that
+        // in the small hours
+        if (moving >= MAX_MOVING * Math.max(0.12, Math.min(1, busy / 1.45))) continue;
         const R = ROADS[road];
         if (all.some((o) => o.road === road && Math.abs(o.x - R.from) < 16)) continue;
         const kind = pickW(Object.entries(TYPES).map(([k, ty]) => [k, ty.w]));
         const v = spawn(kind, road, R.from);
+        if (!v) continue;
         v.v = v.v0 * 0.8;
       }
     },

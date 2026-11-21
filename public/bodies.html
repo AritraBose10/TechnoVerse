@@ -5,7 +5,7 @@
 <script type="module">
 // Test page: every crowd body side by side. /bodies.html?from=0&n=9&z=1 (z=1: faces close up)
 import * as THREE from "three";
-import { loadCrowdBody, makeCharacter, EXPRESSION_NAMES } from "/character.js";
+import { loadCrowdBody, makeCharacter, EXPRESSION_NAMES, varyBody } from "/character.js";
 const q = new URLSearchParams(location.search);
 const from = +(q.get("from") || 0), n = +(q.get("n") || 9), close = q.get("z") === "1";
 const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("c"), antialias: true });
@@ -21,14 +21,21 @@ scene.add(sun);
 // ?expr=K: one body (number `from`) wearing expressions K, K+1, ...
 const exprFrom = q.has("expr") ? +q.get("expr") : -1;
 const all = await (await fetch("/models/people/index.json")).json();
-const list = exprFrom >= 0 ? Array.from({ length: n }, () => all[from]) : all.slice(from, from + n);
+// ?vary=1: one body (number `from`) dressed n different ways
+const vary = q.get("vary") === "1";
+const list = exprFrom >= 0 || vary ? Array.from({ length: n }, () => all[from]) : all.slice(from, from + n);
 const gap = close ? 0.42 : 0.8;
 const camera = new THREE.PerspectiveCamera(close ? 11 : 30, innerWidth / innerHeight, 0.1, 50);
 const chars = [];
 let sharedKit = null;
 for (let i = 0; i < list.length; i++) {
-  const kit = exprFrom >= 0 ? (sharedKit ||= await loadCrowdBody(renderer, "/models/people/" + list[i].file)) : await loadCrowdBody(renderer, "/models/people/" + list[i].file);
+  const kit = exprFrom >= 0 || vary ? (sharedKit ||= await loadCrowdBody(renderer, "/models/people/" + list[i].file)) : await loadCrowdBody(renderer, "/models/people/" + list[i].file);
   const c = makeCharacter(kit, {});
+  if (vary && i > 0) {
+    const TOPS = [[1, 1, 1], [0.78, 0.86, 1], [1, 0.84, 0.86], [0.86, 1, 0.88], [1, 0.95, 0.78], [0.72, 0.74, 0.8], [1, 0.7, 0.6], [0.66, 0.78, 0.95], [0.9, 0.8, 1]];
+    const BOTTOMS = [[1, 1, 1], [0.6, 0.65, 0.85], [0.55, 0.55, 0.58], [1.05, 0.95, 0.78], [0.8, 0.85, 1], [0.7, 0.62, 0.55]];
+    varyBody(c, { hue: ((i * 0.618034) % 1) * Math.PI * 2, sat: 0.75 + ((i * 0.381966) % 1) * 0.45, top: TOPS[i % TOPS.length], bottom: BOTTOMS[Math.floor(i / 3) % BOTTOMS.length] });
+  }
   const g = new THREE.Group();
   g.position.x = (i - (list.length - 1) / 2) * gap;
   g.rotation.y = Math.PI; // face the camera (+z)

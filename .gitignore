@@ -12,3 +12,4 @@ tools/esri-tiles.tgz
 # raw downloads before conversion (see tools/models/README)
 assets-src/
 *.bundle
+_backup_pre_merge/
