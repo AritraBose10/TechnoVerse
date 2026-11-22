@@ -12,7 +12,9 @@ Captain approved, bounded by:
 - **North-west:** Sector V Metro station (Purple/Orange line, Salt Lake Sector V).
 - **South-west:** College More (the junction south of the university).
 - **West:** the Eastern Metropolitan Bypass.
-- **East:** New Town Road (the arterial along Sector V's east side toward New Town).
+- **East:** New Town Road = OSM `way/325486011` (Action Area I) and the ways connected to it that carry the same name,
+  between the north and south edges. NOT `way/51765315` (Chandakanthal Beria), `way/1518725399` or `way/1409753159`
+  (Action Area III). Decided by Captain on 2026-11-22.
 
 Every road, building and landmark inside it must come from real data, connect the way it really
 does, and keep the game loading and running within the performance budget below.
@@ -47,8 +49,8 @@ does, and keep the game loading and running within the performance budget below.
    Sector V metro station (railway=station / public_transport=station, name contains "Sector V"
    or "Sector-V"), the College More junction (place or junction named "College More"; if it is
    not mapped, the intersection that local maps label College More and say how you found it),
-   the way(s) named "Eastern Metropolitan Bypass" (or `ref`), and the way(s) named "New Town Road"
-   (also check `alt_name`/`old_name`; if several roads match, stop and ask under Questions).
+   the way(s) named "Eastern Metropolitan Bypass" (or `ref`), and for the east edge `way/325486011` plus its
+   same-named connected chain (decided; do not use the other "New Town Road" ways).
    Build a closed polygon that follows the road centrelines between those points, add a 30 m
    margin, and save it to `tools/sector-v-boundary.json` with the OSM ids used for each edge.
 2. **Fetch.** Change the Overpass query from `around:500` to the polygon's bounding box (or
@@ -79,18 +81,22 @@ does, and keep the game loading and running within the performance budget below.
     More, Eastern Metropolitan Bypass, New Town Road, plus every `name` that was in the old
     campus.json's labels.
   - **Inside the boundary:** no item centre outside the polygon plus the margin.
-- **Performance budget** (measured with `npm run smoke` and `__tiu.renderInfo()` from the gate
-  view; numbers before and after recorded in Result):
-  - `public/campus.json` ≤ 3 MB (≤ 800 KB gzipped).
-  - Buildings ≤ 4,000; roads ≤ 1,200 segments.
-  - Game load time (smoke test, `?q=low`) at most 1.5 × today's.
-  - From the gate view: draw calls ≤ 1.15 × today's and triangles ≤ 1.3 × today's (the 100 m
-    chunking in world.js should keep the far city cheap). If the budget can't be met without
-    changing `world.js`, stop and say what is needed under Questions.
+- **Performance budget** (Captain chose to keep the Bypass as the west edge, so the map takes in most of Salt
+  Lake; the budget is sized for that. Measure with `npm run smoke` and `__tiu.renderInfo()` from the gate view, and
+  record the numbers before and after in Result):
+  - `public/campus.json` ≤ 8 MB (≤ 2 MB gzipped). If it would be bigger, split it into tiles
+    (`public/campus/<tx>_<tz>.json`, 500 m tiles, plus an index) and say so in Result. Claude wires up tile loading.
+  - Buildings ≤ 15,000; roads ≤ 5,000 segments.
+  - Game load time (smoke test, `?q=low`) at most 2 × today's.
+  - From the gate view: draw calls ≤ 1.3 × today's and triangles ≤ 1.5 × today's. If the budget can't be met without
+    changing `world.js` (likely at this size: distance culling and building LOD), don't stop: finish the data work,
+    record the measured numbers, and write under Questions exactly what `world.js` needs.
 - The old area looks the same: a screenshot from the gate view before and after, side by side in
   `tools/validate-out/`, with no building or road within 600 m of the university missing or moved.
 
 ## Questions
+- **Answered 2026-11-22 (Captain):** east edge is `way/325486011` (Action Area I) and its same-named connected chain.
+  West edge stays the Eastern Metropolitan Bypass; the budget above is enlarged for it.
 - `world.js` sizes the world with `WORLD_HALF = 615`; the new map is larger, so the ground, the
   boundary walls and possibly the chunking and culling need changing there. That is Claude's file.
   Write the new extent (x/z min/max in the local frame) here and Claude will update `world.js`.
