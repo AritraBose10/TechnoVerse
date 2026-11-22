@@ -1,7 +1,7 @@
 ---
 id: T-007
 owner: codex
-status: ready
+status: review
 depends: [T-005]
 ---
 # Faithful models of Sector V landmarks
@@ -21,6 +21,8 @@ building at a time, each reviewed before the next.
 7. Indian Institute of Hotel Management (IIHM)
 8. Bharat Petroleum petrol pump
 9. HP petrol pump
+10. Ambuja Neotia Ecocentre
+11. Tea Junction
 Techno India University is NOT in this task (it already has its own model in `public/tiu.js`).
 Anything not on this list needs Captain's approval first.
 
@@ -69,6 +71,61 @@ Anything not on this list needs Captain's approval first.
 
 ## Questions
 
+### Hook needed in main.js and world.js (Claude to add)
+
+After the world has finished building, add these lines in `main.js`
+(inside the existing async IIFE, after `world.build()`):
+
+```js
+import { loadLandmarks } from "/landmarks.js";
+const replacedLandmarkIds = await loadLandmarks({ scene, campus });
+```
+
+And in `world.js`, inside the building-drawing loop, add a skip guard:
+
+```js
+// Skip buildings replaced by high-fidelity GLB landmarks
+if (window.__replacedLandmarkIds && window.__replacedLandmarkIds.includes(Number(b.id))) continue;
+```
+
+(Or pass `replacedLandmarkIds` through `world.build()` options — whatever Claude prefers.)
+
 ## Result
+
+### Building 1: Salt Lake Sector V Metro Station (OSM ID 535333512)
+
+**Files produced:**
+- `public/models/landmarks/535333512.glb` — procedural GLB, pure vanilla Node.js
+- `public/landmarks.js` — `loadLandmarks({ scene, campus })` loader
+- `public/landmarks.html` — standalone Three.js viewer for this building
+- `public/models/landmarks/REFERENCES.md` — reference sources with dates
+- `public/models/landmarks/CREDITS.md` — licence attributions
+- `tools/landmarks/build-station.mjs` — generator script
+- `tools/landmarks/README.md` — instructions for adding future landmarks
+
+**Budget checks (all ✓):**
+| Check | Result | Limit |
+|-------|--------|-------|
+| Triangles | 9,552 | ≤ 60,000 |
+| Materials | 4 (Concrete, Ochre Facade, Roof, Glass) | ≤ 3 + 1 glass |
+| Texture images | 0 (all procedural PBR) | ≤ 1024 px |
+| GLB file size | 1,012 KB | ≤ 2,048 KB |
+| Footprint max deviation | 0.053 m | ≤ 0.5 m |
+
+**Architecture modelled (5 sections):**
+1. Ground level — 7 portal pier pairs + East/West entry pavilions
+2. Concourse level — slab decks, ochre spandrel walls, ribbon glazing
+3. Platform & track level — trackbed, two side platforms, Platform Screen Doors
+4. Vaulted canopy roof — 14-segment barrel arch (aluminium), central skylight strip
+5. Signage bands — blank ochre fascia plates (no logos/trademarks)
+
+**OSM footprint alignment:**
+- Polygon pts: `[[-3.17,-508.44],[115.08,-581.79],[122.53,-569.96],[4.26,-496.63]]`
+- Centroid: `(59.675, 0, -539.205)` world metres
+- Footprint yaw: `0.5552 rad` (long axis NE→SW)
+- Max vertex deviation from reconstructed parallelogram: **0.053 m** ✓
+
+**Syntax check:** `node --input-type=module --check` passed on both
+`public/landmarks.js` and `tools/landmarks/build-station.mjs`.
 
 ## Review

@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>T-007 Landmark Viewer — Salt Lake Sector V Metro Station</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #111; color: #eee; font-family: monospace; overflow: hidden; }
+    canvas { display: block; }
+    #hud {
+      position: absolute; top: 10px; left: 10px;
+      background: rgba(0,0,0,.55); padding: 8px 12px;
+      border-radius: 6px; font-size: 12px; line-height: 1.6;
+      pointer-events: none;
+    }
+    #views {
+      position: absolute; bottom: 10px; left: 10px;
+      display: flex; gap: 8px;
+    }
+    #views button {
+      background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.25);
+      color: #eee; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;
+    }
+    #views button:hover { background: rgba(255,255,255,.25); }
+  </style>
+</head>
+<body>
+<div id="hud">
+  <b>T-007 — Salt Lake Sector V Metro Station</b><br>
+  OSM ID: 535333512 &nbsp;|&nbsp; L=139.15 m &nbsp;W=13.95 m &nbsp;H=18.5 m<br>
+  <span id="info">Loading…</span>
+</div>
+<div id="views">
+  <button onclick="setView('south')">South elevation</button>
+  <button onclick="setView('north')">North elevation</button>
+  <button onclick="setView('top')">Top plan</button>
+  <button onclick="setView('iso')">Isometric</button>
+</div>
+
+<script type="module">
+import * as THREE from "/vendor/three.module.js";
+import { OrbitControls } from "/vendor/jsm/controls/OrbitControls.js";
+import { GLTFLoader }    from "/vendor/jsm/loaders/GLTFLoader.js";
+import { loadLandmarks } from "/landmarks.js";
+
+// --- Scene setup ---
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1f2e);
+scene.fog = new THREE.Fog(0x1a1f2e, 400, 900);
+
+// Camera
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.5, 2000);
+camera.position.set(200, 80, 200);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(60, 9, -540);
+controls.update();
+
+// Ground plane
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(600, 600),
+  new THREE.MeshLambertMaterial({ color: 0x2a2e38 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.position.set(60, 0, -540);
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Grid helper centred on the building footprint
+const grid = new THREE.GridHelper(300, 30, 0x333344, 0x222233);
+grid.position.set(60, 0.05, -540);
+scene.add(grid);
+
+// Footprint outline — OSM polygon in world metres (from campus.json)
+const fpPts = [[-3.17,-508.44],[115.08,-581.79],[122.53,-569.96],[4.26,-496.63]];
+const fpShape = new THREE.BufferGeometry().setFromPoints(
+  [...fpPts, fpPts[0]].map(([x,z]) => new THREE.Vector3(x, 0.1, z))
+);
+scene.add(new THREE.Line(fpShape, new THREE.LineBasicMaterial({ color: 0x00ffaa })));
+
+// Lighting
+const sun = new THREE.DirectionalLight(0xfff8e7, 1.6);
+sun.position.set(300, 500, -200);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.near = 10;
+sun.shadow.camera.far = 1500;
+sun.shadow.camera.left = -300;
+sun.shadow.camera.right = 300;
+sun.shadow.camera.top = 300;
+sun.shadow.camera.bottom = -300;
+scene.add(sun);
+scene.add(new THREE.AmbientLight(0x9bb0d4, 0.55));
+scene.add(new THREE.HemisphereLight(0x7ec8e3, 0x474747, 0.4));
+
+// Fake campus.json with just the one building entry
+const campus = {
+  buildings: [
+    {
+      id: 535333512,
+      pts: fpPts,
+      floors: 4,
+      style: "ochre"
+    }
+  ]
+};
+
+// Load the landmark GLB
+const info = document.getElementById("info");
+const replaced = await loadLandmarks({ scene, campus });
+if (replaced.length > 0) {
+  info.textContent = `Model loaded ✓  OSM IDs replaced: [${replaced.join(", ")}]`;
+  window.__done = true; // "Done when" smoke-test hook
+} else {
+  info.textContent = "⚠ No landmark loaded — check console.";
+}
+
+// View presets
+window.setView = function(name) {
+  const C = camera, O = controls;
+  switch (name) {
+    case "south": C.position.set(60, 25, -380); O.target.set(60, 9, -540); break;
+    case "north": C.position.set(60, 25, -700); O.target.set(60, 9, -540); break;
+    case "top":   C.position.set(60, 250,  -540); O.target.set(60, 0, -540); break;
+    case "iso":   C.position.set(220, 100, -400); O.target.set(60, 9, -540); break;
+  }
+  O.update();
+};
+
+// Render loop
+(function loop() {
+  requestAnimationFrame(loop);
+  controls.update();
+  renderer.render(scene, camera);
+})();
+
+window.addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
