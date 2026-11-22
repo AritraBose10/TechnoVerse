@@ -1,7 +1,9 @@
+import { runInstanceCull } from "/instcull.js";
 import * as THREE from "three";
 import RAPIER from "/vendor/rapier.es.js";
 import { buildWorld } from "/world.js";
-import { loadCharacterKit, loadCrowdBody, loadPolo, makeCharacter } from "/character.js";
+import { createMinimap } from "/minimap.js";
+import { loadCharacterKit, loadCrowdBody, loadAvatarBody, loadPolo, makeCharacter } from "/character.js";
 import { vehiclesReady } from "/vehicles.js";
 import { buildBicycle, newRide, stepBike, BICYCLE_KINDS } from "/bicycle.js";
 import { buildDaylight } from "/daylight.js";
@@ -123,6 +125,7 @@ const world = new RAPIER.World({ x: 0, y: -GRAVITY, z: 0 });
 world.timestep = STEP;
 const campus = await (await fetch("/campus.json")).json();
 const worldInfo = buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel });
+const minimap = createMinimap({ campus, getMe: () => me, getPlayers: () => players, getCamYaw: () => camYaw });
 const { places, props, focus, entranceYaw, animate: animateWorld, captureReflections } = worldInfo;
 // The walking navmesh and Detour crowd (nav.js): built from the fixed colliders in the background; the
 // people wait for it. ?nav=1 also shows the mesh as a green overlay (debug view). Handle: __tiu.nav
@@ -387,12 +390,20 @@ const playerKitLoading = loadCrowdBody(renderer, "/models/people/Male_Adult_16.g
   console.warn("Could not load the player body; using the older one.", err);
   return null;
 });
+// The TechnoVerse avatars (one per polo). The Reboot shirt has no avatar yet, so it keeps the older body.
+const AVATARS = { tiu: "/models/avatars/avatar_tiu.glb", sof: "/models/avatars/avatar_sof.glb" };
+const avatarKits = {};
+// Off by default: the crowd's Rocketbox bodies look better at game distance and cost less. Try the avatars with ?avatar=1
+const USE_AVATARS = new URLSearchParams(location.search).has("avatar");
+const avatarKit = (shirt) =>
+  USE_AVATARS && AVATARS[shirt] ? (avatarKits[shirt] ||= loadAvatarBody(renderer, AVATARS[shirt]).catch((err) => { console.warn("Could not load the avatar", shirt, err); return null; })) : Promise.resolve(null);
+const avatarLoading = avatarKit("tiu"); // the first screen's default
 async function attachCharacter(a, mine = false) {
-  const kit = (await playerKitLoading) || (await kitLoading);
+  const kit = (await avatarKit(a.shirt)) || (await playerKitLoading) || (await kitLoading);
   if (!kit || a.removed) return;
   const polo = kit.kind === "rocketbox" ? await loadPolo(a.shirt) : null;
   if (a.removed) return;
-  const c = makeCharacter(kit, { uniform: true, shirt: a.shirt, polo, gear: [...(polo ? [] : [{ kind: "polocollar", color: a.shirt === "reboot" ? "#141416" : "#14203f" }]), { kind: "helmet", color: mine ? "#1b1d22" : ["#1b1d22", "#c41e24", "#e8e8e8", "#1e3a8a"][a.id.length % 4] }] });
+  const c = makeCharacter(kit, { uniform: true, shirt: a.shirt, polo, gear: [...(polo || kit.kind === "tv" ? [] : [{ kind: "polocollar", color: a.shirt === "reboot" ? "#141416" : "#14203f" }]), { kind: "helmet", color: mine ? "#1b1d22" : ["#1b1d22", "#c41e24", "#e8e8e8", "#1e3a8a"][a.id.length % 4] }] });
   c.showGear("helmet", false); // worn on a motorcycle
   a.char = c;
   if (mine) {
@@ -527,12 +538,43 @@ let ws = null;
 let chatRange = 15;
 const sendMsg = (msg) => ws && ws.readyState === 1 && ws.send(JSON.stringify(msg));
 
+// ---------- Entering loader (between "Enter campus" and spawning) ----------
+let joining = false;
+let enTimer = 0;
+const EN_STAGES = ["Connecting to the campus…", "Finding your spot…", "Putting on your shirt…", "Stepping outside…"];
+function setEntering(on, name) {
+  clearInterval(enTimer);
+  const btn = $("#enterBtn");
+  document.body.classList.toggle("entering", on);
+  $("#entering").setAttribute("aria-hidden", on ? "false" : "true");
+  btn.classList.toggle("busy", on);
+  if (on) {
+    btn.disabled = true;
+    $("#enName").textContent = name ? `Welcome, ${name}` : "";
+    let i = 0;
+    const st = $("#enStage");
+    st.textContent = EN_STAGES[0];
+    enTimer = setInterval(() => {
+      i = Math.min(i + 1, EN_STAGES.length - 1);
+      st.style.opacity = 0;
+      setTimeout(() => { st.textContent = EN_STAGES[i]; st.style.opacity = 1; }, 220);
+    }, 1400);
+  } else {
+    btn.disabled = false;
+    joining = false;
+  }
+}
+function joinFailed(text) {
+  $("#joinError").textContent = text;
+  setEntering(false);
+}
+
 function connect(profile) {
   ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
   ws.onopen = () => sendMsg({ t: "join", ...profile });
-  ws.onerror = () => ($("#joinError").textContent = "Could not reach the server.");
+  ws.onerror = () => joinFailed("Could not reach the server.");
   ws.onclose = () => {
-    if (!me) return;
+    if (!me) { if (joining) joinFailed("Lost the connection. Try again."); return; }
     logLine("Disconnected from the server. Reload the page to rejoin.", true);
     for (const id of [...peers.keys()]) closePeer(id);
   };
@@ -554,10 +596,11 @@ function connect(profile) {
         $("#join").hidden = true;
         $("#join").style.display = "none";
         $("#hud").hidden = false;
+        setTimeout(() => setEntering(false), 700); // let the first frames draw under the loader, then fade it
         logLine(`Welcome, ${me.name}. Messages reach people within ${chatRange} m.`, true);
         break;
       case "full":
-        $("#joinError").textContent = "The campus is full right now. Try again soon.";
+        joinFailed("The campus is full right now. Try again soon.");
         break;
       case "joined":
         {
@@ -994,9 +1037,11 @@ for (const c of COLORS) {
 }
 $("#joinForm").addEventListener("submit", (e) => {
   e.preventDefault();
-  if (!appReady) return;
+  if (!appReady || joining) return; // one click is enough
   if (ws && ws.readyState <= 1) return;
+  joining = true;
   $("#joinError").textContent = "";
+  setEntering(true, $("#name").value.trim());
   connect({ name: $("#name").value, dept: $("#dept").value, color: chosenColor, shirt: chosenShirt });
 });
 
@@ -2293,30 +2338,59 @@ function walkFrame(dt, now) {
 }
 let reflectionsDone = false;
 // If the device cannot keep up with high quality, step down on its own after a few seconds.
-const perf = { t: 0, frames: 0, level: 0, warm: 8 };
-// A frame-rate governor: when the average falls under 26 FPS it takes the next step down (full ->
-// no ambient occlusion -> cheaper shadows and 0.9x pixels -> no sun shadows, 0.65x pixels, nearer cull).
-// Skipped when the address says ?q=high.
+const perf = { shadowEvery: 1, sk: 0, level: 0, since: 0, win: 0, dts: [], good: 0, grace: 0, retried: [0, 0, 0], hitches: [] };
+// Frame-rate governor, v2. Differences from v1: it only starts after you have actually spawned (v1's
+// clock ran on the loading and join screens), it judges the MEDIAN frame time (a few spawn hitches
+// cannot trigger it), and it steps back UP when the laptop has headroom (one retry per step).
+// Steps down: no ambient occlusion -> 2048 sun shadows, 0.9x pixels, nearer cull -> no sun shadows,
+// 0.65x pixels, nearest cull. Skipped when the address says ?q=high.
 const FORCE_HIGH = new URLSearchParams(location.search).get("q") === "high";
 let cullRange = 130; // people and vehicles further than this from the player are not drawn
+const composerHQ = composer;
+const setShadowMap = (n) => { sun.shadow.mapSize.set(n, n); sun.shadow.map?.dispose(); sun.shadow.map = null; };
 const GOV = [
-  () => { composer = null; },
-  () => { sun.shadow.mapSize.set(1024, 1024); sun.shadow.map?.dispose(); sun.shadow.map = null; renderer.setPixelRatio(Math.min(devicePixelRatio, 0.9)); resize(); cullRange = 100; },
-  () => { sun.castShadow = false; renderer.setPixelRatio(Math.min(devicePixelRatio, 0.65)); resize(); cullRange = 75; },
+  { down: () => { composer = null; }, up: () => { if (composerHQ) { composer = composerHQ; composer.setPixelRatio(renderer.getPixelRatio()); resize(); } } },
+  { down: () => { setShadowMap(2048); renderer.setPixelRatio(Math.min(devicePixelRatio, 0.9)); resize(); cullRange = 100; },
+    up: () => { setShadowMap(HIGH ? 4096 : 2048); renderer.setPixelRatio(Math.min(devicePixelRatio, 1.25)); resize(); cullRange = 130; } },
+  { down: () => { setShadowMap(1024); perf.shadowEvery = 4; renderer.shadowMap.autoUpdate = false; renderer.setPixelRatio(Math.min(devicePixelRatio, 0.65)); resize(); cullRange = 75; },
+    up: () => { setShadowMap(2048); perf.shadowEvery = 1; renderer.shadowMap.autoUpdate = true; renderer.setPixelRatio(Math.min(devicePixelRatio, 0.9)); resize(); cullRange = 100; } },
 ];
 function watchPerformance(dt) {
-  if (FORCE_HIGH || perf.level >= GOV.length) return;
-  perf.t += dt;
-  if (perf.warm > 0) { perf.warm -= dt; perf.t = 0; perf.frames = 0; return; }
-  perf.frames++;
-  if (perf.t < 3) return;
-  const fps = perf.frames / perf.t;
-  perf.t = 0; perf.frames = 0;
-  if (fps < 26) {
-    GOV[perf.level++]();
-    perf.warm = 2; // let the change settle before judging again
-    logLine(`Running at ${Math.round(fps)} FPS, so graphics went down a step (${perf.level}/${GOV.length}). Add ?q=high to the address to stop that.`, true);
+  // step 3 redraws the sun shadows every 4th frame (switching castShadow off would recompile every shader)
+  if (perf.shadowEvery > 1 && ++perf.sk % perf.shadowEvery === 0) sun.shadow.needsUpdate = true;
+  if (!document.body.classList.contains("playing")) return;
+  perf.since += dt;
+  // keep the 12 worst frames of the first 25 s after spawn: __tiu.spawnHitches()
+  if (perf.since < 25 && dt > 0.05) {
+    perf.hitches.push({ at: +perf.since.toFixed(2), ms: Math.round(dt * 1000) });
+    if (perf.hitches.length > 12) { perf.hitches.sort((x, y) => y.ms - x.ms); perf.hitches.length = 12; }
   }
+  if (FORCE_HIGH) return;
+  if (perf.since < 5) return; // first seconds after spawn: textures and buffers are still uploading
+  if (perf.grace > 0) { perf.grace -= dt; return; }
+  perf.dts.push(dt);
+  perf.win += dt;
+  if (perf.win < 3) return;
+  perf.dts.sort((x, y) => x - y);
+  const fps = 1 / perf.dts[perf.dts.length >> 1]; // median frame time, so isolated hitches do not count
+  perf.dts.length = 0; perf.win = 0;
+  if (fps < 26 && perf.level < GOV.length) {
+    GOV[perf.level++].down();
+    perf.good = 0;
+    perf.grace = 2;
+    logLine(`Running at ${Math.round(fps)} FPS, so graphics went down a step (${perf.level}/${GOV.length}). Add ?q=high to the address to stop that.`, true);
+  } else if (fps > 50 && perf.level > 0) {
+    perf.good += 3;
+    const i = perf.level - 1;
+    if (perf.good >= 9 && perf.retried[i] < 1) {
+      perf.retried[i]++;
+      GOV[i].up();
+      perf.level = i;
+      perf.good = 0;
+      perf.grace = 3;
+      logLine(`Plenty of headroom (${Math.round(fps)} FPS), so graphics went back up a step (${perf.level}/${GOV.length}).`, true);
+    }
+  } else perf.good = 0;
 }
 let cullT = 0;
 const _cp = new THREE.Vector3();
@@ -2326,7 +2400,14 @@ function cullStreet(dt, pos) {
   cullT = 0.25;
   const r2 = cullRange * cullRange;
   const near = (o) => { const q = o.position; const dx = q.x - pos.x, dz = q.z - pos.z; return dx * dx + dz * dz < r2; };
-  for (const v of traffic.vehicles) v.mesh.visible = near(v.mesh);
+  for (const v of traffic.vehicles) {
+    v.mesh.visible = near(v.mesh);
+    const ud = v.mesh.userData;
+    if (v.mesh.visible && ud.setLod) {
+      const q = v.mesh.position, dx = q.x - pos.x, dz = q.z - pos.z, d2 = dx * dx + dz * dz;
+      if (ud.lodFar ? d2 < 32 * 32 : d2 > 38 * 38) { if (ud.setLod(!ud.lodFar) !== false) ud.lodFar = !ud.lodFar; }
+    }
+  }
   if (crowd) for (const p of crowd.people) if (p.group) p.group.visible = near(p.group);
 }
 function afterMove(dt, now, pos) {
@@ -2337,6 +2418,7 @@ function afterMove(dt, now, pos) {
   }
   animateWorld(now / 1000); // leaves moving in the breeze
   updateStreet(dt, pos);
+  minimap.update(dt);
   for (const p of props) {
     const pt = p.body.translation();
     if (pt.y < -20) {
@@ -2417,6 +2499,8 @@ function afterMove(dt, now, pos) {
     camera.lookAt(debugCam[3], debugCam[4], debugCam[5]);
   }
   me.tag.visible = camNow > 2.6; // my own name tag gets in the way up close
+  scene.userData.cullTrees?.(camera, me.group.position.x, me.group.position.z, sun.castShadow);
+  runInstanceCull(camera, me.group.position.x, me.group.position.z, sun.castShadow);
   draw();
 }
 // ---------- loading ----------
@@ -2429,7 +2513,7 @@ let appReady = false;
   const jobs = [
     ["the people", kitLoading],
     ["the crowd", bodiesLoading],
-    ["your avatar", playerKitLoading],
+    ["your avatar", Promise.allSettled([playerKitLoading, avatarLoading, avatarKit("sof")])],
     ["the traffic", streetLife ? vehiclesReady() : null],
     ["the shirts", Promise.allSettled(["tiu", "reboot", "sof"].map((s) => loadPolo(s)))],
   ].filter(([, p]) => p);
@@ -2558,7 +2642,46 @@ window.__tiu = {
     return { dot: +(((eye.x - head.x) * -Math.sin(ry) + (eye.z - head.z) * -Math.cos(ry)) / d).toFixed(2), holderY: hero.model.rotation.y };
   },
   vehicleModels: () => traffic && traffic.vehicles.map((v) => ({ kind: v.kind, model: v.mesh.userData.model || "procedural", x: +v.x.toFixed(1), lat: +v.lat.toFixed(1), state: v.state, real: Boolean(v.mesh.userData.occupants && v.mesh.userData.occupants.hasReal), vis: v.mesh.visible, parent: Boolean(v.mesh.parent) })),
-  renderInfo: () => ({ calls: renderer.info.render.calls, triangles: renderer.info.render.triangles, textures: renderer.info.memory.textures, geometries: renderer.info.memory.geometries }),
+  // Where do the triangles and milliseconds go? Run while playing: __tiu.cost()  (takes a few seconds)
+  cost() {
+    const gl = renderer.getContext();
+    const run = () => { const t = []; let tris = 0, calls = 0; for (let i = 0; i < 4; i++) { const t0 = performance.now(); renderer.render(scene, camera); gl.finish(); t.push(performance.now() - t0); tris = renderer.info.render.triangles; calls = renderer.info.render.calls; } t.sort((x, y) => x - y); return { ms: +((t[1] + t[2]) / 2).toFixed(1), tris, calls }; };
+    const once = () => { renderer.render(scene, camera); return renderer.info.render.triangles; };
+    const saved = composer; composer = null; // measure the plain scene render
+    run();
+    const base = run();
+    const out = { base, tests: {} };
+    const hide = (list, get) => { const saved = list.map((o) => [o, get(o).visible]); list.forEach((o) => (get(o).visible = false)); return () => saved.forEach(([o, v]) => (get(o).visible = v)); };
+    let restore = () => {};
+    const test = (name, off, on) => { restore = off() || (() => {}); run(); out.tests[name] = run(); restore(); if (on) on(); };
+    out.sunCastShadow = sun.castShadow; out.governorLevel = perf.level;
+    test("shadow pass skipped", () => { renderer.shadowMap.autoUpdate = false; }, () => { renderer.shadowMap.autoUpdate = perf.shadowEvery === 1; });
+    if (traffic) {
+      test("no traffic", () => hide(traffic.vehicles, (v) => v.mesh));
+    }
+    if (crowd) {
+      test("no crowd", () => hide(crowd.people.filter((p) => p.group), (p) => p.group));
+    }
+    test("no other players", () => hide([...players.values()], (p) => p.group));
+    const rows = [];
+    for (const c of scene.children) {
+      if (c.isLight) continue;
+      const was = c.visible; c.visible = false;
+      const tris = once();
+      c.visible = was;
+      let info = "";
+      if (c.geometry) { const g = c.geometry; g.boundingBox || g.computeBoundingBox(); const bb = g.boundingBox; const ctr = bb.getCenter(new THREE.Vector3()).add(c.position); const sz = bb.getSize(new THREE.Vector3()); info = ` ${(g.index ? g.index.count : g.attributes.position.count) / 3 | 0}t @(${ctr.x | 0},${ctr.y | 0},${ctr.z | 0}) size(${sz.x | 0}x${sz.y | 0}x${sz.z | 0}) mat=${c.material.name || c.material.type}${c.material.map ? "+map" : ""} cast=${c.castShadow ? 1 : 0}`; }
+      rows.push({ child: `${c.name || c.type} [${c.children.length}]${info}`, trisSaved: base.tris - tris, obj: c });
+    }
+    rows.sort((x, y) => y.trisSaved - x.trisSaved);
+    composer = saved;
+    out.topSceneChildren = rows.slice(0, 14);
+    console.table(Object.entries(out.tests).map(([k, v]) => ({ test: k, ms: v.ms, tris: v.tris, msSaved: +(base.ms - v.ms).toFixed(1), trisSaved: base.tris - v.tris })));
+    console.table(out.topSceneChildren.map(({ child, trisSaved }) => ({ child, trisSaved })));
+    return out;
+  },
+  spawnHitches: () => perf.hitches.slice().sort((x, y) => x.at - y.at),
+  renderInfo: () => ({ treesDrawn: scene.userData.treesShown, calls: renderer.info.render.calls, triangles: renderer.info.render.triangles, textures: renderer.info.memory.textures, geometries: renderer.info.memory.geometries }),
   // adds a stand-in person at a spot, to test looking at people without a second browser
   standIn(x, z) {
     const a = makeAvatar({ id: "stand-in", name: "Riya", dept: "", color: "#2ec4a6", x, y: 0, z, ry: 0, voice: false });

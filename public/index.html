@@ -47,6 +47,29 @@
   @keyframes loadSlide { from { transform:translateX(-100%); } to { transform:translateX(300%); } }
   @keyframes ldRise { 0% { transform:translateY(0); opacity:0; } 15% { opacity:.9; } 100% { transform:translateY(-70vh); opacity:0; } }
 
+
+  /* once they are hidden the overlays must not keep animating behind the game */
+  body:not(.booting) #loader *, body:not(.entering) #entering *, body:not(.entering) #entering::after { animation:none !important; }
+  body.playing #bg i { animation:none !important; }
+
+  /* ---------- Entering: the beat between "Enter campus" and spawning in ---------- */
+  #entering { position:fixed; inset:0; z-index:45; display:grid; place-items:center; background:rgba(5,7,11,.92);
+    opacity:0; visibility:hidden; transition:opacity .45s ease, visibility .45s; }
+  body.entering #entering { opacity:1; visibility:visible; }
+  #entering::before { content:""; position:absolute; inset:0;
+    background:radial-gradient(55% 50% at 50% 46%, rgba(255,181,61,.13), transparent 70%); }
+  #entering .ld-mark { margin-bottom:22px; }
+  #entering .ld-mark::after { content:""; position:absolute; inset:-14px; border-radius:50%; border:1px solid rgba(255,181,61,.4);
+    animation:enPing 1.8s ease-out infinite; }
+  #enName { margin:0 0 6px; font-size:13px; letter-spacing:.3em; text-indent:.3em; text-transform:uppercase; color:var(--muted); }
+  #enStage { margin:0; min-height:1.4em; font-size:22px; font-weight:300; letter-spacing:.04em; transition:opacity .25s ease; }
+  #enTrack { margin:26px auto 0; width:min(300px,70vw); height:4px; border-radius:2px; background:rgba(255,255,255,.09); overflow:hidden; position:relative; }
+  #enTrack i { position:absolute; top:0; left:0; height:100%; width:38%; border-radius:2px;
+    background:linear-gradient(90deg,transparent,var(--accent),#ffe08a,transparent); box-shadow:0 0 14px rgba(255,181,61,.7);
+    animation:loadSlide 1.15s ease-in-out infinite; }
+  @keyframes enPing { from { transform:scale(.85); opacity:.9; } to { transform:scale(1.35); opacity:0; } }
+  #enterBtn.busy { pointer-events:none; opacity:.7; }
+
   /* ---------- Join screen: a slow pre-rendered flyover behind the form (compositor only, no 3D drawing) ---------- */
   #bg { position:fixed; inset:0; z-index:5; background:#0b1522; overflow:hidden; }
   body.playing #bg, body.playing #join, body.playing .jbrand { display:none; }
@@ -135,7 +158,7 @@
   #nearbyList button[aria-pressed=true] { background:#c0392b; border-color:#c0392b; }
   #nearbyEmpty { color:var(--muted); font-size:13px; margin:0; }
 
-  #chat { position:absolute; left:12px; bottom:12px; width:min(360px,calc(100vw - 24px)); padding:10px; }
+  #chat { position:absolute; left:12px; bottom:204px; width:min(360px,calc(100vw - 24px)); padding:10px; }
   #chatLog { max-height:150px; overflow:auto; font-size:14px; margin-bottom:8px; overflow-wrap:anywhere; }
   #chatLog div { margin:2px 0; }
   #chatLog .sys { color:var(--muted); font-style:italic; }
@@ -144,6 +167,14 @@
   #chatForm input { margin:0; flex:1; display:block; width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--line); background:rgba(255,255,255,.08); color:var(--text); font:inherit; outline:none; }
   #chatForm input:focus { border-color:var(--accent); }
   #chatForm button { border:0; border-radius:8px; padding:0 14px; background:var(--accent); color:#1b1300; font-weight:600; }
+
+  #minimap { position:absolute; left:12px; bottom:12px; width:180px; height:180px; border-radius:50%;
+    background:rgba(20,24,32,.82); border:2px solid rgba(255,255,255,.16); box-shadow:0 4px 20px rgba(0,0,0,.6);
+    backdrop-filter:blur(8px); overflow:hidden; cursor:pointer; }
+  #minimap canvas { display:block; width:100%; height:100%; }
+  #minimapDist { position:absolute; top:8px; left:50%; transform:translateX(-50%); padding:2px 7px;
+    border-radius:10px; background:rgba(16,24,36,.88); border:1px solid rgba(255,75,75,.6);
+    color:#ff8a8a; font-size:11px; font-weight:700; pointer-events:none; }
 
   #voice { position:absolute; right:12px; bottom:12px; padding:10px; display:flex; flex-direction:column; gap:6px; align-items:stretch; width:230px; }
   #voice button { padding:10px; border-radius:8px; border:1px solid var(--line); background:rgba(255,255,255,.08); color:var(--text); }
@@ -181,6 +212,16 @@
     <div id="loadTrack"><div id="loadBar"></div></div>
     <div class="ld-row"><span id="loadText">Starting up…</span><span id="loadPct">0%</span></div>
     <p id="loadTip"></p>
+  </div>
+</div>
+
+<div id="entering" role="status" aria-live="polite" aria-hidden="true">
+  <div class="ld-dots" aria-hidden="true"><i style="left:20%;bottom:10%;animation-delay:0s"></i><i style="left:38%;bottom:6%;animation-delay:1.2s"></i><i style="left:62%;bottom:12%;animation-delay:2.2s"></i><i style="left:80%;bottom:8%;animation-delay:.6s"></i></div>
+  <div class="ld" style="text-align:center">
+    <div class="ld-mark"><div class="ld-ring"></div><div class="ld-ring b"></div><img src="/logo.png" alt=""></div>
+    <p id="enName"></p>
+    <p id="enStage">Connecting…</p>
+    <div id="enTrack"><i></i></div>
   </div>
 </div>
 
@@ -227,6 +268,11 @@
   <div id="greet"><button type="button" data-g="1" title="Nomoshkar (1)">🙏</button><button type="button" data-g="2" title="Wave hello (2)">👋</button><button type="button" data-g="3" title="Handshake (3)">🤝</button></div>
   <div id="rideHint" class="panel" hidden></div>
   <button id="ride" type="button" hidden>Ride</button>
+
+  <div id="minimap" class="panel" title="Click or press N for full map">
+    <canvas id="minimapCanvas" width="180" height="180"></canvas>
+    <div id="minimapDist" hidden></div>
+  </div>
 
   <div id="chat" class="panel">
     <div id="chatLog" aria-live="polite"></div>

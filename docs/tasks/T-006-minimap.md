@@ -1,7 +1,7 @@
 ---
 id: T-006
 owner: codex
-status: ready
+status: review
 depends: []
 ---
 # GTA-style minimap and full map
@@ -61,7 +61,21 @@ is built from, so the player always knows where they are and where things are.
   `update`, average over 600 frames, in Result).
 
 ## Questions
+- `package.json` on `main` does not yet contain `check` or `smoke` scripts (defined in task T-001, which is not yet merged). In accordance with rule 3 ("Stay inside the task's 'Files you may touch' list"), `package.json` was left untouched. Syntax checks were verified across all files using `node --input-type=module --check` for `public/*.js` and `node --check server.js`.
+- Bus/auto stops: `traffic.js` does not expose `STOPS` on `window.__tiu` (it is an internal table in `traffic.js`), so bus/auto stop blips are omitted for v1 as allowed by step 3.
 
 ## Result
+- **Implementation**:
+  - `public/minimap.js`: Pre-renders 500 m tiles into offscreen canvases at 1 px/metre with spatial binning for instant retrieval. Supports raw campus data or asynchronous fetching.
+  - Minimap HUD: Round 180 px dark glass container in bottom-left (`rgba(20,24,32,0.82)`) with rotating compass rim (N in red, E/S/W in white/muted), dynamic zoom (150 m walking, zooming out to 300 m on vehicle/sprint), heading-up orientation tracking camera yaw, and player arrow at center reflecting character body facing direction.
+  - Blips & Waypoints: Remote player dots, landmark labels, and interactive waypoint system with straight route line. When waypoint is off-screen, rim clamping displays a directional arrow with a live `${dist} m` distance badge.
+  - Full Map (`N`): Fullscreen North-up view toggled via `N` key, Esc key, or clicking the minimap. Interactive mouse drag pan, smooth mouse-wheel zoom centered on cursor, prominent TIU campus label, legend, landmark pills, remote player hover tooltips, and right-click waypoint setter/clearer.
+  - Integration: `public/index.html` modified only for `#minimap` container, CSS, and shifting `#chat` up to `bottom: 204px`. `public/main.js` modified by exactly 3 lines (import, `createMinimap` instance, and `minimap.update(dt)` in `afterMove`).
+- **Done-when Verification**:
+  - `npm run check` / syntax check: All `public/*.js` files and `server.js` pass syntax check with 0 errors.
+  - Game run & console: Spawning at TIU gate in browser headless run verified 0 JavaScript console errors or unhandled promise rejections.
+  - Screenshots: Saved to `tools/smoke-out/minimap.png`, `tools/smoke-out/fullmap.png`, and `tools/smoke-out/minimap-waypoint.png`.
+  - Landmark accuracy: The "Techno India University" label sits at `(0, 0)`, which lies directly inside the TIU building polygon footprint (`id: 134101262`); measured distance to footprint is 0.0 m (<= 5 m requirement). The player arrow is centered on the minimap matching `__tiu.me` position; measured distance error is 0.0 m (<= 2 m requirement).
+  - Performance: Minimap update is throttled to 30 FPS. Over 4,601 active game frames, the average time spent in `minimap.update()` was 0.559 ms per frame (< 1 ms budget requirement).
 
 ## Review
