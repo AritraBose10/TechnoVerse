@@ -6,8 +6,8 @@
 // on the right: India). A car's world heading is mesh.rotation.y = psi, so its nose points along (cos psi, 0, -sin psi).
 // The hero's own heading (me.group.rotation.y) is psi - PI/2, because the character looks along its local -z.
 import { vehiclesReady, makeRealCar } from "/vehicles.js";
-import { createCarHud } from "/carhud_stub.js";
-import { createCarSound } from "/carsound_stub.js";
+import { createCarHud } from "/carhud.js";
+import { createCarSound } from "/carsound.js";
 
 const DEG = Math.PI / 180;
 const G0 = 9.81;

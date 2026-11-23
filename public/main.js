@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import RAPIER from "/vendor/rapier.es.js";
+import { createDriving } from "/drive.js";
 import { buildWorld } from "/world.js";
 import { loadCharacterKit, loadCrowdBody, loadPolo, makeCharacter } from "/character.js";
 import { vehiclesReady } from "/vehicles.js";
@@ -286,14 +287,14 @@ function updateStreet(dt, pos) {
   const vx = lastLocal ? (lx - lastLocal[0]) / Math.max(dt, 1e-3) : 0;
   const vz = lastLocal ? (lz - lastLocal[1]) / Math.max(dt, 1e-3) : 0;
   lastLocal = [lx, lz];
-  const extra = [{ x: lx, z: lz, r: riding ? 0.7 : 0.35, vx, vz, riding: Boolean(riding) }];
+  const extra = [drive.active ? drive.streetExtra(lx, lz, vx, vz) : { x: lx, z: lz, r: riding ? 0.7 : 0.35, vx, vz, riding: Boolean(riding) }];
   for (const a of players.values()) {
     const [ax, az] = worldInfo.toLocal(a.group.position.x, a.group.position.z);
     extra.push({ x: ax, z: az, r: a.bikeOn ? 0.7 : 0.35, vx: 0, vz: 0 });
   }
   // (parked bicycles and motorcycles are obstacles in the navmesh, see bikeObstacle)
   const onRoad = crowd.onRoad();
-  for (const e of extra) if ((e.z > 8.4 && e.z < 15.4) || (e.z > 19.4 && e.z < 25.6)) onRoad.push({ x: e.x, z: e.z, vx: e.vx, w: e.r > 0.5 ? 0.9 : 0.7 });
+  for (const e of extra) if ((e.z > 8.4 && e.z < 15.4) || (e.z > 19.4 && e.z < 25.6)) onRoad.push({ x: e.x, z: e.z, vx: e.vx, w: e.w ?? (e.r > 0.5 ? 0.9 : 0.7) });
   for (const b of bikes) {
     if (riding?.bike === b) continue;
     const [bx, bz] = worldInfo.toLocal(b.x, b.z);
@@ -886,6 +887,7 @@ addEventListener("keydown", (e) => {
     return;
   }
   keys.add(e.code);
+  if (drive.keydown(e)) { e.preventDefault(); return; } // E near a car, and every driving key while in one
   if (e.code === "Space") e.preventDefault();
   if (e.code === "KeyV") setTalking(true);
   if (e.code === "KeyE" && !e.repeat) toggleRide();
@@ -2130,6 +2132,8 @@ let lastSent = "";
 const _interp = { x: 0, y: 0, z: 0, ry: 0, vx: 0, vy: 0, vz: 0 };
 const lerpAngle = (a, b, t) => a + Math.atan2(Math.sin(b - a), Math.cos(b - a)) * t;
 
+// driveable cars (drive.js): parked cars, the vehicle physics, the dashboard and the cameras
+const drive = createDriving({ THREE, RAPIER, scene, world, camera, traffic, worldInfo, keys, STEP, BODY_CENTRE, getHero: () => hero, getMe: () => me, playerBody: body, placeBody, logLine, getAudio: () => fxCtx || voice.ctx || null, getView: () => ({ yaw: camYaw, pitch: camPitch, dragging: Boolean(drag) }), isBusy: () => Boolean(seq || crash || riding) });
 function frame() {
   requestAnimationFrame(frame);
   const rawDt = Math.min(clock.getDelta(), 0.1);
@@ -2141,6 +2145,7 @@ function frame() {
   const pos = me.group.position;
   if (seq && hero) seqFrame(dt);
   else if (crash && hero) crashFrame(dt);
+  else if (drive.active && hero) drive.frame(dt); // while driving, drive.js steps the physics world
   else if (riding && hero) rideFrame(dt);
   else walkFrame(dt, now);
   // Shadows only where the player can see them: far chunks stop casting (4 times a second)
@@ -2155,6 +2160,7 @@ function frame() {
   afterMove(dt, now, pos);
 }
 function updateRideHint() {
+  if (drive.active || drive.near()) { const h = drive.hint(); $("#rideHint").textContent = h; $("#rideHint").hidden = !h; $("#ride").hidden = true; return; }
   const hint = $("#rideHint");
   const btn = $("#ride");
   let text = "";
@@ -2417,6 +2423,7 @@ function afterMove(dt, now, pos) {
     camera.lookAt(debugCam[3], debugCam[4], debugCam[5]);
   }
   me.tag.visible = camNow > 2.6; // my own name tag gets in the way up close
+  if (drive.active) drive.camera(dt); // the car's camera replaces the walking one
   draw();
 }
 // ---------- loading ----------
@@ -2498,6 +2505,7 @@ frame();
 
 // Small handle for automated tests and debugging in the console.
 window.__tiu = {
+  drive: () => drive.debug(),
   get nav() {
     return nav;
   },
