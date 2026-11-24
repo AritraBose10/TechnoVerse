@@ -34,9 +34,10 @@ HOOKS = [
     (
         "camera",
         "if (drive.active) drive.camera(dt);",
-        "  scene.userData.cullTrees?.(camera, me.group.position.x, me.group.position.z, sun.castShadow);\n",
-        # before the draw (afterMove ends with draw()), and after main's own camera and name tag, so the car's camera is what is drawn
-        "  if (drive.active) drive.camera(dt); // the car's camera replaces the walking one\n  scene.userData.cullTrees?.(camera, me.group.position.x, me.group.position.z, sun.castShadow);\n",
+        "  me.tag.visible = camNow > 2.6; // my own name tag gets in the way up close\n  draw();\n",
+        # The current main.js keeps its camera setup inside afterMove(), immediately before draw().
+        # Put the car camera there so it replaces the walking camera in the same rendered frame.
+        "  me.tag.visible = camNow > 2.6; // my own name tag gets in the way up close\n  if (drive.active) drive.camera(dt); // the car's camera replaces the walking one\n  draw();\n",
     ),
     (
         "keydown",
