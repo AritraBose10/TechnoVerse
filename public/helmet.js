@@ -196,3 +196,83 @@ export function makeHelmet({ color = "#1b1d22", accent = "#c8202a", detail = tru
     },
   };
 }
+
+// ---------- fitting the helmet to a head ----------
+// Any head (the 26 crowd bodies, the avatars, every hair style) gets a helmet that sits ON it, never
+// through it. Points are the head's own surface, flat [x, y, z, ...] relative to where the helmet is
+// attached, in the helmet's axes (y up, +z the face).
+//   fitHelmet(skull)  -> { x, y, z, s }: the helmet's origin and uniform scale, sized to the skull
+//                        (hair left out: a helmet presses hair down, it is not sized round a bun)
+//   pressUnder(fit, p) -> moves a point that would show through the shell in to just inside the
+//                        liner (hair squashed under the helmet, a cheek inside the shell's sides);
+//                        returns false when the point is clear or not under the shell
+const LINER = 0.012 + 0.003; // liner inset plus 3 mm of air
+function linerAt(x, y, z, edgeGap) {
+  // where the liner is in this point's direction: null when the shell does not cover it
+  const ry = RY - LINER, rd = 0.17 - LINER;
+  const c = y >= 0 ? y / ry : y / rd;
+  if (c > 1) return { over: y - ry, k: ry / y };
+  if (c < -1) return null;
+  const phi = Math.acos(c);
+  const rz = z >= 0 ? RF : RB;
+  const th = Math.atan2(x / (RX - LINER), z / (rz - LINER));
+  if (phi > edgePhi(th) - edgeGap) return null; // the open face, or below the rim
+  const sp = shellPoint(th, phi, LINER);
+  const rh = Math.hypot(x, z), rs = Math.hypot(sp.x, sp.z);
+  return { over: rh - rs, k: rh > 1e-6 ? rs / rh : 1, horiz: true };
+}
+export function fitHelmet(pts, maxS = 1.22) {
+  const n = pts.length / 3;
+  let top = -1e9;
+  for (let i = 0; i < n; i++) top = Math.max(top, pts[i * 3 + 1]);
+  // the crown (top 12 cm of the head) sets where the helmet is centred
+  let x0 = 1e9, x1 = -1e9, z0 = 1e9, z1 = -1e9;
+  for (let i = 0; i < n; i++) {
+    if (pts[i * 3 + 1] < top - 0.12) continue;
+    x0 = Math.min(x0, pts[i * 3]); x1 = Math.max(x1, pts[i * 3]);
+    z0 = Math.min(z0, pts[i * 3 + 2]); z1 = Math.max(z1, pts[i * 3 + 2]);
+  }
+  const cx = (x0 + x1) / 2;
+  const czMid = (z0 + z1) / 2 + (RB - RF) / 2; // the shell is longer at the back
+  // how many points show through at this size (the liner's crown just clears the top of the skull)
+  const misses = (s, cz) => {
+    const cy = top + 0.004 - s * (RY - LINER);
+    let m = 0;
+    for (let i = 0; i < n; i++) {
+      const y = pts[i * 3 + 1];
+      if (y < cy - 0.2 * s) continue; // well below the rim
+      const L = linerAt((pts[i * 3] - cx) / s, (y - cy) / s, (pts[i * 3 + 2] - cz) / s, 0.02);
+      if (L && L.over > -0.002 / s) m++;
+    }
+    return m;
+  };
+  let best = null;
+  for (let dz = -0.03; dz <= 0.0301; dz += 0.005) {
+    // the smallest size that clears the skull with its centre here (or the largest size allowed)
+    let lo = 0.86, hi = maxS;
+    if (misses(lo, czMid + dz) === 0) hi = lo;
+    else if (misses(hi, czMid + dz) > 0) { const m = misses(hi, czMid + dz); if (!best || (best.m > 0 && m < best.m)) best = { s: hi, cz: czMid + dz, m }; continue; }
+    else for (let k = 0; k < 9; k++) { const mid = (lo + hi) / 2; if (misses(mid, czMid + dz) === 0) hi = mid; else lo = mid; }
+    if (!best || best.m > 0 || hi < best.s - 1e-4) best = { s: hi, cz: czMid + dz, m: 0 };
+  }
+  const s = Math.min(maxS, best.s * 1.015); // a finger's room
+  return { x: cx, y: top + 0.004 - s * (RY - LINER), z: best.cz, s, misses: misses(s, best.cz) };
+}
+// p: a THREE.Vector3 in the same frame as the points given to fitHelmet; changed in place
+export function pressUnder(fit, p) {
+  const s = fit.s;
+  let moved = false;
+  for (let pass = 0; pass < 3; pass++) {
+    const x = (p.x - fit.x) / s, y = (p.y - fit.y) / s, z = (p.z - fit.z) / s;
+    const L = linerAt(x, y, z, 0);
+    if (!L || L.over <= -0.001) break;
+    // in to just inside the liner: toward the helmet's centre line from the side, or down from the top
+    if (L.horiz) {
+      const k = L.k * (1 - 0.002 / Math.max(0.02, Math.hypot(x, z) * L.k));
+      p.x = fit.x + x * k * s;
+      p.z = fit.z + z * k * s;
+    } else p.y = fit.y + y * L.k * 0.99 * s;
+    moved = true;
+  }
+  return moved;
+}

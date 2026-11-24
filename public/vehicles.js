@@ -213,12 +213,34 @@ function addPeople(g, name, m, rnd, kind) {
     const back = kind === "taxi" ? 0.6 : 0.2;
     for (const z of [-hz, hz]) seat(back, false, dx - m.wb * 0.3, y, z);
   }
+  // a steering wheel for the cars (the models have no interior): a ring, hub and spoke, tilted toward the driver, that traffic.js
+  // turns. Only drawn while the driver is a real figure (near the viewer). hub faces the driver (its +z points to the tail),
+  // spin.rotation.z is the steering angle, spin's local +x is the driver's right.
+  let wheel = null;
+  if (m.kind !== "bus" && m.kind !== "auto") {
+    const hub = new THREE.Group();
+    hub.position.set(m.wb * 0.08 + 0.5, m.H * 0.27 + 0.4, m.W * 0.22);
+    hub.rotation.y = -Math.PI / 2;
+    const tilt = new THREE.Group();
+    tilt.rotation.x = -0.4;
+    hub.add(tilt);
+    const spin = new THREE.Group();
+    tilt.add(spin);
+    const mat = new THREE.MeshStandardMaterial({ color: "#1a1a1c", roughness: 0.7 });
+    spin.add(new THREE.Mesh(new THREE.TorusGeometry(0.17, 0.014, 6, 18), mat));
+    spin.add(new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.03, 10).rotateX(Math.PI / 2), mat));
+    spin.add(new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.016, 0.016), mat));
+    hub.visible = false;
+    g.add(hub);
+    wheel = { hub, spin, r: 0.17 };
+  }
   let near = false;
   const sync = () => {
     for (const q of seats) {
       q.fig.visible = q.on && !(near && q.real);
       if (q.real) q.real.visible = q.on && near;
     }
+    if (wheel) wheel.hub.visible = near && seats[0].on && Boolean(seats[0].real);
   };
   const pax = () => seats.filter((q) => !q.slot.driver);
   const api = {
@@ -239,6 +261,9 @@ function addPeople(g, name, m, rnd, kind) {
     // the driver gets out of / back into the seat
     setDriver(on) { seats[0].on = on; sync(); },
     get hasReal() { return seats.some((q) => q.real); },
+    // the real figures now in their seats, for traffic.js to animate
+    real() { return seats.filter((q) => q.real && q.on).map((q) => ({ fig: q.real, slot: q.slot })); },
+    wheel,
   };
   api.refill(rnd);
   return api;
@@ -335,7 +360,8 @@ export function makeRealCar(kind, color, rnd = Math.random) {
     g.add(lamp);
   }
   const occupants = addPeople(g, name, m, rnd, kind);
-  let door = null;
+  let door = null, rearDoor = null;
+  const doorLeaves = []; // { pivot, len }: each door leaf runs from its pivot along the pivot's x by len (people.js keeps bodies off it)
   if (m.kind === "bus") {
     // the passenger door on the kerb side, behind the cab: two glazed leaves hinged at the outer edges; people.js and
     // traffic.js open it while the bus stands at a stop (door.set(0..1))
@@ -350,6 +376,7 @@ export function makeRealCar(kind, color, rnd = Math.random) {
       pivot.add(new THREE.Mesh(new THREE.BoxGeometry(0.04, 1.65, 0.05).translate(s * 0.44, 0.825, 0), frame));
       g.add(pivot);
       leaves.push([pivot, s]);
+      doorLeaves.push({ pivot, len: s * 0.46 });
     }
     // the model's wall is solid there, so the opening is a dark recess with a step, shown while the leaves are open
     const dark = new THREE.MeshStandardMaterial({ color: "#0b0d10", roughness: 0.9 });
@@ -378,7 +405,24 @@ export function makeRealCar(kind, color, rnd = Math.random) {
     pivot.add(new THREE.Mesh(new THREE.BoxGeometry(hw * 1.8, gh, 0.03).translate(-hw, lh + gh / 2, 0), glassM));
     pivot.visible = false;
     g.add(opening, pivot);
-    door = { kind: "car", pivots: [pivot], handle(out) { pivot.updateWorldMatrix(true, false); return pivot.localToWorld(out.set(-hw * 1.7, lh * 0.92, 0.05)); }, set(k) { pivot.visible = opening.visible = k > 0.03; pivot.rotation.y = 1.1 * k; } };
+    doorLeaves.push({ pivot, len: -hw * 2 });
+    // opened to 72 degrees, the way a car door stops on its check strap: a body gets out past it (people.js
+    // steps out through the rear part of the opening, behind the open leaf)
+    door = { kind: "car", pivots: [pivot], exitX: dx - hw * 0.45, handle(out) { pivot.updateWorldMatrix(true, false); return pivot.localToWorld(out.set(-hw * 1.7, lh * 0.92, 0.05)); }, set(k) { pivot.visible = opening.visible = k > 0.03; pivot.rotation.y = 1.25 * k; } };
+    if (kind === "taxi") {
+      // the kerb-side rear door (traffic keeps left, so the kerb is the model's -z side), same build as the driver's
+      const rx = dx - m.wb * 0.3, rz = -(m.W / 2 - 0.02);
+      const ropening = new THREE.Mesh(new THREE.BoxGeometry(hw * 2, lh + gh, 0.04).translate(rx, 0.3 + (lh + gh) / 2, rz - 0.012), dark);
+      ropening.visible = false;
+      const rp = new THREE.Group();
+      rp.position.set(rx + hw, 0.3, rz - 0.03);
+      rp.add(new THREE.Mesh(new THREE.BoxGeometry(hw * 2, lh, 0.05).translate(-hw, lh / 2, 0), leafMat));
+      rp.add(new THREE.Mesh(new THREE.BoxGeometry(hw * 1.8, gh, 0.03).translate(-hw, lh + gh / 2, 0), glassM));
+      rp.visible = false;
+      g.add(ropening, rp);
+      doorLeaves.push({ pivot: rp, len: -hw * 2 });
+      rearDoor = { set(k) { rp.visible = ropening.visible = k > 0.03; rp.rotation.y = -1.25 * k; } };
+    }
   }
   const wheels = [];
   car.traverse((o) => { if (o.userData.wheel) wheels.push(o); });
@@ -404,7 +448,9 @@ export function makeRealCar(kind, color, rnd = Math.random) {
     size: { L: m.L, W: m.W, H: m.H },
     wheelR: m.wr ?? 0.3,
     axles: m.axles ?? [m.wb / 2, -m.wb / 2],
-    doorX: m.doorX,
+    doorX: m.doorX ?? (kind === "taxi" ? m.wb * (0.08 - 0.3) - 0.18 : undefined), // where people climb in: the rear part of a taxi's rear door opening (the open leaf is ahead of it)
+    leaves: doorLeaves,
+    rearDoor,
     paint: paint || { color: new THREE.Color() }, // models whose body is not a separate material keep their own colour
     tail,
     indL,

@@ -24,7 +24,7 @@ import { makeTrafficBicycle, BICYCLE_DESIGNS } from "/bicycle.js";
 import { makeCharacter } from "/character.js";
 import { riderLook } from "/looks.js";
 import { pickBody } from "/crowdbodies.js";
-import { seatCharacter } from "/seated.js";
+import { seatCharacter, animateSeated } from "/seated.js";
 
 const ROADS = {
   // near side, in front of the university: travels toward +x
@@ -48,8 +48,8 @@ const SIGNALS = [
 ];
 const CYCLE = { green: 30, amber: 3, red: 22 };
 const STOPS = {
-  near: [{ x: 1.5, kinds: ["auto"] }, { x: -9, kinds: ["auto"] }, { x: -66, kinds: ["bus", "auto"] }],
-  far: [{ x: 22.5, kinds: ["auto"] }, { x: -19.5, kinds: ["auto"] }, { x: 64, kinds: ["bus", "auto"] }],
+  near: [{ x: 1.5, kinds: ["auto", "taxi"] }, { x: -9, kinds: ["auto", "taxi"] }, { x: -66, kinds: ["bus", "auto", "taxi"] }],
+  far: [{ x: 22.5, kinds: ["auto", "taxi"] }, { x: -19.5, kinds: ["auto", "taxi"] }, { x: 64, kinds: ["bus", "auto", "taxi"] }],
 };
 const COLOURS = [["#f1f1ef", 15], ["#b9bcc0", 11], ["#6f7378", 8], ["#1b1d21", 7], ["#9b1d20", 8], ["#23396b", 7], ["#3b78b8", 6], ["#1f6f7a", 4], ["#5a4232", 4], ["#8c5a2b", 3], ["#7a1c2c", 4], ["#2d4a3a", 3], ["#566b3a", 3], ["#c9571f", 4], ["#d8c9a6", 4], ["#e0b840", 3], ["#a8412f", 4], ["#4a3f7a", 2]];
 const TYPES = {
@@ -66,6 +66,9 @@ const TYPES = {
 export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, quality = "high", seed = 7 }) {
   preloadVehicles(quality === "high");
   let s = seed;
+  const hail = {}; // "road:stopX" -> street time until which someone waits there with a hand out for a taxi (people.js sets it)
+  const freeSeats = (veh) => 3 - (veh.mesh?.userData.occupants?.count() ?? 0);
+  let seatTicks = 0; // vehicles whose seated people may be animated this frame
   const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
   const range = (a, b) => a + rnd() * (b - a);
   const pickW = (pairs) => {
@@ -400,7 +403,7 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
       pitch: 0,
       yaw: 0,
       wantsPark: false,
-      wantsStop: kind === "auto" ? rnd() < 0.55 : kind === "bus",
+      wantsStop: kind === "auto" ? rnd() < 0.55 : kind === "bus" || kind === "taxi",
       needsRider: Boolean(u.rider || u.live) && !u.riderSeated,
     };
     veh.lane = lane ?? veh.prefLane;
@@ -588,9 +591,12 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
       if (veh.wantsStop && veh.stopX === null && veh.state === "drive") {
         for (const st of STOPS[veh.road]) {
           const ahead = (st.x - veh.x) * veh.dir;
-          if (st.kinds.includes(veh.kind) && ahead > 20 && ahead < 45 && rnd() < 0.7) {
+          // a taxi only pulls in for someone with a hand out, and only with a seat free
+          const fare = veh.kind !== "taxi" || ((hail[`${veh.road}:${st.x}`] ?? 0) > clock && freeSeats(veh) > 0);
+          if (fare && st.kinds.includes(veh.kind) && ahead > 20 && ahead < 45 && rnd() < 0.7) {
             veh.stopX = st.x;
-            veh.stopFor = veh.kind === "bus" ? range(8, 16) : range(4, 12);
+            veh.stopFor = veh.kind === "bus" ? range(8, 16) : veh.kind === "taxi" ? range(5, 9) : range(4, 12);
+            if (veh.kind === "taxi") veh.seats = freeSeats(veh);
             veh.state = "stopping";
             break;
           }
@@ -663,7 +669,7 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
           veh.ind = 1;
           veh.lane = 0;
           veh.latTarget = R.lanes[0];
-          veh.wantsStop = rnd() < 0.3;
+          veh.wantsStop = veh.kind === "taxi" || rnd() < 0.3;
         }
       }
     } else if (veh.state === "drive") veh.ind = Math.abs(veh.latTarget - veh.lat) > 0.3 ? Math.sign((veh.latTarget - veh.lat) * veh.dir) : 0;
@@ -742,6 +748,8 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
       // real seated people for vehicles near the viewer (a few made per frame); the blocky stand-ins everywhere else
       const near = Math.hypot(veh.x - eye[0], veh.lat - eye[1]) < 60;
       u.occupants.setNear(near, (slot) => { seatBudget--; return seatCharacter(veh.mesh, slot, kit, rnd); }, Math.max(0, seatBudget));
+      // people already seated come alive: the driver steers and checks the mirrors, passengers look about, use a phone, talk
+      if (near && u.occupants.hasReal && Math.hypot(veh.x - eye[0], veh.lat - eye[1]) < 32) animateOccupants(veh, u, dt, t);
     }
     if (u.door) {
       // the bus door opens when it has stopped for people and shuts before it moves off; a car's driver door while its driver
@@ -749,6 +757,12 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
       const open = u.door.kind === "bus" ? (veh.atStop && veh.v < 0.1 ? 1 : 0) : veh.carDoor ? 1 : 0;
       veh.doorK = (veh.doorK || 0) + (open - (veh.doorK || 0)) * Math.min(1, dt * (u.door.kind === "bus" ? 2.2 : 2.8));
       u.door.set(veh.doorK);
+    }
+    if (u.rearDoor) {
+      // a taxi's kerb-side rear door, open while someone climbs in or out (people.js stamps veh.rearOpenT)
+      const want = clock - (veh.rearOpenT ?? -9) < 0.6 ? 1 : 0;
+      veh.rearK = (veh.rearK || 0) + (want - (veh.rearK || 0)) * Math.min(1, dt * 2.8);
+      u.rearDoor.set(veh.rearK);
     }
     if (u.live && u.cyclist && dt > 0 && (!eye || Math.hypot(veh.x - eye[0], veh.lat - eye[1]) < 70)) liveRider(veh, dt);
     u.tail.emissiveIntensity = veh.brake ? 2.6 : 0.3 + night * 0.9;
@@ -760,12 +774,54 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
     veh.body.setNextKinematicRotation(qY);
   }
 
+  // The seated people of a vehicle near the viewer. The wheel turns with how fast the car is yawing (lane changes, tucking in,
+  // pulling out) and the driver's hands stay on it; everyone leans a little with braking and turns. The figures are posed with the
+  // car moved to the origin (seated.js works in the car's own frame), then it goes back.
+  function animateOccupants(veh, u, dt, t) {
+    const occ = u.occupants;
+    const sp = Math.max(0, veh.v);
+    const yr = veh._yp === undefined ? 0 : THREE.MathUtils.clamp((veh.yaw - veh._yp) / dt, -2, 2);
+    veh._yp = veh.yaw;
+    veh._yr = (veh._yr || 0) + (yr - (veh._yr || 0)) * Math.min(1, dt * 6);
+    const ac = veh._vp === undefined ? 0 : (veh.v - veh._vp) / dt;
+    veh._vp = veh.v;
+    veh._ac = (veh._ac || 0) + (ac - (veh._ac || 0)) * Math.min(1, dt * 3);
+    veh._ph ??= rnd() * 6.28;
+    const want = sp > 0.4
+      ? THREE.MathUtils.clamp((veh._yr * u.size.L * 0.65 * 9) / Math.max(sp, 1.5), -1.1, 1.1) + 0.04 * Math.sin(t * 1.3 + veh._ph) + 0.025 * Math.sin(t * 3.1 + veh._ph * 2)
+      : (veh._steer || 0) * 0.97;
+    veh._steer = (veh._steer || 0) + (want - (veh._steer || 0)) * Math.min(1, dt * 10);
+    if (occ.wheel) occ.wheel.spin.rotation.z = veh._steer; // positive = anticlockwise for the driver = turning left
+    veh._at = (veh._at || 0) + dt;
+    if (veh._at < 0.05 || seatTicks <= 0) return;
+    seatTicks--;
+    const adt = Math.min(veh._at, 0.25);
+    veh._at = 0;
+    veh._pt = (veh._pt || 0) + adt;
+    const pax = veh._pt >= 0.1; // passengers at 10 Hz, the driver at 20
+    const pdt = Math.min(veh._pt, 0.5);
+    if (pax) veh._pt = 0;
+    const m = veh.mesh;
+    const p0 = m.position.clone();
+    const r0 = m.rotation.clone();
+    m.position.set(0, 0, 0);
+    m.rotation.set(0, 0, 0);
+    m.updateMatrixWorld(true);
+    const list = occ.real();
+    const ctx = { t, acc: veh._ac, yawRate: veh._yr, speed: sp, wheel: occ.wheel, sitters: list.map((q) => q.slot) };
+    for (const q of list) if (q.slot.driver || pax) animateSeated(q.fig, q.slot, q.slot.driver ? adt : pdt, ctx);
+    m.position.copy(p0);
+    m.rotation.copy(r0);
+    m.updateMatrixWorld(true);
+  }
+
   let spawnTimer = { near: 1, far: 2 };
   let struck = null; // a moving vehicle has run into the player (see update)
   let clock = 0;
 
   return {
     vehicles: all,
+    hail,
     get playerStruck() {
       return struck;
     },
@@ -832,6 +888,7 @@ export function buildTraffic({ scene, world, RAPIER, local, phi, kitLoading, qua
       watchBlocked(dt);
       for (const c of crashes) if (!c.done && ![c.a, c.b].some((v) => v && v.state === "crash" && all.includes(v))) c.done = true;
       seatBudget = 3;
+      seatTicks = quality === "low" ? 2 : 5;
       for (const veh of [...all]) {
         const R = ROADS[veh.road];
         if ((veh.x - R.to) * veh.dir > 0) despawn(veh);

@@ -8,7 +8,7 @@
 // The body is models/avatar.glb. The animations come from models/anims.glb, which has the same
 // bones in a different resting pose, so each animation is converted when it loads.
 import * as THREE from "three";
-import { makeHelmet } from "/helmet.js";
+import { makeHelmet, fitHelmet, pressUnder } from "/helmet.js";
 import { rebootPrints } from "/shirt.js";
 import { GLTFLoader } from "/vendor/jsm/loaders/GLTFLoader.js";
 import { clone as cloneSkinned } from "/vendor/jsm/utils/SkeletonUtils.js";
@@ -339,6 +339,111 @@ function dressInLook(model, look) {
   });
 }
 
+// ---------- a helmet that fits the head it is on ----------
+// Every body is different (26 crowd bodies, the avatars, buns, quiffs, caps), so the helmet is not
+// placed by a fixed offset: the head's own skinned surface (every vertex carried by the Head bone or
+// below it) is read in the resting pose, the helmet is sized to the skull (helmet.js fitHelmet), and
+// any vertex that would still show through the shell (hair, the top of a cap, a cheekbone under the
+// side of the shell) gets a pressed copy of its mesh in which it sits just inside the liner. The
+// pressed copies are swapped in while the helmet is worn (showGear) and out when it comes off.
+// One fit per body, shared by every character made from it.
+const HELMET_FITS = new Map();
+const comp = (a, i, k) => (k === 0 ? a.getX(i) : k === 1 ? a.getY(i) : k === 2 ? a.getZ(i) : a.getW(i)); // (BufferAttribute.getComponent is newer than r160)
+const PRESSED = new Map(); // original geometry uuid -> geometry with the head pressed under the helmet
+function helmetFit(model) {
+  const head = model.getObjectByName("Head");
+  if (!head) return null;
+  const meshes = [];
+  model.traverse((o) => {
+    if (!o.isSkinnedMesh || !o.visible || /^(polo-|gear-)/.test(o.name)) return;
+    const g = o.geometry;
+    if (!g.attributes.skinIndex || !g.attributes.skinWeight) return;
+    const inHead = o.skeleton.bones.map((b) => { for (let x = b; x; x = x.parent) if (x === head) return true; return false; });
+    if (inHead.some(Boolean)) meshes.push({ o, inHead });
+  });
+  if (!meshes.length) return null;
+  const key = meshes.map((m) => m.o.geometry.uuid).join("|");
+  if (HELMET_FITS.has(key)) return HELMET_FITS.get(key);
+  model.updateMatrixWorld(true);
+  const hw = head.getWorldPosition(new THREE.Vector3());
+  const v = new THREE.Vector3();
+  const skull = [];
+  const lists = [];
+  for (const m of meshes) {
+    const { o, inHead } = m;
+    const g = o.geometry, si = g.attributes.skinIndex, sw = g.attributes.skinWeight;
+    const hair = /hair/i.test(o.name + " " + (o.material?.name || ""));
+    const idx = [], pts = [];
+    for (let i = 0; i < g.attributes.position.count; i++) {
+      let w = 0;
+      for (let k = 0; k < 4; k++) if (inHead[comp(si, i, k)]) w += comp(sw, i, k);
+      if (w < 0.5) continue;
+      o.getVertexPosition(i, v);
+      o.applyBoneTransform(i, v);
+      v.applyMatrix4(o.matrixWorld).sub(hw);
+      idx.push(i);
+      pts.push(v.x, v.y, v.z);
+      if (!hair) skull.push(v.x, v.y, v.z);
+    }
+    lists.push({ o, idx, pts });
+  }
+  if (skull.length < 30) {
+    HELMET_FITS.set(key, null);
+    return null;
+  }
+  const fit = fitHelmet(skull);
+  // pressed copies of the meshes that would show through
+  const S = new THREE.Matrix4(), B = new THREE.Matrix4(), toMesh = new THREE.Matrix4(), q = new THREE.Vector3();
+  const si4 = [0, 0, 0, 0], sw4 = [0, 0, 0, 0];
+  for (const { o, idx, pts } of lists) {
+    const g = o.geometry;
+    if (PRESSED.has(g.uuid)) continue;
+    let pg = null;
+    toMesh.copy(o.matrixWorld).invert();
+    for (let n = 0; n < idx.length; n++) {
+      q.set(pts[n * 3], pts[n * 3 + 1], pts[n * 3 + 2]);
+      if (!pressUnder(fit, q)) continue;
+      // back to the mesh's own (bind) space through the inverse of this vertex's skinning
+      const i = idx[n];
+      for (let k = 0; k < 4; k++) { si4[k] = comp(g.attributes.skinIndex, i, k); sw4[k] = comp(g.attributes.skinWeight, i, k); }
+      S.set(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+      for (let k = 0; k < 4; k++) {
+        if (!sw4[k]) continue;
+        B.multiplyMatrices(o.skeleton.bones[si4[k]].matrixWorld, o.skeleton.boneInverses[si4[k]]);
+        for (let e = 0; e < 16; e++) S.elements[e] += B.elements[e] * sw4[k];
+      }
+      S.premultiply(o.bindMatrixInverse).multiply(o.bindMatrix).invert();
+      q.add(hw).applyMatrix4(toMesh).applyMatrix4(S);
+      // keep the morph-target offset out of it: the base position moves by what the pressed point moved
+      o.getVertexPosition(i, v);
+      if (!pg) pg = g.clone();
+      const pa = pg.attributes.position;
+      pa.setXYZ(i, pa.getX(i) + q.x - v.x, pa.getY(i) + q.y - v.y, pa.getZ(i) + q.z - v.z);
+    }
+    if (pg) {
+      pg.attributes.position.needsUpdate = true;
+      pg.computeBoundingSphere();
+      PRESSED.set(g.uuid, pg);
+    }
+  }
+  HELMET_FITS.set(key, fit);
+  return fit;
+}
+// the helmet on (or off) this model: hair and anything else under the shell pressed in (or let out)
+function pressForHelmet(model, on) {
+  model.traverse((o) => {
+    if (!o.isSkinnedMesh) return;
+    const orig = o.userData.unpressed || o.userData.fullGeo || o.geometry;
+    const pg = PRESSED.get(orig.uuid);
+    if (!pg) return;
+    o.userData.unpressed = orig;
+    const want = on ? pg : orig;
+    const near = o.geometry === orig || o.geometry === pg; // not on the far (light) body just now
+    if (o.userData.fullGeo) o.userData.fullGeo = want; // the distance LOD puts this back when near
+    if (near) o.geometry = want;
+  });
+}
+
 // Small things people carry and wear, fixed to a bone so they move with the body.
 const gear = {};
 function gearMat(key, make) {
@@ -408,7 +513,12 @@ function addAccessories(model, list = []) {
       h.strap(true);
       h.group.name = "gear-helmet";
       h.group.userData.helmet = h;
-      at("Head", h.group, new THREE.Vector3(0, 0.072, 0.004));
+      // sized and seated on THIS head (helmet.js fitHelmet); hair under it is pressed down when worn
+      const fit = helmetFit(model);
+      if (fit) {
+        h.group.scale.setScalar(fit.s);
+        at("Head", h.group, new THREE.Vector3(fit.x, fit.y, fit.z));
+      } else at("Head", h.group, new THREE.Vector3(0, 0.072, 0.004));
     } else if (kind === "polocollar") {
       // A polo T-shirt's knitted collar, folded down over a short stand, open at the front over a
       // two-button placket. Built round the base of the neck in the resting pose and carried by
@@ -1290,6 +1400,7 @@ export function makeCharacter(kit, opts = {}) {
     }
   }
   addAccessories(model, opts.gear);
+  if (model.getObjectByName("gear-helmet")) pressForHelmet(model, true); // worn from the start (riders)
   const height = opts.height || 1;
   const build = opts.build || 1;
   model.scale.set(height * build, height, height * Math.sqrt(build));
@@ -1393,7 +1504,7 @@ export function makeCharacter(kit, opts = {}) {
   let sitting = false;
   let nodW = 0;
   let shakeW = 0;
-  const gw = { sip: 0, hold: 0, phone: 0, text: 0, stir: 0, wipe: 0, serve: 0, behind: 0, crossed: 0, knees: 0, scan: 0, pocket: 0, take: 0, pour: 0, wave: 0, point: 0, scratch: 0, brow: 0, eat: 0, hip: 0, watch: 0, strap: 0, chin: 0, count: 0, show: 0, namaste: 0, stretch: 0, salute: 0, bottle: 0, lean: 0, handshake: 0 };
+  const gw = { sip: 0, hold: 0, phone: 0, text: 0, stir: 0, wipe: 0, serve: 0, behind: 0, crossed: 0, knees: 0, scan: 0, pocket: 0, take: 0, pour: 0, wave: 0, point: 0, scratch: 0, brow: 0, eat: 0, hip: 0, watch: 0, strap: 0, chin: 0, count: 0, show: 0, namaste: 0, stretch: 0, salute: 0, bottle: 0, lean: 0, handshake: 0, wheel: 0 };
 
   const v1 = new THREE.Vector3();
   const v2 = new THREE.Vector3();
@@ -1583,7 +1694,8 @@ export function makeCharacter(kit, opts = {}) {
     holder.position.add(parent.worldToLocal(want.clone()).sub(parent.worldToLocal(v1.clone())));
     holder.updateMatrixWorld(true);
     const turn = (b, angle) => turnInWorld(b, qc.setFromAxisAngle(rightW, angle));
-    turn(spine, -0.08);
+    turn(spine, -0.08 - (sit.lean || 0)); // leans forward when the car brakes (sit.lean) ...
+    if (sit.sway) turnInWorld(spine, qc.setFromAxisAngle(fwdW, sit.sway)); // ... and sideways in a turn
     legs.forEach((leg, i) => {
       turn(leg.up, 1.35);
       turn(leg.knee, -1.45);
@@ -1680,6 +1792,7 @@ export function makeCharacter(kit, opts = {}) {
       [gw.handshake, (o) => (g.at ? o.copy(at).addScaledVector(rightW, 0.02).addScaledVector(UP, 0.03 * sin(t * 8.5)) : S(o, C, 0.42, -0.2 + 0.03 * sin(t * 8.5), 0.06))],
       [gw.stretch, (o) => S(o, H, -0.02, 0.28, 0.2)],
       [gw.lean, (o) => o.copy(at).addScaledVector(rightW, 0.18)],
+      [gw.wheel, (o) => (g.wheelR ? o.copy(g.wheelR) : o.copy(C))], // both hands on the steering wheel (g.wheelR / g.wheelL)
       [gw.behind, (o) => S(o, P, -0.17, 0, 0.04)],
       [gw.crossed, (o) => S(o, C, 0.2, -0.13, -0.1)],
       [gw.knees, (o) => legs[1].knee.getWorldPosition(o).addScaledVector(UP, 0.07).addScaledVector(fwdW, -0.12)],
@@ -1693,6 +1806,7 @@ export function makeCharacter(kit, opts = {}) {
       [gw.namaste, (o) => S(o, C, 0.2, 0.02, -0.012)],
       [gw.stretch, (o) => S(o, H, -0.02, 0.28, -0.2)],
       [gw.lean, (o) => o.copy(at).addScaledVector(rightW, -0.18)],
+      [gw.wheel, (o) => (g.wheelL ? o.copy(g.wheelL) : o.copy(C))],
       [gw.behind, (o) => S(o, P, -0.17, 0, -0.03)],
       [gw.crossed, (o) => S(o, C, 0.22, -0.09, 0.11)],
       [gw.knees, (o) => legs[0].knee.getWorldPosition(o).addScaledVector(UP, 0.07).addScaledVector(fwdW, -0.12)],
@@ -1720,6 +1834,11 @@ export function makeCharacter(kit, opts = {}) {
       model.traverse((o) => {
         if (o.name === "gear-" + kind) o.visible = on;
       });
+      if (kind === "helmet") pressForHelmet(model, on);
+    },
+    /** hair pressed under a helmet that is not this character's own gear (the one off the bike's handlebar) */
+    pressHair(on) {
+      pressForHelmet(model, on);
     },
     stride: { walkSpeed, runSpeed },
     /**

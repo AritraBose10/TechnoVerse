@@ -28,7 +28,7 @@ export const NAV = {
 
 const UP_EPS = 0.05;
 
-export async function buildNav({ RAPIER, world, local, toLocal, scene, debug = false, skip = null }) {
+export async function buildNav({ RAPIER, world, local, toLocal, scene, debug = false, skip = null, extraBlocks = null }) {
   await init();
   const t0 = performance.now();
   const B = NAV.bounds;
@@ -174,6 +174,14 @@ export async function buildNav({ RAPIER, world, local, toLocal, scene, debug = f
       const pts = boxCorners((x1 - x0) / 2, 1, (z1 - z0) / 2).map((v) => [v[0] + cx, v[1] + 0.2, v[2] + cz]);
       addConvex(pts, BOX_TRIS, true);
     }
+  }
+
+  // ---- things you can see at body height that have no collider (clearance.js): stall cloths, benches,
+  // stools, hanging packets... the same blockers as solid boxes ----
+  if (extraBlocks) for (const r of extraBlocks) {
+    const cx = (r.x0 + r.x1) / 2, cz = (r.z0 + r.z1) / 2;
+    addConvex(boxCorners((r.x1 - r.x0) / 2, 0.6, (r.z1 - r.z0) / 2).map((v) => [v[0] + cx, v[1] + r.y + 0.65, v[2] + cz]), BOX_TRIS, true);
+    stats.extra = (stats.extra || 0) + 1;
   }
 
   if (debug) globalThis.__navGeo = { pos, idx };

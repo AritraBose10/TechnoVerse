@@ -416,10 +416,12 @@ export function buildOpposite({ RAPIER, world, scene, mid, phi, M, forest, place
     B.box(stoolRed, cx1 - 0.75, cx1 - 0.15, 0.86, 1.2, zf + 0.4, zf + 0.85); // cooler box
     B.box(whitePaint, cx1 - 0.77, cx1 - 0.13, 1.2, 1.25, zf + 0.38, zf + 0.87);
     B.cyl(flat("#9a9c9e", 0.35, { metalness: 0.8 }), cx0 + 0.3, zf + 0.78, 0.12, 0.86, 1.06, 10, true); // kettle
-    // strings of snack packets hanging from the front pole
+    // strings of snack packets hanging over the counter's front edge (from a cord between the front poles): over
+    // the counter, not out in the aisle where the people stand, and high enough to clear the QR stand and the jars
+    B.box(bamboo, cx0, cx1, hF - 0.06, hF - 0.04, zf + 0.26, zf + 0.28);
     for (let k = 0; k < 4; k++) {
       const px = cx0 + 0.25 + k * 0.42;
-      B.quad(packetMat, [[px - 0.07, hF - 1.05, zf + 0.02], [px + 0.07, hF - 1.05, zf + 0.02], [px + 0.07, hF - 0.05, zf + 0.02], [px - 0.07, hF - 0.05, zf + 0.02]], [[0, 0], [1, 0], [1, 1], [0, 1]], [0, 0, -1]);
+      B.quad(packetMat, [[px - 0.07, hF - 0.9, zf + 0.27], [px + 0.07, hF - 0.9, zf + 0.27], [px + 0.07, hF - 0.05, zf + 0.27], [px - 0.07, hF - 0.05, zf + 0.27]], [[0, 0], [1, 0.15], [1, 1], [0, 1]], [0, 0, -1]);
     }
     // bench and plastic stools for customers
     B.box(woodDark, cx1 + 0.4, x1 - 0.4, 0.42, 0.47, zb - 0.95, zb - 0.6);

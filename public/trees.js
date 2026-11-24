@@ -513,7 +513,7 @@ export function makeTrees({ scene, renderer }) {
           scene.add(p);
         }
         const n = m.list.length;
-        const set = { parts, leaves, n, shown: n, x: new Float32Array(n), y: new Float32Array(n), z: new Float32Array(n), r: new Float32Array(n), slot: new Uint32Array(n), mat: parts[0].instanceMatrix.array.slice(), col: leaves.instanceColor ? leaves.instanceColor.array.slice() : null };
+        const set = { name: Object.keys(models).find((k) => models[k] === m), hero: new Uint8Array(m.list.length), height: m.height, list: m.list, parts, leaves, n, shown: n, x: new Float32Array(n), y: new Float32Array(n), z: new Float32Array(n), r: new Float32Array(n), slot: new Uint32Array(n), mat: parts[0].instanceMatrix.array.slice(), col: leaves.instanceColor ? leaves.instanceColor.array.slice() : null };
         m.list.forEach((t, i) => { set.x[i] = t.x; set.y[i] = t.y + m.height * t.scale * 0.5; set.z[i] = t.z; set.r[i] = Math.max(m.height * t.scale * 0.62, 5); set.slot[i] = i; });
         sets.push(set);
       }
@@ -522,6 +522,7 @@ export function makeTrees({ scene, renderer }) {
       // plus every tree within 70 m of the player (they can cast shadows into view), within 420 m
       // (the fog has swallowed anything further). Call once per frame, after the camera has moved.
       const fr = new THREE.Frustum(), pm = new THREE.Matrix4(), sph = new THREE.Sphere();
+      scene.userData.treeSets = sets;
       scene.userData.cullTrees = (camera, px, pz, shadows = true) => {
         camera.updateMatrixWorld();
         pm.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
@@ -530,6 +531,7 @@ export function makeTrees({ scene, renderer }) {
         for (const s of sets) {
           let k = 0, changed = false;
           for (let i = 0; i < s.n; i++) {
+            if (s.hero[i]) continue; // drawn as a modelled hero tree instead (herotrees.js)
             const dx = s.x[i] - px, dz = s.z[i] - pz, d2 = dx * dx + dz * dz;
             let vis = shadows && d2 < 4900;
             if (!vis && d2 < 176400) {

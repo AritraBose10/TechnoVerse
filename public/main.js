@@ -3,6 +3,7 @@ import * as THREE from "three";
 import RAPIER from "/vendor/rapier.es.js";
 import { createDriving } from "/drive.js";
 import { buildWorld } from "/world.js";
+import { buildClearance } from "/clearance.js";
 import { loadLandmarks } from "/landmarks.js";
 import { createMinimap } from "/minimap.js";
 import { loadCharacterKit, loadCrowdBody, loadAvatarBody, loadPolo, makeCharacter } from "/character.js";
@@ -133,6 +134,11 @@ const worldInfo = buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel
 loadLandmarks({ scene, campus });
 const minimap = createMinimap({ campus, getMe: () => me, getPlayers: () => players, getCamYaw: () => camYaw });
 const { places, props, focus, entranceYaw, animate: animateWorld, captureReflections } = worldInfo;
+// Clearance (clearance.js): everything you can see at body height along the street becomes a no-walk zone
+// for the people, from the rendered geometry itself, before anything that moves exists. Fed to the navmesh
+// below and used by people.js as the last word on where a body may stand. Handle: __tiu.clearance
+const clearance = buildClearance({ RAPIER, world, scene, local: worldInfo.local, toLocal: worldInfo.toLocal, bounds: { x0: -135, x1: 155, z0: -12, z1: 33 }, skipMeshes: new Set(props.map((p) => p.mesh)) });
+console.info("clearance:", clearance.stats);
 // The walking navmesh and Detour crowd (nav.js): built from the fixed colliders in the background; the
 // people wait for it. ?nav=1 also shows the mesh as a green overlay (debug view). Handle: __tiu.nav
 let nav = null;
@@ -140,7 +146,8 @@ const bikes = []; // parked two-wheelers
 let riding = null; // { bike, r }: the machine I am on
 const bikeColliders = new Set(); // parked two-wheelers are not part of the mesh: they carve obstacles in it
 const navDebug = new URLSearchParams(location.search).get("nav") === "1";
-const navLoading = import("/nav.js").then(({ buildNav }) => buildNav({ RAPIER, world, local: worldInfo.local, toLocal: worldInfo.toLocal, scene, debug: navDebug, skip: (c) => bikeColliders.has(c.handle) })).then((n) => {
+const navLoading = import("/nav.js").then(({ buildNav }) => buildNav({ RAPIER, world, local: worldInfo.local, toLocal: worldInfo.toLocal, scene, debug: navDebug, skip: (c) => bikeColliders.has(c.handle), extraBlocks: clearance.rects })).then((n) => {
+  n.clearance = clearance;
   nav = n;
   if (navDebug) scene.add(n.debugMesh);
   for (const b of bikes) if (riding?.bike !== b && !b.navObs) bikeObstacle(b);
@@ -1228,7 +1235,7 @@ const ss = (k) => {
 };
 const span = (k, a, b) => ss((k - a) / (b - a)); // 0 before a, 1 after b, smooth between
 const _m = { saddle: new THREE.Vector3(), gripL: new THREE.Vector3(), gripR: new THREE.Vector3(), pedalL: new THREE.Vector3(), pedalR: new THREE.Vector3(), groundL: new THREE.Vector3(), groundR: new THREE.Vector3(), right: new THREE.Vector3(), up: new THREE.Vector3(), back: new THREE.Vector3(), fwd: new THREE.Vector3(), at: new THREE.Vector3(), key: new THREE.Vector3(), kick: new THREE.Vector3(), head: new THREE.Vector3() };
-const _h = { pos: new THREE.Vector3(), quat: new THREE.Quaternion(), p0: new THREE.Vector3(), q0: new THREE.Quaternion(), p1: new THREE.Vector3(), q1: new THREE.Quaternion(), mtx: new THREE.Matrix4(), s: new THREE.Vector3() };
+const _h = { pos: new THREE.Vector3(), quat: new THREE.Quaternion(), p0: new THREE.Vector3(), q0: new THREE.Quaternion(), p1: new THREE.Vector3(), q1: new THREE.Quaternion(), mtx: new THREE.Matrix4(), s: new THREE.Vector3(), ws: new THREE.Vector3(1, 1, 1) };
 const V = () => new THREE.Vector3();
 const bez = (a, b, c, k, out) => out.copy(a).multiplyScalar((1 - k) * (1 - k)).addScaledVector(b, 2 * k * (1 - k)).addScaledVector(c, k * k);
 // a curve from a to c that passes through `top` halfway (a plain quadratic only aims at its middle
@@ -1262,17 +1269,19 @@ function markers(bike) {
 function helmetWorn(pos, quat) {
   const ref = hero.model.getObjectByName("gear-helmet");
   ref.updateWorldMatrix(true, false);
-  ref.matrixWorld.decompose(pos, quat, _h.s);
+  ref.matrixWorld.decompose(pos, quat, _h.ws); // _h.ws: the size the helmet is fitted to this head at
 }
 function helmetHung(hung, pos, quat) {
   hung.hang.updateWorldMatrix(true, false);
   _h.mtx.compose(hung.home.position, hung.home.quaternion, _h.s.set(1, 1, 1));
   _h.mtx.premultiply(hung.hang.matrixWorld).decompose(pos, quat, _h.s);
 }
-function placeHelmet(h, pos, quat) {
+// k: 0 the size it hangs at on the handlebar .. 1 the size fitted to the head (helmetWorn)
+function placeHelmet(h, pos, quat, k = 1) {
   if (h.group.parent !== scene) scene.attach(h.group);
   h.group.position.copy(pos);
   h.group.quaternion.copy(quat);
+  h.group.scale.set(1, 1, 1).lerp(_h.ws, k);
 }
 // where the feet stand beside the machine
 const footSpot = (side, out) => out.copy(_m.at).addScaledVector(_m.right, side * 0.11).addScaledVector(_m.fwd, side > 0 ? 0.05 : -0.02).setY(_m.at.y + 0.085);
@@ -1321,7 +1330,7 @@ function stepsOn(bike) {
         const ctrl = V().copy(_h.p0).lerp(top, 0.5).addScaledVector(UPV, 0.18).addScaledVector(_m.fwd, 0.22);
         bez(_h.p0, ctrl, top, ss(k), _h.pos);
         _h.quat.slerpQuaternions(_h.q0, _h.q1, ss(Math.min(1, k * 1.25)));
-        placeHelmet(hung.helmet, _h.pos, _h.quat);
+        placeHelmet(hung.helmet, _h.pos, _h.quat, ss(k));
         P.handL = rim(_h.pos, _h.quat, 1, V());
         // the right hand comes up from the side and takes the other side of the rim
         const w = span(k, 0.25, 0.7);
@@ -1344,6 +1353,8 @@ function stepsOn(bike) {
         const ref = hero.model.getObjectByName("gear-helmet");
         hung.helmet.group.position.copy(ref.position);
         hung.helmet.group.quaternion.copy(ref.quaternion);
+        hung.helmet.group.scale.copy(ref.scale);
+        hero.pressHair?.(true); // the hair goes under it
         hung.strap.visible = false;
       },
     });
@@ -1553,6 +1564,7 @@ function stepsOff(bike) {
       start() {
         helmetWorn(_h.p0, _h.q0);
         scene.attach(hung.helmet.group);
+        hero.pressHair?.(false);
       },
       run(k) {
         P.kick = 1;
@@ -1577,7 +1589,7 @@ function stepsOff(bike) {
         helmetHung(hung, _h.p1, _h.q1);
         bez(_h.p0, V().copy(_h.p0).lerp(_h.p1, 0.5).addScaledVector(UPV, 0.12), _h.p1, ss(k), _h.pos);
         _h.quat.slerpQuaternions(_h.q0, _h.q1, ss(k));
-        placeHelmet(hung.helmet, _h.pos, _h.quat);
+        placeHelmet(hung.helmet, _h.pos, _h.quat, 1 - ss(k));
         P.handL = V().copy(_h.pos).addScaledVector(UPV, 0.13).addScaledVector(_m.right, -0.02);
         P.handR = k < 0.4 ? V().copy(_h.pos).addScaledVector(_m.right, 0.15) : false;
       },
@@ -1585,6 +1597,7 @@ function stepsOff(bike) {
         hung.hang.attach(hung.helmet.group);
         hung.helmet.group.position.copy(hung.home.position);
         hung.helmet.group.quaternion.copy(hung.home.quaternion);
+        hung.helmet.group.scale.set(1, 1, 1);
         hung.strap.visible = true;
       },
     });
@@ -2619,6 +2632,7 @@ frame();
 
 // Small handle for automated tests and debugging in the console.
 window.__tiu = {
+  clearance,
   drive: () => drive.debug(),
   get nav() {
     return nav;

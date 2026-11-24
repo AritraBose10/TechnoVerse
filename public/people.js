@@ -200,6 +200,7 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
   const BOTTOMS = [[1, 1, 1], [0.6, 0.65, 0.85], [0.55, 0.55, 0.58], [1.05, 0.95, 0.78], [0.8, 0.85, 1], [0.7, 0.62, 0.55], [0.45, 0.45, 0.5]];
   let variantNo = 0;
   let transitT = 3;
+  let hailT = 9;
   function variant(role) {
     const n = variantNo++;
     const plain = role === "guard"; // the guards keep their uniform
@@ -672,6 +673,74 @@ function person(role, x, z, heading = 0, mesh = true) {
       p.x += (rx / d) * k;
       p.z += (rz / d) * k;
     }
+  }
+  // ---------- clearance: the last word on where a body may stand ----------
+  // Whatever moved a person this frame (the navmesh crowd, a script walking them to a door, a bump), nobody
+  // ends the frame inside something solid: a vehicle's body, an open car or bus door, or anything you can
+  // see at body height along the street (clearance.js: walls, posts, stall cloths, counters, benches,
+  // stools, packets...). The only bodies allowed into something are those whose task is to be there: a
+  // passenger in the doorway of the vehicle they are boarding or leaving (its body only, never the door
+  // leaf), someone sitting, a keeper behind the counter, the aisle's single file (scripted to the
+  // centimetre against the railing and the counters).
+  const IN_FURNITURE = new Set(["bench", "keeper", "customer", "bay", "bayOut", "vendor", "guard"]);
+  const O0 = local(0, 0), O1 = local(1, 0);
+  const cP = O1[0] - O0[0], sP = O0[1] - O1[1];
+  const toStreet = (wx, wz) => [(wx - O0[0]) * cP - (wz - O0[1]) * sP, (wx - O0[0]) * sP + (wz - O0[1]) * cP];
+  const _lp = new THREE.Vector3();
+  function keepClear(p) {
+    if (p.hidden || p.sit) return;
+    const task = p.tasks[0];
+    const tt = task?.type;
+    const own = (tt === "board" && task.phase !== "walk") || tt === "alight" || tt === "argue" ? task.veh : null;
+    const r = p.ag != null ? 0.22 : 0.18;
+    for (const veh of traffic.vehicles) {
+      const L = veh.L || 0, W = veh.W || 0;
+      if (Math.abs(veh.x - p.x) > L / 2 + 2 || Math.abs(veh.lat - p.z) > W / 2 + 2) continue;
+      // open door leaves: a board 5 cm thick from the hinge to the far edge
+      const leaves = veh.mesh?.userData?.leaves;
+      if (leaves) for (const lf of leaves) {
+        if (!lf.pivot.visible) continue;
+        lf.pivot.updateWorldMatrix(true, false);
+        lf.pivot.localToWorld(_lp.set(0, 0, 0));
+        const [ax, az] = toStreet(_lp.x, _lp.z);
+        lf.pivot.localToWorld(_lp.set(lf.len, 0, 0));
+        const [bx, bz] = toStreet(_lp.x, _lp.z);
+        const ux = bx - ax, uz = bz - az, ll = ux * ux + uz * uz || 1;
+        const t = clamp(((p.x - ax) * ux + (p.z - az) * uz) / ll, 0, 1);
+        const cx = ax + ux * t, cz = az + uz * t;
+        let dx = p.x - cx, dz = p.z - cz;
+        const d = Math.hypot(dx, dz), need = r + 0.03;
+        if (d >= need) continue;
+        if (d < 1e-4) { dx = -uz; dz = ux; } // on the line: out to the side it faces
+        const dl = Math.hypot(dx, dz) || 1;
+        p.x = cx + (dx / dl) * need;
+        p.z = cz + (dz / dl) * need;
+      }
+      if (veh === own) continue; // stepping into or out of it
+      // the body: a box along its heading, corners rounded by the body's radius
+      const yaw = veh.yaw || 0, c = Math.cos(yaw), sn = Math.sin(yaw);
+      const rx = p.x - veh.x, rz = p.z - veh.lat;
+      const u = rx * c - rz * sn, w = rx * sn + rz * c; // along its nose, across to its +z side
+      const hl = L / 2, hw = W / 2;
+      const cu = clamp(u, -hl, hl), cw = clamp(w, -hw, hw);
+      let du = u - cu, dw = w - cw;
+      let d = Math.hypot(du, dw);
+      if (d >= r) continue;
+      let nu, nw;
+      if (d > 1e-4) {
+        nu = (du / d) * r + cu;
+        nw = (dw / d) * r + cw;
+      } else {
+        // the centre is inside: out by the shortest way
+        const ex = hl - Math.abs(u), ez = hw - Math.abs(w);
+        if (ex < ez) { nu = Math.sign(u || 1) * (hl + r); nw = w; } else { nu = u; nw = Math.sign(w || 1) * (hw + r); }
+      }
+      p.x = veh.x + nu * c + nw * sn;
+      p.z = veh.lat - nu * sn + nw * c;
+    }
+    // everything standing still along the street
+    const clr = nav?.clearance;
+    if (clr && !IN_FURNITURE.has(tt) && !p.inA) clr.push(p, r);
   }
   function stand(p, dt, face) {
     if (p.ag != null) {
@@ -1563,7 +1632,27 @@ function person(role, x, z, heading = 0, mesh = true) {
     p.side = st.road;
     // to the back of the queue
     const tailX = st.headX + st.tail * (st.waiting.length + st.coming);
-    p.tasks.push(lane(st.road, Math.sign(tailX - x0) || 1, tailX), { type: "waitTransit", stop: st, kinds: st.kinds, T: range(60, 200) });
+    p.tasks.push(lane(st.road, Math.sign(tailX - x0) || 1, tailX), { type: "waitTransit", stop: st, kinds: st.kinds.filter((k) => k !== "taxi"), T: range(60, 200) });
+    st.coming++;
+    p.comingStop = st;
+  }
+  // someone with a hand out for a taxi: waits at a stop's kerb, and a taxi that sees them (traffic.hail) pulls in
+  function hailer() {
+    const active = people.filter((q) => q.hailStop);
+    if (active.length >= 2) return;
+    const free = stopSpots.filter((s) => s.kinds.includes("taxi") && !active.some((q) => q.hailStop === s) && s.waiting.length + s.coming < s.cap);
+    if (!free.length) return;
+    const st = free[(rnd() * free.length) | 0];
+    const role = pickW([["office", 4], ["student", 3], ["local", 3]]);
+    const from = chance(0.5) ? -1 : 1;
+    let x0 = clamp(st.x + from * range(25, 45), DOMAIN[0] + 2, DOMAIN[1] - 2);
+    if (st.road === "far" && x0 > AISLE.x0 - 2 && x0 < AISLE.x1 + 2) x0 = AISLE.x1 + range(2, 8);
+    const p = person(role, x0, laneZ(st.road, x0, -from), headingOf(-from, 0));
+    if (!p) return;
+    p.side = st.road;
+    p.hailStop = st;
+    const tailX = st.headX + st.tail * (st.waiting.length + st.coming);
+    p.tasks.push(lane(st.road, Math.sign(tailX - x0) || 1, tailX), { type: "waitTransit", stop: st, kinds: ["taxi"], T: range(45, 100) });
     st.coming++;
     p.comingStop = st;
   }
@@ -1595,15 +1684,35 @@ function person(role, x, z, heading = 0, mesh = true) {
     if (task.look < -4) task.look = range(3, 7);
     if (task.look > 0) p.lookAt = lookPt(st.x - (st.road === "near" ? 1 : -1) * 40, st.road === "near" ? 12 : 22, 1.2);
     else p.gesture = { text: 1 };
+    const hailing = task.kinds.length === 1 && task.kinds[0] === "taxi";
+    if (hailing && task.there) {
+      traffic.hail[`${st.road}:${st.x}`] = t + 0.7; // taxis ask for this each time they look for a fare
+      let coming = null;
+      let nearest = 70;
+      for (const veh of traffic.vehicles) {
+        if (veh.kind !== "taxi" || veh.road !== st.road || veh.atStop) continue;
+        const ahead = (st.x - veh.x) * veh.dir;
+        if (ahead > -3 && ahead < nearest) {
+          nearest = ahead;
+          coming = veh;
+        }
+      }
+      if (coming) {
+        // an arm out toward the taxi coming up the road, eyes on it
+        const at = toWorld(coming.x, coming.lat, 1.35);
+        p.gesture = { point: 1, at };
+        p.lookAt = at;
+      }
+    }
     task.T -= dt;
     for (const veh of traffic.vehicles) {
-      if (i !== 0) break; // in turn
+      if (i !== 0 && !hailing) break; // in turn (a hand out for a taxi is nobody's turn but its own)
       if (veh.road !== st.road || !veh.atStop || !task.kinds.includes(veh.kind) || Math.abs(veh.x - st.x) > 6) continue;
       if ((veh.seats ?? (veh.kind === "bus" ? 6 : 3)) <= 0) continue;
       veh.seats = (veh.seats ?? (veh.kind === "bus" ? 6 : 3)) - 1;
       veh.boarding = (veh.boarding || 0) + 1;
       st.waiting = st.waiting.filter((q) => q !== p);
-      p.tasks[0] = { type: "board", veh, stop: st, phase: "walk", t: 0 };
+      p.tasks[0] = { type: "board", veh, stop: st, kinds: task.kinds, phase: "walk", t: 0 };
       return;
     }
     if (task.T < 0) {
@@ -1618,7 +1727,7 @@ function person(role, x, z, heading = 0, mesh = true) {
     const gone = !traffic.vehicles.includes(veh) || !veh.atStop;
     if (gone && task.phase === "walk") {
       // it left without them: back to waiting
-      p.tasks[0] = { type: "waitTransit", stop: task.stop, kinds: task.stop.kinds, T: range(40, 120), in: true };
+      p.tasks[0] = { type: "waitTransit", stop: task.stop, kinds: task.kinds ?? task.stop.kinds, T: range(40, 120), in: true };
       task.stop.waiting.unshift(p); // still first in line
       return;
     }
@@ -1627,6 +1736,7 @@ function person(role, x, z, heading = 0, mesh = true) {
       // along the kerb to the door (the doorstep itself is on the carriageway, off the mesh)
       const left = moveTo(p, d.x, d.z, p.pace * 1.15, dt);
       task.still = p.speed < 0.08 && left < 1.2 ? (task.still || 0) + dt : 0;
+      if (veh.kind === "taxi" && left < 2.2) veh.rearOpenT = t; // the rear door opens as they arrive
       if ((left < 0.18 || task.still > 0.6) && (veh.kind !== "bus" || (veh.doorK ?? 1) > 0.8)) {
         task.phase = "in";
         task.t = 0;
@@ -1639,6 +1749,7 @@ function person(role, x, z, heading = 0, mesh = true) {
     task.t += dt;
     const bus = veh.kind === "bus";
     const dur = bus ? 1.6 : 1.1;
+    if (veh.kind === "taxi") veh.rearOpenT = t;
     const k = Math.min(1, task.t / dur);
     const inn = door(veh, true);
     p.x = task.from.x + (inn.x - task.from.x) * k;
@@ -1664,7 +1775,7 @@ function person(role, x, z, heading = 0, mesh = true) {
   // someone arrives on a bus or auto that has just stopped
   function unload(veh) {
     veh.unloaded = true;
-    const n = veh.kind === "bus" ? pickW([[0, 1], [1, 3], [2, 3], [3, 2], [4, 1]]) : pickW([[0, 2], [1, 3], [2, 2]]);
+    const n = veh.kind === "bus" ? pickW([[0, 1], [1, 3], [2, 3], [3, 2], [4, 1]]) : veh.kind === "taxi" ? pickW([[0, 3], [1, 4], [2, 1]]) : pickW([[0, 2], [1, 3], [2, 2]]);
     const occ = veh.mesh.userData.occupants;
     if (occ) while (occ.count() < n && occ.seatIn()); // whoever steps off was inside already
     for (let i = 0; i < n; i++) {
@@ -1700,6 +1811,7 @@ function person(role, x, z, heading = 0, mesh = true) {
     task.t += dt;
     const bus = veh.kind === "bus";
     const dur = bus ? 1.7 : 1.0;
+    if (veh.kind === "taxi") veh.rearOpenT = t;
     const k = Math.min(1, task.t / dur);
     if (!task.from) {
       const inn = traffic.vehicles.includes(veh) ? door(veh, true) : { x: p.x, z: p.z };
@@ -2002,7 +2114,7 @@ function person(role, x, z, heading = 0, mesh = true) {
     const out = traffic.vehicles.includes(veh) ? door(veh) : { x: p.x, z: p.z };
     if (carDoor) {
       // the driver's door is on the road side, a little behind the front wheel
-      out.x = veh.x + veh.dir * 0.3;
+      out.x = veh.x + veh.dir * (veh.mesh.userData.door.exitX ?? 0.3); // the rear part of the opening, behind the open leaf
       out.z = veh.lat - k * (veh.W / 2 + 0.3);
       inn.x = out.x;
       inn.z = veh.lat - k * veh.W * 0.22;
@@ -2856,10 +2968,15 @@ function person(role, x, z, heading = 0, mesh = true) {
         transitT = range(4, 10) * (quality === "low" ? 2 : 1);
         transitWaiter();
       }
+      hailT -= dt;
+      if (hailT < 0) {
+        hailT = range(18, 40) * (quality === "low" ? 2 : 1);
+        hailer();
+      }
       collisions(t, extra);
       meetPlayer(dt, t, extra[0]);
       for (const c of traffic.crashes) if (!c.drivers && !c.done) stepOut(c);
-      for (const veh of traffic.vehicles) if (veh.atStop && !veh.unloaded && (veh.kind === "bus" || veh.kind === "auto")) unload(veh);
+      for (const veh of traffic.vehicles) if (veh.atStop && !veh.unloaded && (veh.kind === "bus" || veh.kind === "auto" || veh.kind === "taxi")) unload(veh);
       // new walkers keep the street busy
       const walking = people.filter((p) => p.tasks[0] && (p.tasks[0].type === "lane" || p.tasks[0].type === "goto")).length;
       arriveT -= dt;
@@ -2901,6 +3018,7 @@ function person(role, x, z, heading = 0, mesh = true) {
           p.groundY = groundAt(p.x, p.z);
         } else if (p.noRay && p.floorY !== undefined) p.groundY = p.floorY;
         if (p.groundY !== undefined) p.y += (p.groundY - p.y) * Math.min(1, dt * 10);
+        keepClear(p);
         const [wx, wz] = local(p.x, p.z);
         p.group.position.set(wx, p.y + 0.015 + (p.lift || 0), wz);
         p.group.rotation.y = phi + p.heading;
