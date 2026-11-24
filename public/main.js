@@ -1,7 +1,9 @@
 import { runInstanceCull } from "/instcull.js";
 import * as THREE from "three";
 import RAPIER from "/vendor/rapier.es.js";
+import { createDriving } from "/drive.js";
 import { buildWorld } from "/world.js";
+import { loadLandmarks } from "/landmarks.js";
 import { createMinimap } from "/minimap.js";
 import { loadCharacterKit, loadCrowdBody, loadAvatarBody, loadPolo, makeCharacter } from "/character.js";
 import { vehiclesReady } from "/vehicles.js";
@@ -125,6 +127,7 @@ const world = new RAPIER.World({ x: 0, y: -GRAVITY, z: 0 });
 world.timestep = STEP;
 const campus = await (await fetch("/campus.json")).json();
 const worldInfo = buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel });
+loadLandmarks({ scene, campus });
 const minimap = createMinimap({ campus, getMe: () => me, getPlayers: () => players, getCamYaw: () => camYaw });
 const { places, props, focus, entranceYaw, animate: animateWorld, captureReflections } = worldInfo;
 // The walking navmesh and Detour crowd (nav.js): built from the fixed colliders in the background; the
@@ -289,14 +292,14 @@ function updateStreet(dt, pos) {
   const vx = lastLocal ? (lx - lastLocal[0]) / Math.max(dt, 1e-3) : 0;
   const vz = lastLocal ? (lz - lastLocal[1]) / Math.max(dt, 1e-3) : 0;
   lastLocal = [lx, lz];
-  const extra = [{ x: lx, z: lz, r: riding ? 0.7 : 0.35, vx, vz, riding: Boolean(riding) }];
+  const extra = [drive.active ? drive.streetExtra(lx, lz, vx, vz) : { x: lx, z: lz, r: riding ? 0.7 : 0.35, vx, vz, riding: Boolean(riding) }];
   for (const a of players.values()) {
     const [ax, az] = worldInfo.toLocal(a.group.position.x, a.group.position.z);
     extra.push({ x: ax, z: az, r: a.bikeOn ? 0.7 : 0.35, vx: 0, vz: 0 });
   }
   // (parked bicycles and motorcycles are obstacles in the navmesh, see bikeObstacle)
   const onRoad = crowd.onRoad();
-  for (const e of extra) if ((e.z > 8.4 && e.z < 15.4) || (e.z > 19.4 && e.z < 25.6)) onRoad.push({ x: e.x, z: e.z, vx: e.vx, w: e.r > 0.5 ? 0.9 : 0.7 });
+  for (const e of extra) if ((e.z > 8.4 && e.z < 15.4) || (e.z > 19.4 && e.z < 25.6)) onRoad.push({ x: e.x, z: e.z, vx: e.vx, w: e.w ?? (e.r > 0.5 ? 0.9 : 0.7) });
   for (const b of bikes) {
     if (riding?.bike === b) continue;
     const [bx, bz] = worldInfo.toLocal(b.x, b.z);
@@ -334,7 +337,7 @@ function updateStreet(dt, pos) {
     crowd.playerHit = null;
     if (riding && !seq && !crash) {
       const v0 = riding.r.v;
-      if (Math.abs(v0) > 4.5 && h.p && h.p.group) {
+      if (Math.abs(v0) > 2.5 && h.p && h.p.group) {
         const me0 = me.group.position, pp = h.p.group.position;
         const l = Math.hypot(me0.x - pp.x, me0.z - pp.z) || 1;
         riding.r.v = 0;
@@ -929,6 +932,7 @@ addEventListener("keydown", (e) => {
     return;
   }
   keys.add(e.code);
+  if (drive.keydown(e)) { e.preventDefault(); return; } // E near a car, and every driving key while in one
   if (e.code === "Space") e.preventDefault();
   if (e.code === "KeyV") setTalking(true);
   if (e.code === "KeyE" && !e.repeat) toggleRide();
@@ -1276,7 +1280,9 @@ function stepsOn(bike) {
   const steps = [];
   const P = {}; // the pose being built this frame (see seqFrame)
   const relaxed = (side) => false;
-  if (motor && hung) {
+  const head = hero?.model?.getObjectByName("Head");
+  const wearingHelmet = Boolean(motor && hung && head && (hung.helmet.group.parent === head || head.getObjectByName("helmet")));
+  if (motor && hung && !wearingHelmet) {
     // The helmet is held by its rim, one hand each side (the left hand alone while picking it up).
     // The grips are points on the helmet itself, so the hands and the helmet move as one piece:
     // the helmet goes where the path says and the wrists follow it through the arm IK.
@@ -1522,7 +1528,9 @@ function stepsOff(bike) {
       P.footL = V().copy(_m.groundL).lerp(footSpot(-1, V()), span(k, 0, 0.45));
     },
   });
-  if (motor && hung) {
+  const head = hero?.model?.getObjectByName("Head");
+  const wearingHelmet = Boolean(motor && hung && head && (hung.helmet.group.parent === head || head.getObjectByName("helmet")));
+  if (motor && hung && wearingHelmet) {
     steps.push({
       name: "undo the strap", dur: 0.6,
       run(k) {
@@ -2086,17 +2094,30 @@ function rideFrame(dt) {
     const f = { x: (-Math.sin(r.heading) * dir), y: 0, z: (-Math.cos(r.heading) * dir) };
     const hit = world.castRayAndGetNormal(new RAPIER.Ray({ x: before.x, y: before.y - BODY_CENTRE + 0.5, z: before.z }, f), 1.2, true, undefined, undefined, undefined, body.rigid, (c) => !c.parent()?.isDynamic());
     if (hit && hit.toi < 0.92 + Math.abs(r.v) * dt) {
-      const veh = traffic && traffic.vehicleOfCollider(hit.collider ?? hit.colliderHandle);
+      const cHandle = (hit.collider ?? {}).handle ?? hit.colliderHandle;
+      const veh = traffic && traffic.vehicleOfCollider(cHandle);
+      const person = crowd && crowd.personOfCollider?.(cHandle);
       if (veh && Math.abs(r.v) > 2) {
         const v0 = r.v;
         r.v = 0;
         crashIntoVehicle(veh, v0, hit.normal);
         return;
       }
+      if (person) {
+        const v0 = r.v;
+        r.v = 0;
+        crowd.knockPerson?.(person, r.heading, v0);
+        if (Math.abs(v0) > 2.5) {
+          crashIntoVehicle(null, v0, hit.normal, "person");
+          return;
+        }
+        logLine("Bump! Careful with pedestrians.", true);
+        return;
+      }
       if (!veh && Math.abs(r.v) > 4) {
         const v0 = r.v;
         r.v = 0;
-        const parked = bikeColliders.has((hit.collider ?? {}).handle ?? hit.colliderHandle);
+        const parked = bikeColliders.has(cHandle);
         crashIntoVehicle(null, v0, hit.normal, parked ? "bike" : "wall");
         return;
       }
@@ -2175,6 +2196,8 @@ let lastSent = "";
 const _interp = { x: 0, y: 0, z: 0, ry: 0, vx: 0, vy: 0, vz: 0 };
 const lerpAngle = (a, b, t) => a + Math.atan2(Math.sin(b - a), Math.cos(b - a)) * t;
 
+// driveable cars (drive.js): parked cars, the vehicle physics, the dashboard and the cameras
+const drive = createDriving({ THREE, RAPIER, scene, world, camera, traffic, worldInfo, keys, STEP, BODY_CENTRE, getHero: () => hero, getMe: () => me, playerBody: body, placeBody, logLine, getAudio: () => fxCtx || voice.ctx || null, getView: () => ({ yaw: camYaw, pitch: camPitch, dragging: Boolean(drag) }), isBusy: () => Boolean(seq || crash || riding) });
 function frame() {
   requestAnimationFrame(frame);
   const rawDt = Math.min(clock.getDelta(), 0.1);
@@ -2186,6 +2209,7 @@ function frame() {
   const pos = me.group.position;
   if (seq && hero) seqFrame(dt);
   else if (crash && hero) crashFrame(dt);
+  else if (drive.active && hero) drive.frame(dt); // while driving, drive.js steps the physics world
   else if (riding && hero) rideFrame(dt);
   else walkFrame(dt, now);
   // Shadows only where the player can see them: far chunks stop casting (4 times a second)
@@ -2200,6 +2224,7 @@ function frame() {
   afterMove(dt, now, pos);
 }
 function updateRideHint() {
+  if (drive.active || drive.near()) { const h = drive.hint(); $("#rideHint").textContent = h; $("#rideHint").hidden = !h; $("#ride").hidden = true; return; }
   const hint = $("#rideHint");
   const btn = $("#ride");
   let text = "";
@@ -2499,6 +2524,7 @@ function afterMove(dt, now, pos) {
     camera.lookAt(debugCam[3], debugCam[4], debugCam[5]);
   }
   me.tag.visible = camNow > 2.6; // my own name tag gets in the way up close
+  if (drive.active) drive.camera(dt); // the car's camera replaces the walking one
   scene.userData.cullTrees?.(camera, me.group.position.x, me.group.position.z, sun.castShadow);
   runInstanceCull(camera, me.group.position.x, me.group.position.z, sun.castShadow);
   draw();
@@ -2582,6 +2608,7 @@ frame();
 
 // Small handle for automated tests and debugging in the console.
 window.__tiu = {
+  drive: () => drive.debug(),
   get nav() {
     return nav;
   },

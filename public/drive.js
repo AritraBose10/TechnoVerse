@@ -755,7 +755,7 @@ export function createDriving(ctx) {
       let Te;
       if (running) {
         if (S.fuelCut ? S.rpm < LIMITER - 150 : S.rpm > LIMITER) S.fuelCut = !S.fuelCut;
-        const thrEff = S.fuelCut ? 0 : S.thr * (S.shiftT > 0 && (auto || S.autoClutch) ? 0.35 : 1);
+        const thrEff = S.fuelCut ? 0 : S.thr * (S.shiftT > 0 && (auto || S.autoClutch) ? 0.35 : 1) * (g < 0 ? 1 - smooth(5.5, 7.5, -v) : 1); // reversing tops out near 27 km/h
         const full = table(TORQUE, S.rpm) * car.ks.tk;
         Te = full * thrEff - fric(S.rpm) * (1 - thrEff);
         if (S.rpm < IDLE * 1.15) Te += clamp(fric(S.rpm) + 0.6 * (IDLE - S.rpm), 0, 120) * (1 - thrEff); // idle governor
@@ -779,7 +779,8 @@ export function createDriving(ctx) {
       S.rpm = omegaE * (30 / Math.PI);
       if (running && S.rpm < 150 && cap < 0.5) S.rpm = 150;
       if (!running) S.rpm = Math.max(0, S.rpm - 1500 * dt * (cap > 0.5 ? 0 : 1));
-      if (running && !auto && g !== 0 && cap > 60 && S.rpm < STALL) {
+      if (running && S.autoClutch && !auto && S.rpm < 520) S.rpm = 520; // the auto-clutch never lets the engine die (it opens the clutch first, see anti-stall)
+      if (running && !auto && !S.autoClutch && g !== 0 && cap > 60 && S.rpm < STALL) {
         stopEngine(true);
         S.rpm = Math.max(0, wasRpm * 0.8);
       }

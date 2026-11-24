@@ -7,6 +7,7 @@
 import * as THREE from "three";
 import { mergeGeometries } from "/vendor/jsm/utils/BufferGeometryUtils.js";
 import { picture } from "/pbr.js";
+import { addInstanceCull } from "/instcull.js";
 
 // ---------------------------------------------------------------- cars
 const CARS = {
@@ -475,6 +476,7 @@ function instanced(scene, parts, spots) {
     im.castShadow = cast;
     im.receiveShadow = true;
     scene.add(im);
+    addInstanceCull(im, spots.map((s) => s.x), spots.map((s) => s.z));
   }
 }
 const place = (geo, x, y, z, rx = 0, ry = 0, rz = 0) => {

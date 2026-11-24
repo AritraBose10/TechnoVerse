@@ -25,6 +25,7 @@ import { officeLook, studentLook, localLook, shopkeeperLook, guardLook } from "/
 import { pickBody } from "/crowdbodies.js";
 import { varyBody } from "/character.js";
 
+const DRAW_DIST = new URLSearchParams(location.search).get("q") === "low" ? 60 : 85; // people beyond this are not drawn (a 1.7 m figure is about 20 px tall at 85 m)
 const CROWD_R = 0.22; // a walker's width in the crowd (the mesh keeps their bodies 0.27 m clear of walls)
 const STAND_R = 0.16; // ... and when standing about
 const SQUEEZE_R = 0.2; // ... and turned sideways to slip past (never so thin that two bodies share a place)
@@ -54,6 +55,8 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
   let nav = null; // the navmesh and crowd, once built
   navLoading?.then((n) => (nav = n));
   const WALKERS = low ? 10 : 26;
+  const personColliders = new Map();
+  let timeNow = 0;
 
   // ---------- where things are ----------
   const { stalls, openings, shed } = spots;
@@ -250,13 +253,14 @@ function person(role, x, z, heading = 0, mesh = true) {
     group.add(c.model);
     scene.add(group);
     const body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased());
-    world.createCollider(RAPIER.ColliderDesc.capsule(0.55 * look.height, 0.24).setTranslation(0, 0.85 * look.height, 0).setCollisionGroups(0x00020002), body); // group 2: the player's body walks through (see meetPlayer), rays still hit
+    const collider = world.createCollider(RAPIER.ColliderDesc.capsule(0.55 * look.height, 0.24).setTranslation(0, 0.85 * look.height, 0).setCollisionGroups(0x00020002), body); // group 2: the player's body walks through (see meetPlayer), rays still hit
     const p = {
       role,
       bodyName: bodyKit ? bodyKit.name : "fallback",
       char: c,
       group,
       body,
+      collider,
       x,
       z,
       y: snap ? snap.y - 0.018 : groundAt(x, z),
@@ -299,6 +303,7 @@ function person(role, x, z, heading = 0, mesh = true) {
       cup: false,
     };
     people.push(p);
+    personColliders.set(collider.handle, p);
     if (snap) {
       p.ag = nav.addAgent(snap.x, snap.z, { radius: CROWD_R, maxSpeed: p.pace, separationWeight: 0.4, queryRange: 2.2 });
       if (p.ag == null) stats.noAgent = (stats.noAgent || 0) + 1;
@@ -306,6 +311,7 @@ function person(role, x, z, heading = 0, mesh = true) {
     return p;
   }
   function remove(p) {
+    if (p.collider) personColliders.delete(p.collider.handle);
     leave(p);
     scene.remove(p.group);
     world.removeRigidBody(p.body);
@@ -785,6 +791,11 @@ function person(role, x, z, heading = 0, mesh = true) {
   }
   // the crowd's picture of where an agent is, each frame
   function syncAgent(p, dt) {
+    if (p.rx && p.rx.knock) {
+      p.vx = 0;
+      p.vz = 0;
+      return;
+    }
     const s = nav.agentState(p.ag);
     if (!s) {
       p.ag = null;
@@ -1748,10 +1759,15 @@ function person(role, x, z, heading = 0, mesh = true) {
     p.lookAt = toWorld(r.ox, r.oz, 1.5);
     if (r.knock) {
       // hit by the player riding: a stumble back with arms flung out, or (hard) down on the ground and up again
+      p.vx = 0;
+      p.vz = 0;
       p.expr = "surprised";
       p.nod = 0;
       p.talk = 0;
-      if (r.t > (r.knock > 0.5 ? 3.6 : 1.5)) p.rx = null;
+      if (r.t > (r.knock > 0.5 ? 3.6 : 1.5)) {
+        if (p.ag != null && nav) nav.teleport(p.ag, p.x, p.z);
+        p.rx = null;
+      }
       return;
     }
     if (r.kind === "flinch") {
@@ -1778,6 +1794,40 @@ function person(role, x, z, heading = 0, mesh = true) {
       p.gesture.hip = 1;
     }
     if (r.t > (r.kind === "hit" ? 2.6 : 2.0)) p.rx = null;
+  }
+  function knockPerson(p, heading, v0 = 3) {
+    if (!p || p.hidden) return;
+    const speed = Math.abs(v0);
+    const dir = Math.sign(v0) || 1;
+    const fx = -Math.sin(heading) * dir;
+    const fz = -Math.cos(heading) * dir;
+    const [w0x, w0z] = local(0, 0);
+    const [w1x, w1z] = local(1, 0);
+    const [w2x, w2z] = local(0, 1);
+    const axX = w1x - w0x, axZ = w1z - w0z;
+    const azX = w2x - w0x, azZ = w2z - w0z;
+    const sx = fx * axX + fz * axZ;
+    const sz = fx * azX + fz * azZ;
+    const sl = Math.hypot(sx, sz) || 1;
+    const pushDist = Math.max(1.5, Math.min(3.5, speed * 0.45));
+    const sev = Math.max(0.75, Math.min(1.0, speed / 3.5)); // guaranteed >= 0.75 so they fall down
+    p.rx = {
+      kind: "hit",
+      t: 0,
+      ox: p.x - (sx / sl) * 0.5,
+      oz: p.z - (sz / sl) * 0.5,
+      mx: (sx / sl) * pushDist,
+      mz: (sz / sl) * pushDist,
+      wdx: fx * pushDist,
+      wdz: fz * pushDist,
+      knock: sev,
+      out: "hit",
+    };
+    p.vx = 0;
+    p.vz = 0;
+    p.bumpAt = timeNow;
+    stats.hits = (stats.hits || 0) + 1;
+    if (p.ag != null && nav) nav.teleport(p.ag, p.x + (sx / sl) * pushDist, p.z + (sz / sl) * pushDist);
   }
   // ---------- the player on foot meets people ----------
   // Nobody is a wall. Someone in the player's path steps aside (sooner and quicker the faster the player comes), looking
@@ -1868,13 +1918,17 @@ function person(role, x, z, heading = 0, mesh = true) {
     if (e) {
       playerAt = e;
       const sp = Math.hypot(e.vx || 0, e.vz || 0);
-      for (const p of walkers) {
-        if (p.rx) continue;
+      const hitDist = (e.r || 0.7) + 0.45;
+      for (const p of people) {
+        if (p.hidden || p.rx || p.sit) continue;
         const d = Math.hypot(p.x - e.x, p.z - e.z);
-        if (e.riding && sp > 1.5 && d < 0.85) {
+        if (e.riding && sp > 1.2 && d < hitDist) {
+          const heading = Math.atan2(-(e.vx || 0), -(e.vz || 0));
+          knockPerson(p, heading, sp);
+          crowdApi.playerHit = { p, sev: p.rx.knock };
+        } else if (!e.riding && isWalking(p) && ready(p, t) && d < 0.85) {
           stats.hits = (stats.hits || 0) + 1;
           startBump(p, e.x, e.z, t, "hit");
-          // how hard: nothing under ~2 m/s, a stagger to ~4, down on the ground above
           const sev = Math.max(0, Math.min(1, (sp - 2) / 5));
           if (sev > 0.05) {
             p.rx.knock = sev;
@@ -1882,7 +1936,7 @@ function person(role, x, z, heading = 0, mesh = true) {
             p.rx.mx *= k;
             p.rx.mz *= k;
             const w0 = local(0, 0), w1 = local(p.rx.mx, p.rx.mz);
-            p.rx.wdx = w1[0] - w0[0]; // the push, in the world frame
+            p.rx.wdx = w1[0] - w0[0];
             p.rx.wdz = w1[1] - w0[1];
           }
           crowdApi.playerHit = { p, sev };
@@ -2763,6 +2817,8 @@ function person(role, x, z, heading = 0, mesh = true) {
     stats,
     playerHit: null,
     playerBump: null, // set when the player on foot touches someone; main.js reads and clears it
+    personOfCollider: (c) => personColliders.get(c && c.handle !== undefined ? c.handle : c) || null,
+    knockPerson,
     aisle: AISLE,
     counters,
     stops: stopSpots,
@@ -2779,6 +2835,7 @@ function person(role, x, z, heading = 0, mesh = true) {
      */
     update(dt, t, extra = []) {
       if (!kit || !bodiesIn || !nav) return;
+      timeNow = t;
       if (!started) {
         started = true;
         settle();
@@ -2852,10 +2909,14 @@ function person(role, x, z, heading = 0, mesh = true) {
         // only draw and animate those in view; animate the far ones less often
         sphere.center.set(wx, p.y + 1, wz);
         const dist = cam.distanceTo(sphere.center);
-        const visible = dist < 120 && frustum.intersectsSphere(sphere);
+        const visible = dist < DRAW_DIST && frustum.intersectsSphere(sphere);
         p.group.visible = visible && !p.hidden;
         p.dtAcc += dt;
         if (!visible) continue;
+        // a lighter body beyond about 30 m (a little hysteresis so nobody flickers at the edge)
+        if (p.lowNow ? dist < 27 : dist > 32) {
+          if (!p.char.setLod || p.char.setLod(!p.lowNow) !== false) p.lowNow = !p.lowNow;
+        }
         const every = dist < 35 ? 1 : dist < 70 ? 2 : 4;
         if ((frameNo + p.frame) % every !== 0) continue;
         const step = p.dtAcc;
@@ -2867,7 +2928,7 @@ function person(role, x, z, heading = 0, mesh = true) {
         const knock = p.rx && p.rx.knock ? knockPose(p) : null;
         p.char.update(step, {
           limbs: knock ? knock.limbs : undefined,
-          speed: sp,
+          speed: knock && knock.angle > 0.3 ? 0 : sp,
           grounded: true,
           turnRate,
           facing: phi + p.heading,

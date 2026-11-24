@@ -604,6 +604,49 @@ async function buildKit(renderer) {
   return prepareBody(model, anims, { hair: true, kind: "rpm" });
 }
 
+
+/**
+ * The TechnoVerse avatars (models/avatars/avatar_tiu.glb, avatar_sof.glb): one body with its polo, trousers,
+ * shoes, hair and eyes as separate meshes, on the same Mixamo-named skeleton as the animations, with
+ * eyeBlink / jawOpen / mouthSmile shape keys. The polo and its prints are part of the file.
+ */
+const avatarCache = {};
+export function loadAvatarBody(renderer, url) {
+  return (avatarCache[url] ||= (async () => {
+    const [g, anims] = await Promise.all([gltfLoader.loadAsync(url), loadAnims()]);
+    const model = g.scene;
+    const maxAniso = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+    model.traverse((o) => {
+      if (!o.isMesh) return;
+      o.castShadow = true;
+      o.receiveShadow = true;
+      o.frustumCulled = false;
+      // Parts nobody sees from a third-person camera cost two skinned draws each (view and sun shadow): drop them.
+      if (/^(Underwear|Teeth|Tongue|EyeShadow|EyeTearLine)$/.test(o.name)) { o.visible = false; o.castShadow = false; return; }
+      // The file's sheen/specular extensions make physical materials (a much heavier shader on an iGPU): plain standard ones look the same at this distance.
+      if (o.material.isMeshPhysicalMaterial) {
+        const p = o.material;
+        const s = new THREE.MeshStandardMaterial({ name: p.name, color: p.color, map: p.map, normalMap: p.normalMap, normalScale: p.normalScale, roughness: p.roughness, roughnessMap: p.roughnessMap, metalness: 0, alphaMap: p.alphaMap, transparent: p.transparent, opacity: p.opacity, alphaTest: p.alphaTest, side: p.side, depthWrite: p.depthWrite });
+        o.material = s;
+      }
+      const m = o.material;
+      for (const key of ["map", "normalMap", "roughnessMap"]) if (m[key]) m[key].anisotropy = maxAniso;
+      m.envMapIntensity = 0.7;
+      if (m.name === "HairCap" || m.name === "HairStrands") {
+        m.alphaTest = 0.4;
+        m.transparent = false;
+        m.side = THREE.DoubleSide;
+        o.castShadow = false;
+      }
+      if (m.alphaMode === "BLEND" || m.transparent) m.depthWrite = false;
+      if (!/^(Body|Polo_|Trousers|Shoes|HairCap)/.test(o.name)) o.castShadow = false;
+      if (/^Decal_/.test(o.name)) { o.castShadow = false; m.polygonOffset = true; m.polygonOffsetFactor = -2; }
+      if (o.name === "Teeth" || o.name === "Tongue") o.castShadow = false;
+    });
+    return prepareBody(model, anims, { hair: false, kind: "tv" });
+  })());
+}
+
 // Rocketbox bodies (3ds Max "Biped" rig) renamed to the animation's (Mixamo) names.
 const RB_NAMES = { "Bip01 Pelvis": "Hips", "Bip01 Spine": "Spine", "Bip01 Spine1": "Spine1", "Bip01 Spine2": "Spine2", "Bip01 Neck": "Neck", "Bip01 Head": "Head", "Bip01 LEye": "LeftEye", "Bip01 REye": "RightEye" };
 for (const [side, S] of [["L", "Left"], ["R", "Right"]]) {
@@ -656,7 +699,15 @@ export async function loadCrowdBody(renderer, url) {
   const eyes = by("LeftEye").getWorldPosition(new THREE.Vector3()).add(by("RightEye").getWorldPosition(new THREE.Vector3())).multiplyScalar(0.5);
   model.rotation.y = -Math.atan2(eyes.x - head.x, eyes.z - head.z);
   model.updateMatrixWorld(true);
-  return prepareBody(model, anims, { hair: false, kind: "rocketbox" });
+  const kit = prepareBody(model, anims, { hair: false, kind: "rocketbox" });
+  // the lighter copy for people far from the camera (tools: models/people/lod, about 28% of the triangles, no textures)
+  gltfLoader.loadAsync(url.replace("/people/", "/people/lod/")).then((lg) => {
+    const full = [], low = [];
+    model.traverse((o) => o.isMesh && full.push(o));
+    lg.scene.traverse((o) => o.isMesh && low.push(o.geometry));
+    if (full.length === low.length) kit.lodGeo = low;
+  }).catch(() => {});
+  return kit;
 }
 
 /**
@@ -1206,21 +1257,30 @@ export async function loadHero(renderer) {
 export function makeCharacter(kit, opts = {}) {
   const model = cloneSkinned(kit.template);
   const faces = []; // meshes that carry the face controls
+  const lidMeshes = [];
+  const jawMeshes = [];
+  const bodyMeshes = []; // the body's own meshes (before clothes and gear are added), for the distance LOD
   model.traverse((o) => {
     if (!o.isMesh) return;
+    bodyMeshes.push(o);
     o.material = o.material.clone();
     if (o.morphTargetDictionary && "mouthSmile" in o.morphTargetDictionary) faces.push(o);
+    if (o.morphTargetDictionary && "eyeBlink" in o.morphTargetDictionary) lidMeshes.push(o); // the TechnoVerse avatar: body, lashes
+    if (o.morphTargetDictionary && "jawOpen" in o.morphTargetDictionary) jawMeshes.push(o); // body, teeth, tongue
   });
   const look = opts.look || {};
   const rocketbox = kit.kind === "rocketbox";
-  if (opts.uniform && rocketbox) {
+  const tv = kit.kind === "tv"; // the TechnoVerse avatar: already dressed
+  if (tv) {
+    // the polo is the one this avatar was made in; the swatch tints nothing here
+  } else if (opts.uniform && rocketbox) {
     if (opts.polo) attachPolo(model, opts.polo);
     else dressRocketboxShirt(model, opts.shirt);
   }
   else if (opts.uniform) dressInUniform(model, opts.shirt);
-  else if (!rocketbox) dressInLook(model, look);
+  else if (!rocketbox && !tv) dressInLook(model, look);
   // hair colour, or none
-  const hairMesh = rocketbox ? null : model.getObjectByName("Hair");
+  const hairMesh = rocketbox || tv ? null : model.getObjectByName("Hair");
   if (hairMesh) {
     const tone = opts.uniform ? "black" : look.hair || "black";
     if (tone === "none") hairMesh.visible = false;
@@ -1646,6 +1706,16 @@ export function makeCharacter(kit, opts = {}) {
     height,
     hasFace: Boolean(jawAxis),
     /** show or hide something carried (added with opts.gear) */
+    /** far away: swap the body for its lighter copy (kit.lodGeo, loaded in the background); false puts the full one back */
+    setLod(low) {
+      const g = kit.lodGeo;
+      if (!g || g.length !== bodyMeshes.length) return false;
+      bodyMeshes.forEach((m, i) => {
+        if (!m.userData.fullGeo) m.userData.fullGeo = m.geometry;
+        m.geometry = low ? g[i] : m.userData.fullGeo;
+      });
+      return true;
+    },
     showGear(kind, on) {
       model.traverse((o) => {
         if (o.name === "gear-" + kind) o.visible = on;
@@ -1855,7 +1925,26 @@ export function makeCharacter(kit, opts = {}) {
       mouth += (clamp(s.talk || 0, 0, 1) - mouth) * ease(dt, 22);
       for (const f of faces) {
         f.morphTargetInfluences[f.morphTargetDictionary.mouthSmile] = clamp(smile, 0, 1);
-        f.morphTargetInfluences[f.morphTargetDictionary.mouthOpen] = clamp(mouth, 0, 1);
+        if (f.morphTargetDictionary.mouthOpen !== undefined) f.morphTargetInfluences[f.morphTargetDictionary.mouthOpen] = clamp(mouth, 0, 1);
+      }
+      // The TechnoVerse avatar has shape keys, not face bones: blink, and a jaw that opens with speech and in yawns or surprise
+      if (!jawAxis && (lidMeshes.length || jawMeshes.length)) {
+        exprName = EXPRESSIONS[s.expr] ? s.expr : s.friendly ? "softSmile" : "neutral";
+        const want = EXPRESSIONS[exprName];
+        const kf = ease(dt, 5);
+        fx.lids += ((want.lids || 0) - fx.lids) * kf;
+        fx.jaw += ((want.jaw || 0) - fx.jaw) * kf;
+        blinkT -= dt;
+        blinkAge += dt;
+        if (blinkT < 0) {
+          blinkAge = 0;
+          blinkT = Math.random() < 0.15 ? 0.35 : 1.8 + Math.random() * 4.5;
+        }
+        const blink = blinkAge < 0.07 ? blinkAge / 0.07 : blinkAge < 0.2 ? 1 - (blinkAge - 0.07) / 0.13 : 0;
+        const shut = clamp(Math.max(blink, fx.lids), 0, 1);
+        const open = clamp(mouth * 0.5 + fx.jaw * 3, 0, 1);
+        for (const m of lidMeshes) m.morphTargetInfluences[m.morphTargetDictionary.eyeBlink] = shut;
+        for (const m of jawMeshes) m.morphTargetInfluences[m.morphTargetDictionary.jawOpen] = open;
       }
       // ---- expression, blinking, and the jaw moving with speech ----
       if (jawAxis) {

@@ -247,7 +247,7 @@ wss.on("connection", (ws) => {
         id: crypto.randomBytes(6).toString("hex"),
         name: clean(msg.name, 24) || "Guest",
         dept: clean(msg.dept, 32),
-        shirt: msg.shirt === "reboot" ? "reboot" : "tiu", // which T-shirt they chose
+        shirt: ["reboot", "sof"].includes(msg.shirt) ? msg.shirt : "tiu", // which T-shirt they chose
         color: /^#[0-9a-fA-F]{6}$/.test(msg.color) ? msg.color : "#4f7cff",
         ...spawnPoint(),
         voice: false,

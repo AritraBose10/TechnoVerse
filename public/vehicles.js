@@ -6,31 +6,32 @@ import * as THREE from "three";
 import { GLTFLoader } from "/vendor/jsm/loaders/GLTFLoader.js";
 import { mergeGeometries } from "/vendor/jsm/utils/BufferGeometryUtils.js";
 import { fitLamps } from "./lampfit.js";
+import { MeshoptDecoder } from "/vendor/jsm/libs/meshopt_decoder.module.js";
 
 const MODELS = {
-  micra: { kind: "hatch", file: "micra", L: 3.78, W: 1.67, H: 1.66, wb: 2.45 },
-  altok10: { kind: "hatch", file: "altok10", L: 3.6, W: 1.5, H: 1.51, wb: 2.37 },
-  alto800: { kind: "hatch", file: "alto800", L: 3.43, W: 1.49, H: 1.51, wb: 2.36 },
+  micra: { kind: "hatch", file: "micra", kit: true, near: true, k: 0.963, wr: 0.298, L: 3.78, W: 1.67, H: 1.66, wb: 2.45 },
+  altok10: { kind: "hatch", file: "altok10", kit: true, near: true, k: 0.822, wr: 0.284, L: 3.6, W: 1.5, H: 1.51, wb: 2.37 },
+  alto800: { kind: "hatch", file: "alto800", kit: true, near: true, k: 0.788, wr: 0.255, L: 3.43, W: 1.49, H: 1.51, wb: 2.36 },
   altoworks: { kind: "hatch", file: "altoworks", L: 3.4, W: 1.48, H: 1.63, wb: 2.46 },
-  m800: { kind: "hatch", file: "m800", L: 3.37, W: 1.44, H: 1.4, wb: 2.175 },
-  baleno: { kind: "hatch", file: "baleno", L: 3.99, W: 1.74, H: 1.62, wb: 2.52 },
+  m800: { kind: "hatch", file: "m800", kit: true, near: true, k: 0.765, wr: 0.249, L: 3.37, W: 1.44, H: 1.4, wb: 2.175 },
+  baleno: { kind: "hatch", file: "baleno", kit: true, near: true, k: 1.053, wr: 0.327, L: 3.99, W: 1.74, H: 1.62, wb: 2.52 },
   sx4: { kind: "sedan", file: "sx4", L: 4.1, W: 1.76, H: 1.62, wb: 2.5 },
-  wuling: { kind: "suv", file: "wuling", L: 4.52, W: 1.72, H: 1.93, wb: 2.7 },
-  fortuner15: { kind: "suv", file: "fortuner15", L: 4.7, W: 1.86, H: 1.9, wb: 2.75 },
-  everest: { kind: "suv", file: "everest", L: 4.9, W: 1.86, H: 1.77, wb: 2.85 },
-  safari: { kind: "suv", file: "safari", L: 4.67, W: 1.85, H: 1.78, wb: 2.74 },
+  wuling: { kind: "suv", file: "wuling", kit: true, near: true, k: 0.858, wr: 0.314, L: 4.52, W: 1.72, H: 1.93, wb: 2.7 },
+  fortuner15: { kind: "suv", file: "fortuner15", kit: true, near: true, k: 0.895, wr: 0.418, L: 4.7, W: 1.86, H: 1.9, wb: 2.75 },
+  everest: { kind: "suv", file: "everest", kit: true, near: true, k: 0.975, wr: 0.396, L: 4.9, W: 1.86, H: 1.77, wb: 2.85 },
+  safari: { kind: "suv", file: "safari", kit: true, near: true, k: 0.883, wr: 0.373, L: 4.67, W: 1.85, H: 1.78, wb: 2.74 },
   gsrtc: { kind: "bus", file: "gsrtc", L: 10.6, W: 2.64, H: 2.82, wb: 5.15 },
   scorpio: { kind: "suv", file: "scorpio", L: 4.66, W: 1.95, H: 1.84, wb: 2.75 },
   // "kit" models: wheel nodes and flat paint/trim/glass roles, facing -z in the file (see tools/vehicles/fbx2car.mjs).
   // `k` rescales the file to the real car length.
-  dzire: { kind: "sedan", file: "dzire", kit: true, k: 1, wr: 0.322, L: 3.995, W: 1.735, H: 1.515, wb: 2.456 },
-  triber: { kind: "suv", file: "triber", kit: true, k: 0.885, wr: 0.335, L: 3.995, W: 1.739, H: 1.643, wb: 2.636 },
+  dzire: { kind: "sedan", file: "dzire", kit: true, near: true, k: 1, wr: 0.322, L: 3.995, W: 1.735, H: 1.515, wb: 2.456 },
+  triber: { kind: "suv", file: "triber", kit: true, near: true, k: 0.885, wr: 0.335, L: 3.995, W: 1.739, H: 1.643, wb: 2.636 },
   // the auto: the file is a textured Sketchfab tuk-tuk (3 wheels, open cab, closed rear box), scaled to a real 2.6 m auto.
   // Measured on the model (file units, nose -z): driver seat top y .727 at z -.12, rear bench top y .599 at z 1.0,
   // cab floor .31 / rear floor .29, the open side entry z -.65..+.06 (centre -.30), tail reflectors x +-.595, y .615, z 1.32.
   tuktuk: { kind: "auto", file: "tuktuk", kit: true, k: 0.92, wr: 0.207, L: 2.58, W: 1.47, H: 1.64, wb: 1.9, doorX: 0.28, axles: [1.045, -0.848],
     lamps: [{ x: -1.219, y: 0.566, z: 0.547, w: 0.12, h: 0.083 }] },
-  scorpion: { kind: "suv", file: "scorpio_n", kit: true, k: 1, wr: 0.379, L: 4.662, W: 1.917, H: 1.857, wb: 2.75 },
+  scorpion: { kind: "suv", file: "scorpio_n", kit: true, near: true, k: 1, wr: 0.379, L: 4.662, W: 1.917, H: 1.857, wb: 2.75 },
 };
 const PICK = {
   hatch: ["micra", "altok10", "alto800", "altoworks", "m800", "baleno", "micra", "alto800"],
@@ -57,6 +58,7 @@ const WHEELS = {
   scorpio: { fx: 1.475, rx: -1.269, R: 0.34 },
   gsrtc: { fx: 2.2, rx: -2.95, R: 0.5 },
 };
+const lodGeo = {}; // name -> { paint: [geometry], glass: [...], detail: [...] }
 const loaded = {};
 let spinWheels = true;
 let readyP = Promise.resolve();
@@ -242,14 +244,19 @@ function addPeople(g, name, m, rnd, kind) {
   return api;
 }
 let started = false;
+// Near-car detail tier, chosen once per session: "hi" (about 105K triangles a car) on strong machines, "mid" (about 55K) elsewhere.
+// ?cars=hi|mid overrides it. The files are meshopt-compressed (models/vehicles/near/<tier>/).
+const _q = new URLSearchParams(location.search);
+export const CAR_TIER = _q.get("cars") === "hi" || _q.get("cars") === "mid" ? _q.get("cars") : (_q.get("q") === "high" || (navigator.hardwareConcurrency || 4) >= 12) ? "hi" : "mid";
 export function preloadVehicles(high = true) {
   if (started) return;
   started = true;
   spinWheels = high; // the wheels cost two more draw calls a car: only on high
   const loader = new GLTFLoader();
+  loader.setMeshoptDecoder(MeshoptDecoder);
   const jobs = [];
   for (const [name, m] of Object.entries(MODELS)) {
-    jobs.push(loader.loadAsync(`/models/vehicles/${m.file}.glb`).then(
+    jobs.push(loader.loadAsync(m.near ? `/models/vehicles/near/${CAR_TIER}/${m.file}.glb` : `/models/vehicles/${m.file}.glb`).then(
       (g) => {
         g.scene.traverse((o) => {
           if (!o.isMesh) return;
@@ -262,15 +269,30 @@ export function preloadVehicles(high = true) {
           if (o.material.name === "glass") {
             o.material.depthWrite = false;
             o.material.roughness = 0.05;
+            if (m.near) o.material.envMapIntensity = 1.6; // the sky shows in the glass
           }
         });
         if (m.kit) {
-          g.scene.getObjectByName("lod1")?.removeFromParent(); // one level of detail is enough here
+          if (m.near) { const l1 = g.scene.getObjectByName("lod1"); if (l1) l1.visible = false; } // far copy (about 2.7K triangles): shown by setLod beyond ~38 m
+          else g.scene.getObjectByName("lod1")?.removeFromParent(); // one level of detail is enough here
           g.scene.rotation.y = -Math.PI / 2; // the file's nose points -z; the traffic drives along +x
           g.scene.scale.setScalar(m.k);
           g.scene.traverse((o) => { if (/^wheel_/.test(o.name)) { o.userData.wheel = true; o.userData.kit = true; } });
         } else if (spinWheels) splitWheels(g.scene, name, MODELS[name].W);
         loaded[name] = g.scene;
+        // a ~3K-triangle copy of the body for cars far from the camera (models/vehicles/lod; the kit models and the bus have none)
+        if (!m.kit) {
+          loader.loadAsync(`/models/vehicles/lod/${m.file}.glb`).then((lg) => {
+            const o = {};
+            lg.scene.traverse((x) => {
+              if (!x.isMesh) return;
+              const key = x.material.name.replace(/\.\d+$/, "");
+              if (key === "paint") x.geometry.deleteAttribute("color");
+              (o[key] ||= []).push(x.geometry);
+            });
+            lodGeo[name] = o;
+          }).catch(() => {});
+        }
       },
       (e) => console.warn("vehicle model missing:", name, e),
     ));
@@ -290,11 +312,15 @@ export function makeRealCar(kind, color, rnd = Math.random) {
   let paint = null;
   car.traverse((o) => {
     if (!o.isMesh || !o.userData.isPaint) return;
-    paint ||= o.material.clone();
+    if (!paint) {
+      // the near-detail cars get a clear-coated metallic finish on the strong tier; the rest keep the cheap standard paint
+      paint = m.near && CAR_TIER === "hi" ? new THREE.MeshPhysicalMaterial({ name: "paint", clearcoat: 1, clearcoatRoughness: 0.1 }) : o.material.clone();
+    }
     paint.vertexColors = false;
     paint.color.set(color);
-    paint.roughness = 0.35;
-    paint.metalness = 0.5;
+    paint.roughness = m.near ? 0.3 : 0.35;
+    paint.envMapIntensity = m.near ? 1.5 : 1; // near cars pick up the sky reflection more strongly
+    paint.metalness = m.near ? 0.6 : 0.5;
     o.material = paint;
   });
   // lights: small emissive boxes at the corners, one material per car so each can burn on its own
@@ -356,6 +382,23 @@ export function makeRealCar(kind, color, rnd = Math.random) {
   }
   const wheels = [];
   car.traverse((o) => { if (o.userData.wheel) wheels.push(o); });
+  // far away: swap the body meshes for their light copies and hide the separate wheels (the light copy has its own)
+  const lodTargets = {};
+  car.traverse((o) => { if (o.isMesh && !o.userData.wheelPart) (lodTargets[o.material.name.replace(/\.\d+$/, "")] ||= []).push({ mesh: o, full: o.geometry }); });
+  const setLod = (far) => {
+    if (m.near) {
+      const a = car.getObjectByName("lod0"), b = car.getObjectByName("lod1");
+      if (!a || !b) return false;
+      a.visible = !far; b.visible = far;
+      return true;
+    }
+    const L = lodGeo[name];
+    if (!L || m.kit) return false;
+    for (const key of ["paint", "glass", "detail"]) if (lodTargets[key] && (!L[key] || L[key].length !== lodTargets[key].length)) return false;
+    for (const key of ["paint", "glass", "detail"]) (lodTargets[key] || []).forEach((t, i) => { t.mesh.geometry = far ? L[key][i] : t.full; });
+    for (const w of wheels) w.visible = !far;
+    return true;
+  };
   const roll = { set rotation(a) { for (const p of wheels) { if (p.userData.kit) p.rotation.x = a; else p.rotation.z = a; } }, get rotation() { const p = wheels[0]; return p ? (p.userData.kit ? p.rotation.x : p.rotation.z) : 0; } };
   g.userData = {
     size: { L: m.L, W: m.W, H: m.H },
@@ -368,6 +411,7 @@ export function makeRealCar(kind, color, rnd = Math.random) {
     indR,
     alloy: { map: roll },
     model: name,
+    setLod,
     occupants,
     door,
   };

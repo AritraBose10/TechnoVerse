@@ -485,6 +485,7 @@ export function makeTrees({ scene, renderer }) {
       return models[name].height * scale;
     },
     finish() {
+      const sets = [];
       const dummy = new THREE.Object3D();
       const tint = new THREE.Color();
       for (const m of Object.values(models)) {
@@ -508,10 +509,53 @@ export function makeTrees({ scene, renderer }) {
         for (const p of parts) {
           p.castShadow = true;
           p.receiveShadow = true;
-          p.frustumCulled = false;
+          p.frustumCulled = false; // one bounding sphere for every tree would never cull: we cull per tree instead (cullTrees)
           scene.add(p);
         }
+        const n = m.list.length;
+        const set = { parts, leaves, n, shown: n, x: new Float32Array(n), y: new Float32Array(n), z: new Float32Array(n), r: new Float32Array(n), slot: new Uint32Array(n), mat: parts[0].instanceMatrix.array.slice(), col: leaves.instanceColor ? leaves.instanceColor.array.slice() : null };
+        m.list.forEach((t, i) => { set.x[i] = t.x; set.y[i] = t.y + m.height * t.scale * 0.5; set.z[i] = t.z; set.r[i] = Math.max(m.height * t.scale * 0.62, 5); set.slot[i] = i; });
+        sets.push(set);
       }
+      // Per-tree culling for the draw (and the sun's shadow pass): every tree used to be drawn every
+      // frame, wherever it was and whichever way the camera faced. Now only trees inside the view,
+      // plus every tree within 70 m of the player (they can cast shadows into view), within 420 m
+      // (the fog has swallowed anything further). Call once per frame, after the camera has moved.
+      const fr = new THREE.Frustum(), pm = new THREE.Matrix4(), sph = new THREE.Sphere();
+      scene.userData.cullTrees = (camera, px, pz, shadows = true) => {
+        camera.updateMatrixWorld();
+        pm.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+        fr.setFromProjectionMatrix(pm);
+        let total = 0;
+        for (const s of sets) {
+          let k = 0, changed = false;
+          for (let i = 0; i < s.n; i++) {
+            const dx = s.x[i] - px, dz = s.z[i] - pz, d2 = dx * dx + dz * dz;
+            let vis = shadows && d2 < 4900;
+            if (!vis && d2 < 176400) {
+              sph.center.set(s.x[i], s.y[i], s.z[i]);
+              sph.radius = s.r[i];
+              vis = fr.intersectsSphere(sph);
+            }
+            if (vis) {
+              if (s.slot[k] !== i) { s.slot[k] = i; changed = true; }
+              k++;
+            }
+          }
+          total += k;
+          if (k !== s.shown) changed = true;
+          if (!changed) continue;
+          s.shown = k;
+          for (let j = 0; j < k; j++) {
+            const i = s.slot[j];
+            for (const p of s.parts) p.instanceMatrix.array.set(s.mat.subarray(i * 16, i * 16 + 16), j * 16);
+            if (s.col) s.leaves.instanceColor.array.set(s.col.subarray(i * 3, i * 3 + 3), j * 3);
+          }
+          for (const p of s.parts) { p.count = k; p.instanceMatrix.needsUpdate = true; }
+          if (s.col) s.leaves.instanceColor.needsUpdate = true;
+        }
+        scene.userData.treesShown = total;
+      };
     },
     animate(seconds) {
       time.value = seconds;

@@ -6,6 +6,7 @@ import * as THREE from "three";
 import { mergeGeometries } from "/vendor/jsm/utils/BufferGeometryUtils.js";
 import { mergeStaticChunks } from "/chunks.js";
 import { makeTrees } from "/trees.js";
+import { addInstanceCull } from "/instcull.js";
 import { buildTIU } from "/tiu.js";
 import { buildOpposite } from "/opposite.js";
 import { heritageLamps, streetLights } from "/street.js";
@@ -703,8 +704,10 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     add(sign, { cast: false });
   }
   const footprints = [tiuPts, tiuModel.footprint];
+  // All 11 approved T-007 Landmarks replaced by faithful GLB models
+  const LANDMARKS = new Set([535333512, 193308962, 134101085, "ov332", "ov582", 382403604, "sv4", "ov240", 238285653, "ov359", "ov325"].map(String));
   for (const b of campus.buildings) {
-    if (b.id === TIU_ID) continue;
+    if (b.id === TIU_ID || LANDMARKS.has(String(b.id))) continue;
     const pts = outward(b.pts);
     footprints.push(pts);
     if (b.style === "sheds") {
@@ -1012,6 +1015,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
         });
         im.castShadow = im.receiveShadow = true;
         scene.add(im);
+        addInstanceCull(im, spots.map((sp) => sp.x), spots.map((sp) => sp.z), { radius: 4, cy: 1 });
       }
       for (const sp of spots) solidBox(2.25, 1.2, 0.5, sp.x, 0.6, sp.z, sp.yaw);
     }
