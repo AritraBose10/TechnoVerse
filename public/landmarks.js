@@ -5,28 +5,89 @@
 // Each GLB is authored in its own local frame (centered at footprint centroid, y=0 at grade);
 // this module translates and rotates it into world space to match the OSM polygon.
 //
-// Returns an array of OSM building IDs that have been replaced by high-fidelity GLB models,
+// Returns an array of building IDs that have been replaced by high-fidelity GLB models,
 // so world.js can skip drawing its extruded box for those IDs.
-// (Claude adds the hook in main.js and the skip guard in world.js — see Questions in T-007.)
 
 import { GLTFLoader } from "/vendor/jsm/loaders/GLTFLoader.js";
 
-// Known landmarks: one entry per GLB produced by tools/landmarks/build-*.mjs
-// id: OSM way/node id matching campus.json buildings[].id
-// glb: path served from public/
-// yaw: rotation around Y (radians) aligning the model's local +X axis with the
-//      direction from footprint pts[0] → pts[1]. Positive = counter-clockwise.
-//      Computed as: atan2(pts[0].z - pts[1].z, pts[1].x - pts[0].x)
-//      Station: pts[0]=[-3.17,-508.44], pts[1]=[115.08,-581.79]
-//      dx=118.25  dz=-73.35  → atan2(73.35, 118.25) ≈ 0.5552 rad
+// All 11 approved TechnoVerse Landmarks (T-007 approved list)
 const KNOWN_LANDMARKS = [
   {
+    no: 1,
     id: 535333512,
+    name: "Sector V Metro Station",
     glb: "/models/landmarks/535333512.glb",
-    // Salt Lake Sector V Metro Station, East-West Metro (Green Line)
-    // OSM footprint centre: x=59.675, z=-539.205 (world metres from TIU pin)
-    // yaw aligns model long-axis with the NE-SW OSM parallelogram
-    yaw: 0.5552
+    yaw: 0.5552 // long axis aligned
+  },
+  {
+    no: 2,
+    id: 193308962,
+    name: "Wipro Tower 5",
+    glb: "/models/landmarks/193308962.glb",
+    yaw: 0
+  },
+  {
+    no: 3,
+    id: 134101085,
+    name: "PWC Office",
+    glb: "/models/landmarks/134101085.glb",
+    yaw: 0
+  },
+  {
+    no: 4,
+    id: "ov332",
+    name: "Sector - V Police Station",
+    glb: "/models/landmarks/ov332.glb",
+    yaw: 0
+  },
+  {
+    no: 5,
+    id: "ov582",
+    name: "Aliah University",
+    glb: "/models/landmarks/ov582.glb",
+    yaw: 0
+  },
+  {
+    no: 6,
+    id: 382403604,
+    name: "NITTTR Residential Campus",
+    glb: "/models/landmarks/382403604.glb",
+    yaw: 0
+  },
+  {
+    no: 7,
+    id: "sv4",
+    name: "IIHM Global Campus",
+    glb: "/models/landmarks/sv4.glb",
+    yaw: 0
+  },
+  {
+    no: 8,
+    id: "ov240",
+    name: "Bharat Petroleum",
+    glb: "/models/landmarks/ov240.glb",
+    yaw: 0
+  },
+  {
+    no: 9,
+    id: 238285653,
+    name: "HP Petrol Pump",
+    glb: "/models/landmarks/238285653.glb",
+    yaw: 0
+  },
+  {
+    no: 10,
+    id: "ov359",
+    name: "Ambuja Neotia EcoCentre",
+    glb: "/models/landmarks/ov359.glb",
+    yaw: 0
+  },
+  {
+    no: 11,
+    id: "ov325",
+    name: "Tea Junction",
+    glb: "/models/landmarks/ov325.glb",
+    yaw: 0
   }
 ];
 
@@ -36,33 +97,32 @@ const KNOWN_LANDMARKS = [
  * @param {object} opts
  * @param {THREE.Scene} opts.scene  - The main scene to add objects to.
  * @param {object}      opts.campus - Parsed campus.json with a `buildings` array.
- *                                    Each entry has { id, pts:[[x,z],...], floors }.
- * @returns {Promise<number[]>}       Resolves to an array of replaced OSM building IDs.
+ * @returns {Promise<Array<string|number>>} Resolves to an array of replaced building IDs.
  */
 export async function loadLandmarks({ scene, campus }) {
   const loader = new GLTFLoader();
   const replaced = [];
 
-  // Index campus buildings by id for fast lookup
+  // Index campus buildings by string ID for robust lookup
   const byId = new Map();
   if (campus && Array.isArray(campus.buildings)) {
     for (const b of campus.buildings) {
-      if (b.id != null) byId.set(Number(b.id), b);
+      if (b.id != null) byId.set(String(b.id), b);
     }
   }
 
-  // Load each landmark in parallel
+  // Load all landmarks in parallel
   await Promise.all(
-    KNOWN_LANDMARKS.map(({ id, glb, yaw }) =>
+    KNOWN_LANDMARKS.map(({ id, name, glb, yaw = 0 }) =>
       new Promise((resolve) => {
-        const building = byId.get(id);
+        const building = byId.get(String(id));
         if (!building) {
-          console.warn(`[landmarks] OSM id ${id} not found in campus.json — skipping.`);
+          console.warn(`[landmarks] Building ${id} (${name}) not found in campus.json — skipping.`);
           return resolve();
         }
 
-        // Compute polygon centroid from pts (all in world metres)
-        const pts = building.pts; // [[x,z], ...]
+        // Polygon centroid
+        const pts = building.pts;
         let cx = 0, cz = 0;
         for (const [x, z] of pts) { cx += x; cz += z; }
         cx /= pts.length;
@@ -72,21 +132,19 @@ export async function loadLandmarks({ scene, campus }) {
           glb,
           (gltf) => {
             const model = gltf.scene;
-            // Position: centroid in world XZ; y=0 so the model sits at grade
             model.position.set(cx, 0, cz);
-            // Rotate to match OSM footprint orientation
-            model.rotation.y = yaw;
+            if (yaw !== 0) model.rotation.y = yaw;
             scene.add(model);
             replaced.push(id);
             console.log(
-              `[landmarks] Placed ${id} at (${cx.toFixed(1)}, 0, ${cz.toFixed(1)}) yaw=${yaw.toFixed(4)} rad`
+              `[landmarks] Placed ${name} (${id}) at (${cx.toFixed(1)}, 0, ${cz.toFixed(1)})`
             );
             resolve();
           },
           undefined,
           (err) => {
             console.error(`[landmarks] Failed to load ${glb}:`, err);
-            resolve(); // non-fatal — world.js will draw the fallback box
+            resolve();
           }
         );
       })

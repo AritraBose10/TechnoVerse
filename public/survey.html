@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TechnoVerse building survey</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font: 14px/1.4 system-ui, sans-serif; color: #1c2430; background: #e9ecef; }
+  #app { display: flex; height: 100%; }
+  #map { flex: 1; min-width: 0; display: block; cursor: grab; background: #f4f5f2; }
+  #map.drag { cursor: grabbing; }
+  aside { width: 320px; flex: none; background: #fff; border-left: 1px solid #cfd4da; padding: 14px; overflow-y: auto; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  .sub { color: #5b6673; font-size: 12px; margin-bottom: 12px; }
+  label { display: block; font-size: 12px; color: #4a5562; margin: 10px 0 3px; }
+  input[type=text], input[type=number], select, textarea { width: 100%; padding: 7px 8px; border: 1px solid #b9c0c8; border-radius: 6px; font: inherit; background: #fff; }
+  textarea { resize: vertical; min-height: 54px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; }
+  button { padding: 8px 10px; border: 1px solid #94a0ad; background: #f6f7f9; border-radius: 6px; font: inherit; cursor: pointer; }
+  button:hover { background: #eaedf1; }
+  button.primary { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+  button.primary:hover { background: #1a5fcb; }
+  .stats { margin: 10px 0; padding: 8px 10px; background: #f1f4f8; border-radius: 6px; font-size: 13px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; margin-top: 6px; }
+  .legend i { display: inline-block; width: 11px; height: 11px; border-radius: 2px; vertical-align: -1px; margin-right: 4px; border: 1px solid #0003; }
+  .meta { font-size: 12px; color: #5b6673; margin: 6px 0; word-break: break-all; }
+  .btns { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  hr { border: 0; border-top: 1px solid #e1e5ea; margin: 14px 0; }
+  #hint { font-size: 12px; color: #5b6673; }
+  #toast { position: fixed; left: 14px; bottom: 14px; background: #1c2430; color: #fff; padding: 8px 12px; border-radius: 6px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  #toast.on { opacity: .94; }
+</style>
+</head>
+<body>
+<div id="app">
+  <canvas id="map"></canvas>
+  <aside>
+    <h1>Building survey</h1>
+    <div class="sub">Click a building on the map, fill in what you saw, and export when done. Saved in this browser as you type.</div>
+    <input id="search" type="text" placeholder="Find by name (Enter)">
+    <div class="stats" id="stats"></div>
+    <div class="legend">
+      <span><i style="background:#7bc47f"></i>known</span>
+      <span><i style="background:#5aa0ff"></i>surveyed by you</span>
+      <span><i style="background:#f2b366"></i>guessed by the game</span>
+    </div>
+    <div class="btns"><button id="next" class="primary">Next unsurveyed</button></div>
+    <hr>
+    <div id="none">Nothing selected. Click a building.</div>
+    <div id="form" hidden>
+      <div class="meta" id="meta"></div>
+      <label for="name">Name (board, shop or tower name)</label>
+      <input id="name" type="text">
+      <div class="row">
+        <div><label for="floors">Floors (ground = 1)</label><input id="floors" type="number" min="1" max="60"></div>
+        <div><label for="style">Facade style</label>
+          <select id="style"></select></div>
+      </div>
+      <div class="row">
+        <div><label><input id="roofOn" type="checkbox"> Set roof colour</label></div>
+        <div><input id="roof" type="color" value="#8d8a84" style="width:100%;height:34px;padding:2px"></div>
+      </div>
+      <label for="photo">Photo file name(s)</label>
+      <input id="photo" type="text" placeholder="e.g. IMG_2041, IMG_2042">
+      <label for="note">Notes (colour, shops on ground floor, roof, anything odd)</label>
+      <textarea id="note"></textarea>
+      <div class="btns">
+        <button id="clear">Clear my entry</button>
+      </div>
+    </div>
+    <hr>
+    <div class="btns">
+      <button id="export" class="primary">Export survey file</button>
+      <button id="copy">Copy JSON</button>
+    </div>
+    <div id="hint">Export saves <b>survey-export.json</b>. Put it in the <b>tools</b> folder and run <b>python3 tools/merge-survey.py</b>, then restart the server.</div>
+  </aside>
+</div>
+<div id="toast"></div>
+<script>
+const STYLES = [
+  ["", "(not set)"],
+  ["plaster", "Plain plaster: houses, shops"],
+  ["ochre", "Ochre or yellow painted"],
+  ["punched", "Punched windows, concrete"],
+  ["ribbon", "Ribbon windows: offices"],
+  ["glassTower", "Glass tower"],
+  ["terracotta", "Terracotta piers, glass"],
+  ["sheds", "Shed row, red roofs"],
+];
+const ROAD_W = { primary: 10.5, primary_link: 6, secondary: 7, secondary_link: 5.5, tertiary: 7, tertiary_link: 5.5, residential: 6, service: 4.2 };
+const KEY = "tv-survey-v1";
+
+const $ = (s) => document.querySelector(s);
+const canvas = $("#map"), ctx = canvas.getContext("2d");
+let data = null, items = [], edits = {};
+let view = { x: 0, z: 0, s: 1 }; // world centre and pixels per metre
+let selected = null;
+
+try { edits = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch { edits = {}; }
+const persist = () => { try { localStorage.setItem(KEY, JSON.stringify(edits)); } catch {} };
+const toast = (t) => { const e = $("#toast"); e.textContent = t; e.classList.add("on"); clearTimeout(toast.t); toast.t = setTimeout(() => e.classList.remove("on"), 1800); };
+
+for (const [v, label] of STYLES) { const o = document.createElement("option"); o.value = v; o.textContent = label; $("#style").appendChild(o); }
+
+function inside(x, z, pts) {
+  let hit = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const a = pts[i], b = pts[j];
+    if ((a[1] > z) !== (b[1] > z) && x < ((b[0] - a[0]) * (z - a[1])) / (b[1] - a[1]) + a[0]) hit = !hit;
+  }
+  return hit;
+}
+function interiorPoint(pts) {
+  let cx = 0, cz = 0;
+  for (const p of pts) { cx += p[0]; cz += p[1]; }
+  cx /= pts.length; cz /= pts.length;
+  if (inside(cx, cz, pts)) return [cx, cz];
+  let minx = 1e9, maxx = -1e9, minz = 1e9, maxz = -1e9;
+  for (const p of pts) { minx = Math.min(minx, p[0]); maxx = Math.max(maxx, p[0]); minz = Math.min(minz, p[1]); maxz = Math.max(maxz, p[1]); }
+  let best = null, bd = 1e9;
+  for (let i = 0; i <= 24; i++) for (let j = 0; j <= 24; j++) {
+    const x = minx + ((maxx - minx) * i) / 24, z = minz + ((maxz - minz) * j) / 24;
+    if (inside(x, z, pts)) { const d = Math.hypot(x - cx, z - cz); if (d < bd) { bd = d; best = [x, z]; } }
+  }
+  return best || [pts[0][0], pts[0][1]];
+}
+function area(pts) {
+  let s = 0;
+  for (let i = 0; i < pts.length; i++) { const p = pts[i], q = pts[(i + 1) % pts.length]; s += p[0] * q[1] - q[0] * p[1]; }
+  return Math.abs(s) / 2;
+}
+
+fetch("/campus.json").then((r) => r.json()).then((d) => {
+  data = d;
+  const seen = new Set();
+  items = d.buildings.map((b, i) => ({ b, i })).filter(({ b }) => b.id !== 134101262).map(({ b, i }) => { // the university building is modelled by hand in world.js
+    let key = String(b.id ?? "i" + i);
+    if (seen.has(key)) key += "#" + i;
+    seen.add(key);
+    let minx = 1e9, maxx = -1e9, minz = 1e9, maxz = -1e9;
+    for (const p of b.pts) { minx = Math.min(minx, p[0]); maxx = Math.max(maxx, p[0]); minz = Math.min(minz, p[1]); maxz = Math.max(maxz, p[1]); }
+    const known = b.floors != null || (b.style != null && b.style !== "");
+    return { key, b, known, box: [minx, minz, maxx, maxz], ip: interiorPoint(b.pts), area: b.area || area(b.pts) };
+  });
+  fit();
+  stats();
+  draw();
+}).catch((e) => { toast("Could not load campus.json: " + e.message); });
+
+function resize() {
+  const r = canvas.getBoundingClientRect();
+  canvas.width = Math.round(r.width * devicePixelRatio);
+  canvas.height = Math.round(r.height * devicePixelRatio);
+  draw();
+}
+addEventListener("resize", resize);
+function fit() {
+  const r = canvas.getBoundingClientRect();
+  view = { x: 0, z: 0, s: Math.min(r.width, r.height) / 1260 };
+}
+const w2s = (x, z) => { const r = canvas.getBoundingClientRect(); return [(x - view.x) * view.s + r.width / 2, (z - view.z) * view.s + r.height / 2]; };
+const s2w = (px, py) => { const r = canvas.getBoundingClientRect(); return [(px - r.width / 2) / view.s + view.x, (py - r.height / 2) / view.s + view.z]; };
+
+const hasEdit = (it) => { const e = edits[it.key]; return !!(e && (e.floors || e.style || e.name || e.note || e.photo || e.roof)); };
+function colour(it) { return hasEdit(it) ? "#5aa0ff" : it.known ? "#7bc47f" : "#f2b366"; }
+
+function path(pts) {
+  ctx.beginPath();
+  pts.forEach((p, i) => { const [x, y] = w2s(p[0], p[1]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+}
+function draw() {
+  if (!canvas.width) return;
+  const r = canvas.getBoundingClientRect();
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  ctx.clearRect(0, 0, r.width, r.height);
+  if (!data) return;
+  ctx.lineCap = "round"; ctx.lineJoin = "round";
+  for (const g of data.grass || []) { path(g.pts); ctx.fillStyle = "#dfead2"; ctx.fill(); }
+  for (const g of data.pitches || []) { path(g.pts); ctx.fillStyle = "#cfe3c4"; ctx.fill(); }
+  for (const w of data.water || []) { path(w.pts); ctx.fillStyle = "#b9d8ee"; ctx.fill(); }
+  for (const rd of data.roads || []) {
+    path(rd.pts);
+    ctx.strokeStyle = "#cdd2d8"; ctx.lineWidth = Math.max(1.5, (ROAD_W[rd.kind] || 4) * view.s); ctx.stroke();
+  }
+  for (const it of items) {
+    const [a, b2] = w2s(it.box[0], it.box[1]), [c, d] = w2s(it.box[2], it.box[3]);
+    if (c < 0 || d < 0 || a > r.width || b2 > r.height) continue;
+    path(it.b.pts); ctx.closePath();
+    ctx.fillStyle = colour(it); ctx.fill();
+    ctx.strokeStyle = "#3a4452"; ctx.lineWidth = 0.8; ctx.stroke();
+  }
+  if (selected) { path(selected.b.pts); ctx.closePath(); ctx.strokeStyle = "#d8261c"; ctx.lineWidth = 3; ctx.stroke(); }
+  if (view.s > 1.4) {
+    ctx.font = "11px system-ui"; ctx.textAlign = "center"; ctx.fillStyle = "#1c2430";
+    for (const it of items) {
+      const nm = (edits[it.key] && edits[it.key].name) || it.b.name;
+      if (!nm) continue;
+      const [x, y] = w2s(it.ip[0], it.ip[1]);
+      if (x < 0 || y < 0 || x > r.width || y > r.height) continue;
+      ctx.fillText(nm.length > 28 ? nm.slice(0, 27) + "…" : nm, x, y);
+    }
+  }
+}
+
+function stats() {
+  const total = items.length, known = items.filter((i) => i.known).length, mine = items.filter(hasEdit).length;
+  $("#stats").innerHTML = `<b>${total}</b> buildings: <b>${known}</b> known, <b>${mine}</b> surveyed by you, <b>${total - known - items.filter((i) => !i.known && hasEdit(i)).length}</b> still guessed`;
+}
+
+// ---- map interaction
+let drag = null;
+canvas.addEventListener("pointerdown", (e) => { drag = { x: e.clientX, y: e.clientY, vx: view.x, vz: view.z, moved: false }; canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener("pointermove", (e) => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (Math.abs(dx) + Math.abs(dy) > 4) { drag.moved = true; canvas.classList.add("drag"); }
+  if (drag.moved) { view.x = drag.vx - dx / view.s; view.z = drag.vz - dy / view.s; draw(); }
+});
+canvas.addEventListener("pointerup", (e) => {
+  canvas.classList.remove("drag");
+  if (drag && !drag.moved) {
+    const r = canvas.getBoundingClientRect();
+    const [x, z] = s2w(e.clientX - r.left, e.clientY - r.top);
+    const hits = items.filter((it) => x >= it.box[0] && x <= it.box[2] && z >= it.box[1] && z <= it.box[3] && inside(x, z, it.b.pts));
+    select(hits.length ? hits.reduce((a, b) => (a.area < b.area ? a : b)) : null);
+  }
+  drag = null;
+});
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const r = canvas.getBoundingClientRect();
+  const [wx, wz] = s2w(e.clientX - r.left, e.clientY - r.top);
+  view.s = Math.max(0.2, Math.min(14, view.s * Math.exp(-e.deltaY * 0.0015)));
+  const [nx, nz] = s2w(e.clientX - r.left, e.clientY - r.top);
+  view.x += wx - nx; view.z += wz - nz;
+  draw();
+}, { passive: false });
+
+// ---- form
+function select(it) {
+  selected = it;
+  $("#none").hidden = !!it; $("#form").hidden = !it;
+  if (it) {
+    const e = edits[it.key] || {};
+    const b = it.b;
+    $("#meta").textContent = `${b.src || "?"} · id ${b.id} · footprint ${Math.round(it.area)} m² · ${it.known ? "floors/style already known" : "floors/style guessed by the game"}`;
+    $("#name").value = e.name ?? b.name ?? "";
+    $("#floors").value = e.floors ?? b.floors ?? "";
+    $("#style").value = e.style ?? b.style ?? "";
+    $("#roofOn").checked = !!(e.roof || b.roof);
+    $("#roof").value = e.roof || b.roof || "#8d8a84";
+    $("#photo").value = e.photo || "";
+    $("#note").value = e.note || "";
+  }
+  draw();
+}
+function readForm() {
+  if (!selected) return;
+  const e = {};
+  const nm = $("#name").value.trim(); if (nm) e.name = nm;
+  const f = parseInt($("#floors").value, 10); if (f > 0) e.floors = f;
+  const st = $("#style").value; if (st) e.style = st;
+  if ($("#roofOn").checked) e.roof = $("#roof").value;
+  const ph = $("#photo").value.trim(); if (ph) e.photo = ph;
+  const nt = $("#note").value.trim(); if (nt) e.note = nt;
+  // fields that merely repeat what the map data already says are not a survey
+  const b = selected.b;
+  const same = (e.name ?? "") === (b.name ?? "") && e.floors === (b.floors ?? undefined) && (e.style ?? "") === (b.style ?? "") && (e.roof ?? "") === (b.roof ?? "") && !e.photo && !e.note;
+  if (!Object.keys(e).length || same) delete edits[selected.key]; else edits[selected.key] = e;
+  persist(); stats(); draw();
+}
+for (const id of ["name", "floors", "style", "roofOn", "roof", "photo", "note"]) $("#" + id).addEventListener("input", readForm);
+$("#clear").addEventListener("click", () => { if (selected) { delete edits[selected.key]; persist(); select(selected); stats(); } });
+$("#next").addEventListener("click", () => {
+  const from = selected ? selected.ip : [view.x, view.z];
+  let best = null, bd = 1e12;
+  for (const big of [true, false]) {
+    for (const it of items) {
+      if (it.known || hasEdit(it) || it === selected || (big && it.area < 150)) continue;
+      const d = (it.ip[0] - from[0]) ** 2 + (it.ip[1] - from[1]) ** 2;
+      if (d < bd) { bd = d; best = it; }
+    }
+    if (best) break;
+  }
+  for (const it of []) {
+    if (it.known || hasEdit(it) || it === selected) continue;
+    const d = (it.ip[0] - from[0]) ** 2 + (it.ip[1] - from[1]) ** 2;
+    if (d < bd) { bd = d; best = it; }
+  }
+  if (!best) { toast("Nothing left to survey"); return; }
+  view.x = best.ip[0]; view.z = best.ip[1]; view.s = Math.max(view.s, 3);
+  select(best);
+});
+$("#search").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  const q = e.target.value.trim().toLowerCase();
+  if (!q) return;
+  const it = items.find((i) => ((edits[i.key] && edits[i.key].name) || i.b.name || "").toLowerCase().includes(q));
+  if (!it) { toast("No building with that name"); return; }
+  view.x = it.ip[0]; view.z = it.ip[1]; view.s = Math.max(view.s, 3);
+  select(it);
+});
+
+// ---- export: entries in the shape tools/survey.json uses ("at" is [east, north])
+function buildExport() {
+  const out = [];
+  for (const it of items) {
+    const e = edits[it.key];
+    if (!e) continue;
+    const row = { at: [Math.round(it.ip[0] * 10) / 10, Math.round(-it.ip[1] * 10) / 10] };
+    if (e.name) row.name = e.name;
+    if (e.floors) row.floors = e.floors;
+    if (e.style) row.style = e.style;
+    if (e.roof) row.roof = e.roof;
+    const note = [e.photo ? "photo: " + e.photo : "", e.note || ""].filter(Boolean).join(". ");
+    if (note) row.note = note;
+    out.push(row);
+  }
+  return { _about: "Exported by public/survey.html. Merge with: python3 tools/merge-survey.py", exported: new Date().toISOString(), buildings: out };
+}
+$("#export").addEventListener("click", () => {
+  const ex = buildExport();
+  if (!ex.buildings.length) { toast("Nothing surveyed yet"); return; }
+  const blob = new Blob([JSON.stringify(ex, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = "survey-export.json"; a.click();
+  toast(`Exported ${ex.buildings.length} buildings`);
+});
+$("#copy").addEventListener("click", async () => {
+  const ex = buildExport();
+  if (!ex.buildings.length) { toast("Nothing surveyed yet"); return; }
+  try { await navigator.clipboard.writeText(JSON.stringify(ex, null, 2)); toast("Copied"); } catch { toast("Copy blocked: use Export"); }
+});
+
+window.__survey = { buildExport, edits: () => edits, items: () => items, select };
+resize();
+</script>
+</body>
+</html>
