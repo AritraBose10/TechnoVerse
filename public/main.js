@@ -19,6 +19,7 @@ import { EffectComposer } from "/vendor/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "/vendor/jsm/postprocessing/RenderPass.js";
 import { GTAOPass } from "/vendor/jsm/postprocessing/GTAOPass.js";
 import { OutputPass } from "/vendor/jsm/postprocessing/OutputPass.js";
+import { createLook } from "/look.js";
 
 await RAPIER.init(); // loads the physics engine (WebAssembly)
 
@@ -49,6 +50,8 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 // Capped at 1.25: integrated graphics pay for every pixel rendered
 renderer.setPixelRatio(Math.min(devicePixelRatio, 1.25));
 const SHADOW_RANGE = 110; // metres: static shadow casters further out are switched off
+const CHUNK_HALF = 150; // chunks are 300 m wide (world.js); distances are to the chunk centre
+const CHUNK_RANGE = 800; // m; fog (FogExp2 0.0026) has hidden everything by then.
 let shadowTick = 0;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -256,6 +259,8 @@ const bodiesLoading = streetLife ? loadCrowdBodies(renderer, HIGH ? 12 : 8, HIGH
 const crowd = streetLife ? buildPeople({ scene, world, RAPIER, local: worldInfo.local, phi: worldInfo.phi, spots: worldInfo.spots, kitLoading, bodiesLoading, traffic, quality: HIGH ? "high" : "low", camera, nav: navLoading }) : null;
 // the real time of day in Salt Lake: sun, moon, sky, lamps (see daylight.js)
 const daylight = buildDaylight({ scene, renderer, sun, hemi, sunOffset: SUN_OFFSET, worldInfo, traffic, high: HIGH, clockEl: document.getElementById("clock") });
+const look = createLook({ THREE, scene, camera, renderer, high: HIGH, worldInfo, sun, hemi });
+if (look.gradePass && composer) composer.addPass(look.gradePass);
 let lastLocal = null;
 // ---- the time of day: set by the player, not synced to the real time ----
 const TIMES = [["Dawn", 6 * 60], ["Morning", 9 * 60 + 30], ["Noon", 12 * 60 + 30], ["Evening", 16 * 60 + 30], ["Sunset", 18 * 60], ["Night", 21 * 60], ["Midnight", 30]];
@@ -2215,10 +2220,16 @@ function frame() {
   // Shadows only where the player can see them: far chunks stop casting (4 times a second)
   if (now - shadowTick > 250) {
     shadowTick = now;
-    for (const c of worldInfo.chunks) c.mesh.castShadow = c.cast && Math.hypot(c.x - pos.x, c.z - pos.z) < SHADOW_RANGE;
+    worldInfo.updateSigns(pos.x, pos.z);
+    for (const c of worldInfo.chunks) {
+      const d = Math.hypot(c.x - pos.x, c.z - pos.z);
+      c.mesh.castShadow = c.cast && d < SHADOW_RANGE + CHUNK_HALF;
+      c.mesh.visible = d < CHUNK_RANGE + CHUNK_HALF * 1.4; // the map is 8 km long now: chunks beyond the fog are not drawn at all
+    }
   }
   updateRideHint();
   daylight.update(dt / (timeScale || 1), pos);
+  look.update(dt, SUN_OFFSET.clone().normalize(), Math.max(0, Math.min(1, 1 - daylight.state.night)));
   sun.position.copy(pos).add(SUN_OFFSET);
   sun.target.position.copy(pos);
   afterMove(dt, now, pos);

@@ -105,4 +105,23 @@ does, and keep the game loading and running within the performance budget below.
 
 ## Result
 
+Done by Claude after Codex ran out of credits (24-25 Nov 2026).
+
+- Boundary: `tools/sector-v-boundary.json` (91-vertex polygon, 30 m margin) built by `tools/make-boundary.py`.
+  Extent in the local frame: x -2862..5663, z -620..1123 (about 8.5 km x 1.7 km, ~9.5 km2).
+- Data: `public/campus.json` regenerated (2.06 MB): 8,530 buildings, 2,103 roads, 48 paths, 22 pitches,
+  97 grass, 108 water, 210 labels, 6 rail. Every feature carries a source id (`sid`).
+- Checks: `tools/validate-campus.py` writes `tools/validate-out/report.md`; all hard checks pass.
+- Overture buildings outside the old 600 m box are NOT included yet (needs the Overture S3 data).
+- `world.js`: ground, walls, trees and culling read `campus.meta.bounds`; boundary walls are batched per
+  200 m cell; the ~1,000 building name boards are created lazily within 300 m of the player
+  (`updateSigns`); static merge cells are 300 m (`mergeStaticChunks(..., { size: 300 })`).
+- `main.js`: chunks beyond 800 m (fog) are hidden; shadow/visibility tests allow for 300 m chunks.
+- Gate view, `?q=low`, headless SwiftShader. Baseline: 458 calls / 920,755 tris / 511 textures / 25 s load.
+  Now: 476 calls / 944,633 tris / 488 textures / ~68 s load (buildWorld ~38 s).
+  Calls (budget 1.3x = 595) and triangles (1.5x) are within budget. Load time is NOT (about 2.7x vs 2x):
+  buildWorld creates 8.5k buildings synchronously. Follow-up: build far buildings lazily or in a worker.
+- Re-fetch / rebuild: `node tools/fetch-sector-v.mjs` -> `python3 tools/make-boundary.py` ->
+  `python3 tools/build-campus.py` -> `python3 tools/validate-campus.py`.
+
 ## Review

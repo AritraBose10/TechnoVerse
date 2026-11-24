@@ -15,7 +15,7 @@ import { Sky } from "/vendor/jsm/objects/Sky.js";
 const TIU_ID = 134101262; // the university building in OpenStreetMap
 const FLOOR = 3.7; // metres per storey
 const ROAD_WIDTH = { primary: 10.5, primary_link: 6, secondary: 7, secondary_link: 5.5, tertiary: 7, tertiary_link: 5.5, residential: 6, service: 4.2 };
-const WORLD_HALF = 615; // from the Sector V metro station (north) to Meen Bhavan (south)
+const WORLD_HALF = 615; // the old map: a square from the Sector V metro station (north) to Meen Bhavan (south). Trees are still scattered only here.
 
 // ---------- small helpers ----------
 function seeded(seed) {
@@ -51,11 +51,16 @@ function distToPath(x, z, pts, closed = false) {
 const yawQuat = (a) => ({ x: 0, y: Math.sin(a / 2), z: 0, w: Math.cos(a / 2) });
 
 export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }) {
-  // Roads, paths and the metro line stop at the edge of the map: a way that leaves the square is
+  // The map's extent (metres from the university pin) comes from campus.json: a box around the Sector V boundary
+  // polygon (tools/sector-v-boundary.json). Without `meta` it is the old 615 m square.
+  const WB = campus.meta?.bounds || { xMin: -WORLD_HALF, xMax: WORLD_HALF, zMin: -WORLD_HALF, zMax: WORLD_HALF };
+  const inWorld = (x, z, m = 0) => x > WB.xMin + m && x < WB.xMax - m && z > WB.zMin + m && z < WB.zMax - m;
+  // Roads, paths and the metro line stop at the edge of the map: a way that leaves the box is
   // cut where it crosses the edge (and may come back in as a second piece).
   {
-    const E = WORLD_HALF + 8;
-    const inside = (p) => Math.abs(p[0]) <= E && Math.abs(p[1]) <= E;
+    const lo = [WB.xMin - 8, WB.zMin - 8];
+    const hi = [WB.xMax + 8, WB.zMax + 8];
+    const inside = (p) => p[0] >= lo[0] && p[0] <= hi[0] && p[1] >= lo[1] && p[1] <= hi[1];
     // the part of a-b inside the square, or null
     const cut = (a, b) => {
       let t0 = 0;
@@ -64,7 +69,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
       for (let k = 0; k < 2; k++) {
         for (const sgn of [-1, 1]) {
           const p = -sgn * d[k];
-          const q = E + sgn * a[k];
+          const q = sgn < 0 ? hi[k] - a[k] : a[k] - lo[k];
           if (Math.abs(p) < 1e-9) {
             if (q < 0) return null;
           } else {
@@ -510,8 +515,10 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
   // Collects wall panels, then makes one mesh per material.
   const wallBatches = new Map();
   function wall(a, b, y0, y1, material, bay = 4, storey = FLOOR, nx = 0, nz = 0) {
-    let batch = wallBatches.get(material);
-    if (!batch) wallBatches.set(material, (batch = { pos: [], uv: [], nor: [] }));
+    // one batch per material per 100 m cell: a single mesh for the whole map is never culled (it is always in view)
+    const key = material.uuid + "|" + Math.floor((a[0] + b[0]) / 200) + "|" + Math.floor((a[1] + b[1]) / 200);
+    let batch = wallBatches.get(key);
+    if (!batch) wallBatches.set(key, (batch = { material, pos: [], uv: [], nor: [] }));
     const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
     const u = Math.max(1, Math.round(len / bay));
     const v = Math.max(1, Math.round((y1 - y0) / storey));
@@ -520,12 +527,12 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     for (let i = 0; i < 6; i++) batch.nor.push(nx, 0, nz);
   }
   function flushWalls() {
-    for (const [material, b] of wallBatches) {
+    for (const b of wallBatches.values()) {
       const geo = new THREE.BufferGeometry();
       geo.setAttribute("position", new THREE.Float32BufferAttribute(b.pos, 3));
       geo.setAttribute("uv", new THREE.Float32BufferAttribute(b.uv, 2));
       geo.setAttribute("normal", new THREE.Float32BufferAttribute(b.nor, 3));
-      add(new THREE.Mesh(geo, material));
+      add(new THREE.Mesh(geo, b.material));
     }
   }
   // Outline wound so that (dz, -dx) of each edge points out of the building.
@@ -543,14 +550,18 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
   }
 
   // ---------- ground ----------
-  tex.ground.repeat.set(280, 280);
-  const ground = new THREE.Mesh(new THREE.PlaneGeometry(2800, 2800), new THREE.MeshStandardMaterial({ map: tex.ground, roughness: 1 }));
+  const GW = WB.xMax - WB.xMin + 2200; // the map's box plus 1.1 km all round, as before (2800 m around a 600 m map)
+  const GD = WB.zMax - WB.zMin + 2200;
+  tex.ground.repeat.set(GW / 10, GD / 10);
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(GW, GD), new THREE.MeshStandardMaterial({ map: tex.ground, roughness: 1 }));
   ground.rotation.x = -Math.PI / 2;
+  ground.position.set((WB.xMin + WB.xMax) / 2, 0, (WB.zMin + WB.zMax) / 2);
   add(ground, { cast: false });
   // The walkable ground is a grid of slabs: one huge slab makes collision checks imprecise.
-  const SLAB = 50;
-  for (let gx = -WORLD_HALF - 5; gx < WORLD_HALF + 5; gx += SLAB) for (let gz = -WORLD_HALF - 5; gz < WORLD_HALF + 5; gz += SLAB) solidBox(SLAB, 2, SLAB, gx + SLAB / 2, -1, gz + SLAB / 2);
-  for (const [x, z, w, d] of [[0, -WORLD_HALF, WORLD_HALF * 2 + 10, 2], [0, WORLD_HALF, WORLD_HALF * 2 + 10, 2], [-WORLD_HALF, 0, 2, WORLD_HALF * 2 + 10], [WORLD_HALF, 0, 2, WORLD_HALF * 2 + 10]]) solidBox(w, 40, d, x, 20, z);
+  const SLAB = WB.xMax - WB.xMin > 1500 ? 100 : 50; // a long map would need thousands of 50 m slabs
+  for (let gx = WB.xMin - 5; gx < WB.xMax + 5; gx += SLAB) for (let gz = WB.zMin - 5; gz < WB.zMax + 5; gz += SLAB) solidBox(SLAB, 2, SLAB, gx + SLAB / 2, -1, gz + SLAB / 2);
+  const wx = (WB.xMin + WB.xMax) / 2, wz = (WB.zMin + WB.zMax) / 2, ww = WB.xMax - WB.xMin + 10, wd = WB.zMax - WB.zMin + 10;
+  for (const [x, z, w, d] of [[wx, WB.zMin, ww, 2], [wx, WB.zMax, ww, 2], [WB.xMin, wz, 2, wd], [WB.xMax, wz, 2, wd]]) solidBox(w, 40, d, x, 20, z);
 
   const layer = (map, offset, extra = {}) => new THREE.MeshStandardMaterial({ map, roughness: 1, polygonOffset: true, polygonOffsetFactor: -offset, polygonOffsetUnits: -offset, ...extra });
   const grassMat = layer(tex.grass, 1);
@@ -703,6 +714,20 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     sign.rotation.y = Math.atan2(e.nx, e.nz);
     add(sign, { cast: false });
   }
+  // ~1,000 named buildings: a board each is a mesh, material and texture apiece, so build it only when the player is near
+  const pendingSigns = [];
+  function lazySign(name, pts, h) {
+    const c = centroid(pts);
+    pendingSigns.push({ x: c[0], z: c[1], name, pts, h });
+  }
+  function updateSigns(px, pz, range = 300) {
+    for (let i = pendingSigns.length - 1; i >= 0; i--) {
+      const s = pendingSigns[i];
+      if (Math.hypot(s.x - px, s.z - pz) > range) continue;
+      pendingSigns.splice(i, 1);
+      nameSign(s.name, s.pts, s.h);
+    }
+  }
   const footprints = [tiuPts, tiuModel.footprint];
   // All 11 approved T-007 Landmarks replaced by faithful GLB models
   const LANDMARKS = new Set([535333512, 193308962, 134101085, "ov332", "ov582", 382403604, "sv4", "ov240", 238285653, "ov359", "ov325"].map(String));
@@ -713,7 +738,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     if (b.style === "sheds") {
       shedRow(pts, b.roof);
       if (b.name) {
-        nameSign(b.name, pts, 3.6);
+        lazySign(b.name, pts, 3.6);
         const c = centroid(pts);
         places.push({ name: b.name, x: c[0], z: c[1] });
       }
@@ -745,7 +770,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
       add(tank);
     }
     if (b.name) {
-      nameSign(b.name, pts, h);
+      lazySign(b.name, pts, h);
       if (floors >= 8) {
         // landmark towers also carry their name on the roof, readable from a distance
         const label = makeLabel(b.name, { height: 2.4 });
@@ -878,7 +903,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
   footprints.push(opposite.footprint);
   const planted = [];
   const tryTree = (x, z, gap) => {
-    if (Math.max(Math.abs(x), Math.abs(z)) > WORLD_HALF - 6 || !freeSpot(x, z, 1.6)) return;
+    if (!inWorld(x, z, 6) || !freeSpot(x, z, 1.6)) return;
     if (campus.pitches.some((p) => inPoly(x, z, p.pts))) return;
     if (planted.some((p) => Math.hypot(p[0] - x, p[1] - z) < gap)) return;
     planted.push([x, z]);
@@ -904,6 +929,8 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
   }
   // scattered around the neighbourhood
   for (let i = 0; i < 1500; i++) tryTree(range(-WORLD_HALF, WORLD_HALF), range(-WORLD_HALF, WORLD_HALF), 7);
+  // the rest of the (larger) map: sparser, trees only where there is room (freeSpot checks buildings and roads)
+  if (WB.xMax - WB.xMin > 2 * WORLD_HALF + 100) for (let i = 0; i < 2500; i++) tryTree(range(WB.xMin, WB.xMax), range(WB.zMin, WB.zMax), 9);
   // lush planting in the beds behind the railing, as in the street photos
   for (const [x0, x1] of beds) {
     for (let x = x0 + 1.2; x < x1 - 0.8; x += 1.5) {
@@ -962,7 +989,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
           const mz = (z + other.z) / 2;
           const [lx, lz] = toLocal(mx, mz);
           if (lx > -592 && lx < 133 && lz > 9 && lz < 26) continue; // the university's street has its own
-          if (Math.max(Math.abs(mx), Math.abs(mz)) > WORLD_HALF - 4) continue;
+          if (!inWorld(mx, mz, 4)) continue;
           const key = Math.round(mx / 1.6) + ":" + Math.round(mz / 1.6);
           if (seen.has(key)) continue;
           // not across a junction: every road must be at least a lane away
@@ -1028,7 +1055,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     const conc = tiuModel.materials.concrete;
     const dark = tiuModel.materials.concrete.clone();
     dark.color.multiplyScalar(0.8);
-    const inside = (p) => Math.max(Math.abs(p[0]), Math.abs(p[1])) < WORLD_HALF - 4;
+    const inside = (p) => inWorld(p[0], p[1], 4);
     const concParts = [];
     const darkParts = [];
     for (const r of campus.rail || []) {
@@ -1107,7 +1134,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
           const nzr = (b[0] - a[0]) / len;
           const x = a[0] + ((b[0] - a[0]) * s) / len + nxr * side;
           const z = a[1] + ((b[1] - a[1]) * s) / len + nzr * side;
-          if (!nearEntrance(x, z, 4) && footprints.every((f) => !inPoly(x, z, f)) && Math.max(Math.abs(x), Math.abs(z)) < WORLD_HALF) tall.push({ x, z, yaw: Math.atan2(nzr, -nxr) });
+          if (!nearEntrance(x, z, 4) && footprints.every((f) => !inPoly(x, z, f)) && inWorld(x, z)) tall.push({ x, z, yaw: Math.atan2(nzr, -nxr) });
         }
       }
     }
@@ -1177,9 +1204,10 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
       if (o.isMesh) staticMeshes.push(o);
     });
   }
-  const chunks = mergeStaticChunks(scene, staticMeshes);
+  const chunks = mergeStaticChunks(scene, staticMeshes, { size: 300 }); // 8.5k buildings x ~15 materials: 100 m cells left thousands of lone meshes; 300 m cells cut gate-view draw calls 1279 -> 476
 
   return {
+    updateSigns,
     chunks,
     places,
     props,

@@ -14,23 +14,70 @@ matches the 3D scene).
 Map data (c) OpenStreetMap contributors, ODbL. Overture Maps buildings, ODbL (includes Google Open
 Buildings, CC BY 4.0, and Microsoft building footprints, ODbL).
 
-Refresh the inputs:
-  curl -A "TechnoVerse-campus-builder" --data-urlencode \
-    'data=[out:json][timeout:90];(nwr(around:500,22.5760302,88.4284409););out body;>;out skel qt;' \
-    https://overpass-api.de/api/interpreter -o tools/osm-extract.json
-  Overture: see tools/fetch-overture.py
+Area: the Sector V boundary polygon in tools/sector-v-boundary.json (made by tools/make-boundary.py from OpenStreetMap
+features), plus a 30 m margin. Features are kept when their centre (roads: any vertex) is inside; roads are clipped at the edge.
+
+Refresh the inputs (see README "Map data"):
+  node tools/fetch-sector-v.mjs      # finds the boundary features, downloads tools/osm-extract.json for their box
+  python3 tools/make-boundary.py     # writes tools/sector-v-boundary.json
+  Overture: see tools/fetch-overture.py (still the old 600 m box)
+  python3 tools/build-campus.py && python3 tools/validate-campus.py
+The Overpass query is (per tile of the box): [out:json][timeout:180];(nwr(S,W,N,E););out body;>;out skel qt;
 """
 import json, math, os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LAT0, LON0 = 22.5760302, 88.4284409  # "Techno India University" node in OSM
-RADIUS = 600  # keep things whose centre is within this many metres east-west and north-south: from the Sector V metro station (north) to Meen Bhavan (south)
+RADIUS = 600  # the old map: a 600 m square around the pin. Now only the area the Overture extract covers.
+KEEP_BUS_STOPS = {"College More"}  # bus stops are not labelled, except the ones that name a junction on the boundary
+MARGIN = 30  # metres outside the boundary polygon that are still kept
 M_PER_DEG_LON = 111320 * math.cos(math.radians(LAT0))
 M_PER_DEG_LAT = 110574
 
 
 def to_xz(lat, lon):
     return [round((lon - LON0) * M_PER_DEG_LON, 2), round(-(lat - LAT0) * M_PER_DEG_LAT, 2)]
+
+
+BOUNDARY = json.load(open(os.path.join(HERE, "sector-v-boundary.json")))
+POLY = [to_xz(la, lo) for la, lo in BOUNDARY["polygon_latlon"]]
+PX0, PX1 = min(p[0] for p in POLY) - MARGIN, max(p[0] for p in POLY) + MARGIN
+PZ0, PZ1 = min(p[1] for p in POLY) - MARGIN, max(p[1] for p in POLY) + MARGIN
+
+
+def _seg_dist(x, z, a, b):
+    dx, dz = b[0] - a[0], b[1] - a[1]
+    L = dx * dx + dz * dz
+    t = 0 if L == 0 else max(0, min(1, ((x - a[0]) * dx + (z - a[1]) * dz) / L))
+    return math.hypot(x - a[0] - t * dx, z - a[1] - t * dz)
+
+
+def in_area(x, z):
+    """Inside the boundary polygon, or within MARGIN metres of it."""
+    if x < PX0 or x > PX1 or z < PZ0 or z > PZ1:
+        return False
+    if inside(x, z, POLY):
+        return True
+    return any(_seg_dist(x, z, POLY[i - 1], POLY[i]) <= MARGIN for i in range(len(POLY)))
+
+
+def runs(pts):
+    """Clip a polyline to the area: the stretches of consecutive vertices inside, each extended by one vertex at either end."""
+    flags = [in_area(p[0], p[1]) for p in pts]
+    out, cur = [], []
+    for i, p in enumerate(pts):
+        if flags[i]:
+            if not cur and i > 0:
+                cur.append(pts[i - 1])
+            cur.append(p)
+        else:
+            if cur:
+                cur.append(p)
+                out.append(cur)
+                cur = []
+    if cur:
+        out.append(cur)
+    return [r for r in out if len(r) >= 2]
 
 
 def from_survey(p):  # survey points are [east, north]
@@ -106,9 +153,9 @@ def way_pts(w):
     return [to_xz(nodes[n]["lat"], nodes[n]["lon"]) for n in w["nodes"] if n in nodes]
 
 
-def near(pts, r=RADIUS):
+def near(pts):
     c = centroid(pts)
-    return max(abs(c[0]), abs(c[1])) < r
+    return in_area(c[0], c[1])
 
 
 # ---------- OpenStreetMap ----------
@@ -117,18 +164,18 @@ for e in data["elements"]:
     tags = e.get("tags", {})
     if e["type"] == "node":
         x, z = to_xz(e["lat"], e["lon"])
-        if max(abs(x), abs(z)) > RADIUS:
+        if not in_area(x, z):
             continue
         if tags.get("natural") == "tree":
             out["trees"].append({"x": x, "z": z})
-        elif "name" in tags and tags.get("highway") != "bus_stop":
-            out["labels"].append({"name": tags["name"], "x": x, "z": z})
+        elif "name" in tags and (tags.get("highway") != "bus_stop" or tags["name"] in KEEP_BUS_STOPS):
+            out["labels"].append({"name": tags["name"], "x": x, "z": z, "sid": f"osm:node/{e['id']}"})
         continue
 
     if e["type"] == "way" and tags.get("railway") == "subway":
         pts = way_pts(e)
-        if len(pts) > 1 and any(max(abs(q[0]), abs(q[1])) < RADIUS for q in pts):
-            out["rail"].append({"pts": pts, "name": tags.get("name", "")})
+        for part in runs(pts):
+            out["rail"].append({"pts": part, "name": tags.get("name", ""), "sid": f"osm:way/{e['id']}"})
         continue
 
     if e["type"] == "relation":
@@ -138,7 +185,7 @@ for e in data["elements"]:
                 if m["type"] == "way" and m["role"] == "outer" and m["ref"] in ways:
                     pts = simplify(way_pts(ways[m["ref"]]))
                     if len(pts) >= 3 and near(pts):
-                        osm_buildings.append({"id": m["ref"], "name": tags.get("name", ""), "pts": pts, "floors": levels(tags), "src": "osm"})
+                        osm_buildings.append({"id": m["ref"], "sid": f"osm:way/{m['ref']}", "name": tags.get("name", ""), "pts": pts, "floors": levels(tags), "src": "osm"})
         continue
 
     if e["type"] != "way" or e["id"] in DROP:
@@ -149,24 +196,28 @@ for e in data["elements"]:
     closed = e["nodes"][0] == e["nodes"][-1]
     hw = tags.get("highway")
     if hw:
-        if not any(max(abs(p[0]), abs(p[1])) < RADIUS + 40 for p in pts):
+        parts = runs(pts)
+        if not parts:
             continue
+        sid = f"osm:way/{e['id']}"
         if hw in ("footway", "path", "pedestrian", "steps", "cycleway"):
-            out["paths"].append({"kind": hw, "pts": pts})
+            for part in parts:
+                out["paths"].append({"kind": hw, "pts": part, "sid": sid})
         elif hw not in ("construction", "proposed", "platform"):
             try:
                 lanes = int(tags.get("lanes", 0))
             except ValueError:
                 lanes = 0
-            out["roads"].append({"kind": hw, "name": tags.get("name", ""), "oneway": tags.get("oneway") == "yes", "lanes": lanes, "pts": pts})
+            for part in parts:
+                out["roads"].append({"kind": hw, "name": tags.get("name", ""), "oneway": tags.get("oneway") == "yes", "lanes": lanes, "pts": part, "sid": sid})
         continue
-    if not closed or not near(pts):
+    if not closed:
         continue
     ring = simplify(pts[:-1])
-    if len(ring) < 3:
+    if len(ring) < 3 or not near(ring):
         continue
     if "building" in tags or "building:part" in tags:
-        osm_buildings.append({"id": e["id"], "name": tags.get("name", ""), "pts": ring, "floors": levels(tags), "src": "osm"})
+        osm_buildings.append({"id": e["id"], "sid": f"osm:way/{e['id']}", "name": tags.get("name", ""), "pts": ring, "floors": levels(tags), "src": "osm"})
     elif tags.get("leisure") == "pitch":
         out["pitches"].append({"sport": tags.get("sport", ""), "pts": ring})
     elif tags.get("landuse") in ("grass", "meadow", "village_green") or tags.get("leisure") in ("park", "garden"):
@@ -178,6 +229,10 @@ for e in data["elements"]:
 
 # ---------- Overture: buildings OpenStreetMap does not have ----------
 extra = []
+def _bb(pts):
+    return (min(p[0] for p in pts), min(p[1] for p in pts), max(p[0] for p in pts), max(p[1] for p in pts))
+for _b in osm_buildings:
+    _b["_bb"] = _bb(_b["pts"])
 for i, b in enumerate(overture):
     if b["src"] == "OpenStreetMap":
         continue  # already in the OSM extract, with its tags
@@ -186,9 +241,13 @@ for i, b in enumerate(overture):
     pts = simplify([to_xz(lat, lon) for lon, lat in ring])
     if len(pts) < 3 or not near(pts) or area(pts) < 12:
         continue
-    if any(overlap(pts, o["pts"]) > 0.3 or overlap(o["pts"], pts) > 0.3 for o in osm_buildings):
+    ob = _bb(pts)
+    cand = [o for o in osm_buildings if not (o["_bb"][2] < ob[0] or o["_bb"][0] > ob[2] or o["_bb"][3] < ob[1] or o["_bb"][1] > ob[3])]
+    if any(overlap(pts, o["pts"]) > 0.3 or overlap(o["pts"], pts) > 0.3 for o in cand):
         continue
-    extra.append({"id": f"ov{i}", "name": b["name"] or "", "pts": pts, "floors": b["num_floors"], "src": "overture"})
+    extra.append({"id": f"ov{i}", "sid": f"overture:{b['id']}", "name": b["name"] or "", "pts": pts, "floors": b["num_floors"], "src": "overture"})
+for _b in osm_buildings:
+    del _b["_bb"]
 buildings = osm_buildings + extra
 
 # ---------- survey corrections ----------
@@ -216,11 +275,11 @@ for s in survey.get("split", []):
         box = [[p * ux + w * vx, p * uz + w * vz] for p, w in ((p0, w0), (p1, w0), (p1, w1), (p0, w1))]
         # keep only the part of the box inside the original outline (approximately: shrink to it)
         box = [[round(x, 2), round(z, 2)] for x, z in box]
-        buildings.append({"id": f"{s['osm']}-{k}", "name": part.get("name", ""), "pts": box, "floors": part.get("floors"), "style": part.get("style"), "roof": part.get("roof"), "src": "survey"})
+        buildings.append({"id": f"{s['osm']}-{k}", "name": part.get("name", ""), "pts": box, "floors": part.get("floors"), "style": part.get("style"), "roof": part.get("roof"), "src": "survey", "sid": f"survey:{s['osm']}-{k}"})
 
 for k, add in enumerate(survey.get("add", [])):
     pts = [from_survey(p) for p in add["pts"]]
-    buildings.append({"id": f"sv{k}", "name": add.get("name", ""), "pts": pts, "floors": add.get("floors"), "style": add.get("style"), "roof": add.get("roof"), "src": "survey"})
+    buildings.append({"id": f"sv{k}", "sid": f"survey:sv{k}", "name": add.get("name", ""), "pts": pts, "floors": add.get("floors"), "style": add.get("style"), "roof": add.get("roof"), "src": "survey"})
 
 for s in survey.get("buildings", []):
     x, z = from_survey(s["at"])
@@ -278,7 +337,15 @@ for b in buildings:
             del b[key]
 out["buildings"] = sorted(buildings, key=lambda b: str(b["id"]))
 
+counts = {k: len(v) for k, v in out.items()}
+bb = json.load(open(os.path.join(HERE, "sector-v-bbox.json")))
+out["meta"] = {
+    "bounds": {"xMin": round(PX0), "xMax": round(PX1), "zMin": round(PZ0), "zMax": round(PZ1)},
+    "osmDate": bb.get("fetched"),
+    "counts": counts,
+    "source": "OpenStreetMap (ODbL), Overture Maps buildings inside the old 600 m box only, hand survey; boundary: tools/sector-v-boundary.json",
+}
 path = os.path.join(HERE, "..", "public", "campus.json")
 json.dump(out, open(path, "w"), separators=(",", ":"))
-print({k: len(v) for k, v in out.items()}, os.path.getsize(path), "bytes")
+print(counts, os.path.getsize(path), "bytes")
 print("buildings by source:", {s: sum(1 for b in buildings if b["src"] == s) for s in ("osm", "overture", "survey")})
