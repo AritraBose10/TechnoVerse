@@ -20,6 +20,7 @@ const WALL = 29.6; // boundary line behind the footpath
 const GATE = [7.2, 16.8]; // the institute gate, along x
 const MEDIAN = 17; // centre of the median
 
+// AUTHORED SET: declared in public/authored-sets.json (one unit, anchor + radius). Positions here are street-frame local coordinates inside group G, so the streaming lint (tools/bake.mjs) skips this file.
 export function buildOpposite({ RAPIER, world, scene, mid, phi, M, forest, places }) {
   const rnd = seeded(909);
   const range = (a, b) => a + rnd() * (b - a);

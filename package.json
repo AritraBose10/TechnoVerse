@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "check": "node tools/check.mjs",
-    "smoke": "node tools/smoke.mjs"
+    "smoke": "node tools/smoke.mjs",
+    "bake": "node tools/bake.mjs"
   },
   "dependencies": {
     "ws": "^8.18.0"

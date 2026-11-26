@@ -1,0 +1,9 @@
+[
+  {
+    "file": "opposite.js",
+    "unit": "opposite side of the street",
+    "anchor": "mid of the TIU street frame (world.js passes mid and phi)",
+    "radius": 160,
+    "note": "One hand-authored set: its props use street-frame local coordinates inside one group. Allowed by streaming constraint 1 because it is declared here as one unit with an anchor and radius."
+  }
+]
