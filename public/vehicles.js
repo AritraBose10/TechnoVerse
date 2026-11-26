@@ -12,7 +12,7 @@ const MODELS = {
   micra: { kind: "hatch", file: "micra", kit: true, near: true, k: 0.963, wr: 0.298, L: 3.78, W: 1.67, H: 1.66, wb: 2.45 },
   altok10: { kind: "hatch", file: "altok10", kit: true, near: true, k: 0.822, wr: 0.284, L: 3.6, W: 1.5, H: 1.51, wb: 2.37 },
   alto800: { kind: "hatch", file: "alto800", kit: true, near: true, k: 0.788, wr: 0.255, L: 3.43, W: 1.49, H: 1.51, wb: 2.36 },
-  altoworks: { kind: "hatch", file: "altoworks", L: 3.4, W: 1.48, H: 1.63, wb: 2.46 },
+  altoworks: { kind: "hatch", file: "altoworks", L: 3.4, W: 1.48, H: 1.63, wb: 2.46, noLod: true },
   m800: { kind: "hatch", file: "m800", kit: true, near: true, k: 0.765, wr: 0.249, L: 3.37, W: 1.44, H: 1.4, wb: 2.175 },
   baleno: { kind: "hatch", file: "baleno", kit: true, near: true, k: 1.053, wr: 0.327, L: 3.99, W: 1.74, H: 1.62, wb: 2.52 },
   sx4: { kind: "sedan", file: "sx4", L: 4.1, W: 1.76, H: 1.62, wb: 2.5 },
@@ -20,7 +20,7 @@ const MODELS = {
   fortuner15: { kind: "suv", file: "fortuner15", kit: true, near: true, k: 0.895, wr: 0.418, L: 4.7, W: 1.86, H: 1.9, wb: 2.75 },
   everest: { kind: "suv", file: "everest", kit: true, near: true, k: 0.975, wr: 0.396, L: 4.9, W: 1.86, H: 1.77, wb: 2.85 },
   safari: { kind: "suv", file: "safari", kit: true, near: true, k: 0.883, wr: 0.373, L: 4.67, W: 1.85, H: 1.78, wb: 2.74 },
-  gsrtc: { kind: "bus", file: "gsrtc", L: 10.6, W: 2.64, H: 2.82, wb: 5.15 },
+  gsrtc: { kind: "bus", file: "gsrtc", L: 10.6, W: 2.64, H: 2.82, wb: 5.15, noLod: true },
   scorpio: { kind: "suv", file: "scorpio", L: 4.66, W: 1.95, H: 1.84, wb: 2.75 },
   // "kit" models: wheel nodes and flat paint/trim/glass roles, facing -z in the file (see tools/vehicles/fbx2car.mjs).
   // `k` rescales the file to the real car length.
@@ -306,7 +306,7 @@ export function preloadVehicles(high = true) {
         } else if (spinWheels) splitWheels(g.scene, name, MODELS[name].W);
         loaded[name] = g.scene;
         // a ~3K-triangle copy of the body for cars far from the camera (models/vehicles/lod; the kit models and the bus have none)
-        if (!m.kit) {
+        if (!m.kit && !m.noLod) { // noLod: no file in models/vehicles/lod yet, so it stays full detail
           loader.loadAsync(`/models/vehicles/lod/${m.file}.glb`).then((lg) => {
             const o = {};
             lg.scene.traverse((x) => {
