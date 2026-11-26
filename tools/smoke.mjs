@@ -61,10 +61,10 @@ try {
   report.street = await page.evaluate(() => window.__tiu.crowdStats());
   const got = { calls: report.render.calls, triangles: report.render.tris };
   report.overBudget = Object.keys(BUDGET).filter((k) => got[k] > BUDGET[k]);
-  // Headless software WebGL (SwiftShader) fails program validation on shaders a real GPU accepts.
+  // Headless software WebGL (SwiftShader, llvmpipe) fails program validation on shaders a real GPU accepts.
   // shortcut: matched by message; drop this once the run moves to a GPU machine.
   report.gpu = await page.evaluate(() => { const gl = document.createElement("canvas").getContext("webgl2"); const x = gl.getExtension("WEBGL_debug_renderer_info"); return x ? gl.getParameter(x.UNMASKED_RENDERER_WEBGL) : "?"; });
-  if (/SwiftShader/i.test(report.gpu)) {
+  if (/SwiftShader|llvmpipe/i.test(report.gpu)) {
     report.softwareOnly = errors.filter((e) => e.includes("VALIDATE_STATUS false")).length;
     errors.splice(0, errors.length, ...errors.filter((e) => !e.includes("VALIDATE_STATUS false")));
   }
