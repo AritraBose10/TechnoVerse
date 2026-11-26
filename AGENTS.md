@@ -63,3 +63,37 @@ depends: [T-YYY]
 one is busy). Test pages: `/rides.html` (every bicycle and motorcycle), `/bodies.html` (crowd
 bodies). In the browser console `__tiu` has debug hooks (`__tiu.time("19:30")`, `__tiu.cam(...)`,
 `__tiu.renderInfo()`, `__tiu.simulate(seconds)`).
+
+## Skill stack (always on, Claude and Codex)
+
+Three skills live in `.claude/skills/` and apply to every session in this repo, without being asked:
+
+1. **ponytail** (`.claude/skills/ponytail/SKILL.md`), **full** level by default. Smallest complete
+   change: reuse what the repo already has, then the platform, then installed deps; no new npm
+   dependency for a few lines; finish callers and checks. End each coding reply with one line on what
+   was skipped or not checked. Captain can say `/ponytail lite|ultra` or "stop ponytail". Use
+   `ponytail-review` before merging a Codex branch and `ponytail-debt` to list `shortcut:` comments.
+2. **graphify** (`.claude/skills/graphify/SKILL.md`, rules in the graphify section below). The graph
+   is the map: query it before grepping or reading source. Rebuild with `graphify update .`
+   (AST only, free) after code changes. Install the CLI once per machine: `uv tool install graphifyy`
+   (Python 3.11+; `--python 3.12` if the system Python is older).
+3. **omniroute** (`.claude/skills/omniroute/SKILL.md`). Every LLM call TechnoVerse makes (NPC
+   dialogue, moderation, STT/TTS, embeddings) goes through Captain's OmniRoute gateway via
+   `server.js`, key in `.env`, never in the browser. Dormant until such a feature exists.
+
+Order of use on a task: graphify to find the code, ponytail to decide the change, omniroute only if
+the change calls a model.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+When the user types `/graphify`, use the installed graphify skill or instructions before doing anything else.
+
+Rules:
+- When graphify-out/graph.json exists, run `graphify query "<question>"` before your first grep, search or source-file read for a codebase question, and put this rule in every subagent prompt that explores code. Read raw files only for lines the graph or an earlier read already located. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. When the answer is under a Markdown heading, `graphify section "<heading>"` prints that section's text, so the .md need not be opened. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- Dirty graphify-out/ files are expected after hooks or incremental updates; dirty graph files are not a reason to skip graphify. Only skip graphify if the task is about stale or incorrect graph output, or the user explicitly says not to use it.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+- A committed graphify-out/graph.json is rewritten whole on every build, so a large diff to it in a pull request is expected. Do not flag it as churn or suggest skipping the graph rebuild or its hooks.

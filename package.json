@@ -4,7 +4,9 @@
   "description": "TechnoVerse: walkable 3D TIU and Sector V street with traffic, people, real time of day, chat and voice",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "check": "node tools/check.mjs",
+    "smoke": "node tools/smoke.mjs"
   },
   "dependencies": {
     "ws": "^8.18.0"
@@ -12,5 +14,8 @@
   "private": true,
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "playwright": "^1.65.1"
   }
 }

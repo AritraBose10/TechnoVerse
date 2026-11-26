@@ -1,0 +1,21 @@
+# vendored libs and heavy data: not our code, would drown the graph
+public/vendor/
+public/models/
+public/data/
+node_modules/
+_backup_pre_merge/
+tools/*.json
+tools/osm-tiles/
+tools/smoke-out/
+tools/validate-out/
+*.before-*
+*.v1
+*.tgz
+/serve
+/serve-shm
+/serve-wal
+graphify-out/
+.playwright-mcp/
+.sqlew/
+# agent skills and their 45 OmniRoute reference docs: tooling, not TechnoVerse
+.claude/
