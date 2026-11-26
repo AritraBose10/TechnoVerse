@@ -1,7 +1,7 @@
 ---
 id: T-001
-owner: codex
-status: ready
+owner: claude
+status: done
 depends: []
 ---
 # Smoke-test harness
@@ -39,5 +39,13 @@ so allow long timeouts. Add `?q=low` to the game URL.
 ## Questions
 
 ## Result
+Done by Claude 2026-11-26 (Codex had not started it). `npm run check` syntax-checks server.js, public/*.js
+(as modules) and tools/*.mjs; verified it fails on a planted error. `npm run smoke` boots the server on
+port 3990, joins, snaps spawn at 12:00/19:30/23:00, opens /rides.html and /bodies.html, runs
+`__tiu.simulate(20)`, measures the scene with `__tiu.cost()` against a budget (750 calls, 1.5M tris) and
+writes tools/smoke-out/latest/report.json. First runs: 378-581 calls, 0.7-1.2M tris. Real failures found:
+404 on models/vehicles/lod/gsrtc.glb and altoworks.glb (no LOD file for the bus and the Alto Works).
+Software WebGL shader-validation noise is set aside when the GPU string is SwiftShader/llvmpipe.
+Browser: `npx playwright install chromium` per machine, or SMOKE_CHROME=<path to chrome>.
 
 ## Review
