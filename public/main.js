@@ -3,6 +3,7 @@ import * as THREE from "three";
 import RAPIER from "/vendor/rapier.es.js";
 import { createDriving } from "/drive.js";
 import { buildWorld } from "/world.js";
+import { createTileStream } from "/tilestream.js";
 import { buildClearance } from "/clearance.js";
 import { loadLandmarks } from "/landmarks.js";
 import { createMinimap } from "/minimap.js";
@@ -130,7 +131,19 @@ function disposeLabel(sprite) {
 const world = new RAPIER.World({ x: 0, y: -GRAVITY, z: 0 });
 world.timestep = STEP;
 const campus = await (await fetch("/campus.json")).json();
+const __t0 = performance.now(), __heap0 = performance.memory ? performance.memory.usedJSHeapSize : 0;
+const bc = { x: 0, z: 0, t: 0, vx: 0, vz: 0 };
+// ?stream=1: stream the baked tiles around the player (debug hook: window.__stream.stats()). Off by default, nothing renders from the tiles yet.
+const tileStream = location.search.includes("stream=1") ? createTileStream() : null;
+if (tileStream) { window.__stream = tileStream; tileStream.start().catch((e) => console.warn("tile streaming off:", e.message)); } // player position/velocity, for worldInfo.staticColliders
 const worldInfo = buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel });
+// Startup cost of the world, for deciding what to stream. ?fp=1 adds a fingerprint of every mesh (same number = same world).
+window.__boot = {
+  buildWorldMs: Math.round(performance.now() - __t0), colliders: world.colliders.len(), sceneChildren: scene.children.length, statics: worldInfo.staticColliders.stats(), bc: worldInfo.staticColliders, buildings: campus.buildings.length,
+  heapMB: performance.memory ? Math.round((performance.memory.usedJSHeapSize - __heap0) / 1e6) : null,
+  fp: location.search.includes("fp=1") ? (() => { let f = 0, n = 0; scene.traverse((o) => { if (!o.isMesh) return; n++; const p = o.geometry.attributes.position; f += p.count + p.getX(0) + p.getY(0) + p.getZ(p.count - 1) + o.position.x + o.position.z; if (o.isInstancedMesh) { for (let i = 0; i < o.instanceMatrix.array.length; i += 997) f += o.instanceMatrix.array[i]; f += o.count; } }); return [n, Math.round(f * 100) / 100]; })() : undefined,
+};
+console.info("[boot]", JSON.stringify(window.__boot, (k, v) => (k === "bc" ? undefined : v)));
 loadLandmarks({ scene, campus });
 const minimap = createMinimap({ campus, getMe: () => me, getPlayers: () => players, getCamYaw: () => camYaw });
 const { places, props, focus, entranceYaw, animate: animateWorld, captureReflections } = worldInfo;
@@ -2466,6 +2479,15 @@ function afterMove(dt, now, pos) {
     captureReflections();
   }
   animateWorld(now / 1000); // leaves moving in the breeze
+  { // static colliders (walls, kerbs, lamps, trunks) exist only near the player (my avatar, which is on the bike or in the car when I am; the camera before I join)
+    const at = me ? me.group.position : camera.position;
+    const t = now / 1000, dtc = Math.max(1e-3, t - bc.t);
+    if (bc.t) { bc.vx += ((at.x - bc.x) / dtc - bc.vx) * 0.2; bc.vz += ((at.z - bc.z) / dtc - bc.vz) * 0.2; }
+    Object.assign(bc, { x: at.x, z: at.z, t });
+    const sp = Math.hypot(bc.vx, bc.vz), k = sp > 40 ? 40 / sp : 1; // a teleport must not look like a 3 km/s lookahead
+    worldInfo.staticColliders.update(bc.x, bc.z, bc.vx * k, bc.vz * k);
+    tileStream?.update(bc.x, bc.z, bc.vx * k, bc.vz * k, now);
+  }
   updateStreet(dt, pos);
   minimap.update(dt);
   for (const p of props) {

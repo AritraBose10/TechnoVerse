@@ -7,6 +7,7 @@ import { mergeGeometries } from "/vendor/jsm/utils/BufferGeometryUtils.js";
 import { mergeStaticChunks } from "/chunks.js";
 import { makeTrees } from "/trees.js";
 import { addInstanceCull } from "/instcull.js";
+import { distSegRect } from "/streamer.js";
 import { buildTIU } from "/tiu.js";
 import { buildOpposite } from "/opposite.js";
 import { heritageLamps, streetLights } from "/street.js";
@@ -48,6 +49,64 @@ function distToPath(x, z, pts, closed = false) {
   for (let i = 0; i < pts.length - (closed ? 0 : 1); i++) best = Math.min(best, distToSegment(x, z, pts[i], pts[(i + 1) % pts.length]));
   return best;
 }
+// Uniform grid over line segments, so "is anything within r of this point?" tests a few nearby segments instead of every
+// segment on the map. Same answers as testing them all (a segment within r of the point has its bounding box within r of it).
+// Lines are {pts, w, closed}: hit() asks "any segment within its own w + m?", nearest() the plain distance to the closest one.
+function segIndex(lines, cell = 32) {
+  const cells = new Map(), all = [];
+  let maxW = 0;
+  for (const L of lines) {
+    const n = L.pts.length;
+    if (n < 2) continue;
+    maxW = Math.max(maxW, L.w);
+    for (let k = 0; k < n - (L.closed ? 0 : 1); k++) {
+      const a = L.pts[k], b = L.pts[(k + 1) % n], seg = [a, b, L.w];
+      all.push(seg);
+      const i1 = Math.floor(Math.max(a[0], b[0]) / cell), j1 = Math.floor(Math.max(a[1], b[1]) / cell);
+      for (let i = Math.floor(Math.min(a[0], b[0]) / cell); i <= i1; i++) for (let j = Math.floor(Math.min(a[1], b[1]) / cell); j <= j1; j++) {
+        const key = i * 100003 + j;
+        const list = cells.get(key);
+        if (list) list.push(seg); else cells.set(key, [seg]);
+      }
+    }
+  }
+  const scan = (x, z, r, fn) => {
+    const i1 = Math.floor((x + r) / cell), j1 = Math.floor((z + r) / cell);
+    for (let i = Math.floor((x - r) / cell); i <= i1; i++) for (let j = Math.floor((z - r) / cell); j <= j1; j++) {
+      const list = cells.get(i * 100003 + j);
+      if (list) for (const s of list) if (fn(s)) return true;
+    }
+    return false;
+  };
+  return {
+    hit: (x, z, m) => scan(x, z, maxW + m, (s) => distToSegment(x, z, s[0], s[1]) <= s[2] + m),
+    nearest(x, z) {
+      for (const r of [24, 96, 400, 2000]) {
+        let best = Infinity;
+        scan(x, z, r, (s) => { best = Math.min(best, distToSegment(x, z, s[0], s[1])); return false; });
+        if (best <= r) return best;
+      }
+      return all.reduce((m, s) => Math.min(m, distToSegment(x, z, s[0], s[1])), Infinity);
+    },
+  };
+}
+// Same idea for "is this point inside any of these polygons?": polygons are filed under the cells their bounding box covers.
+function polyIndex(polys, cell = 32) {
+  const cells = new Map(), boxes = polys.map((p) => {
+    let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+    for (const [x, z] of p) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (z < z0) z0 = z; if (z > z1) z1 = z; }
+    return [x0, z0, x1, z1];
+  });
+  boxes.forEach((b, id) => {
+    for (let i = Math.floor(b[0] / cell); i <= Math.floor(b[2] / cell); i++) for (let j = Math.floor(b[1] / cell); j <= Math.floor(b[3] / cell); j++) {
+      const key = i * 100003 + j;
+      const list = cells.get(key);
+      if (list) list.push(id); else cells.set(key, [id]);
+    }
+  });
+  return { inside: (x, z) => (cells.get(Math.floor(x / cell) * 100003 + Math.floor(z / cell)) || []).some((id) => { const b = boxes[id]; return x >= b[0] && x <= b[2] && z >= b[1] && z <= b[3] && inPoly(x, z, polys[id]); }) };
+}
+const bb = (pts) => { let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity; for (const [x, z] of pts) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (z < z0) z0 = z; if (z > z1) z1 = z; } return [x0, z0, x1, z1]; };
 const yawQuat = (a) => ({ x: 0, y: Math.sin(a / 2), z: 0, w: Math.cos(a / 2) });
 
 export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }) {
@@ -544,9 +603,15 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
       return { a, b, len, nx: (b[1] - a[1]) / len, nz: -(b[0] - a[0]) / len };
     });
   }
+  // Static colliders that are not the ground: wall boxes, kerbs, railings, lamp posts, tree trunks. Not created here (about 70,000 of
+  // them cost startup time and memory and nobody is near most): each is recorded as [a, b, c, x, y, z, yaw, kind] and created by
+  // staticColliders (below) when the player is near. kind 0 = box [w, h, d, x, y, z, yaw], kind 1 = cylinder [halfHeight, radius, 0, x, y, z, 0].
+  const deferredStatics = [];
+  const deferBox = (w, h, d, x, y, z, yaw = 0) => deferredStatics.push([w, h, d, x, y, z, yaw, 0]);
+  const deferCylinder = (halfHeight, radius, x, y, z) => deferredStatics.push([halfHeight, radius, 0, x, y, z, 0, 1]);
   function edgeCollider(e, height, inset = 0.4) {
     const yaw = Math.atan2(-(e.b[1] - e.a[1]), e.b[0] - e.a[0]);
-    solidBox(e.len, height, inset * 2, (e.a[0] + e.b[0]) / 2 - e.nx * inset, height / 2, (e.a[1] + e.b[1]) / 2 - e.nz * inset, yaw);
+    deferBox(e.len, height, inset * 2, (e.a[0] + e.b[0]) / 2 - e.nx * inset, height / 2, (e.a[1] + e.b[1]) / 2 - e.nz * inset, yaw);
   }
 
   // ---------- ground ----------
@@ -590,7 +655,9 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     if (r.kind === "secondary" || r.kind === "primary" || r.kind === "tertiary") ribbon(r.pts, width, 0.014, mainRoadMat, 8);
     else ribbon(r.pts, width, 0.01, laneMat, 6);
   }
-  const roadClear = (x, z, margin) => campus.roads.every((r) => r.pts.length < 2 || distToPath(x, z, r.pts) > (ROAD_WIDTH[r.kind] || 3.5) / 2 + margin);
+  const roadIdx = segIndex(campus.roads.map((r) => ({ pts: r.pts, w: (ROAD_WIDTH[r.kind] || 3.5) / 2 })));
+  const mainIdx = segIndex(mainRoads.map((r) => ({ pts: r.pts, w: 0 })));
+  const roadClear = (x, z, margin) => !roadIdx.hit(x, z, margin);
 
   // ---------- the university complex (see tiu.js) ----------
   const tiu = campus.buildings.find((b) => b.id === TIU_ID);
@@ -753,7 +820,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
         roof.position.set(x, 3.4, z);
         roof.rotation.y = yaw;
         add(roof);
-        solidBox(w, 4.9, d, x, 2.45, z, yaw);
+        deferBox(w, 4.9, d, x, 2.45, z, yaw);
       }
   }
   // A name board fixed to the wall that faces the nearest road, as the real signs are.
@@ -763,7 +830,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     const roadDist = (e) => {
       const x = (e.a[0] + e.b[0]) / 2 + e.nx * 3;
       const z = (e.a[1] + e.b[1]) / 2 + e.nz * 3;
-      return Math.min(...campus.roads.filter((r) => r.pts.length > 1).map((r) => distToPath(x, z, r.pts)));
+      return roadIdx.nearest(x, z);
     };
     const e = edges.reduce((best, f) => (roadDist(f) < roadDist(best) ? f : best));
     const size = 56;
@@ -932,7 +999,17 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     const [lx, lz] = toLocal(x, z);
     return Math.abs(lx) < stripEnd + 2 + margin && lz > -12 && lz < FENCE_Z + 3 + margin;
   };
-  const freeSpot = (x, z, r) => roadClear(x, z, r) && footprints.every((f) => !inPoly(x, z, f) && distToPath(x, z, f, true) > r) && !nearEntrance(x, z, r);
+  // footprints keep growing while the world is built, so the index is rebuilt whenever the list has changed.
+  // Footprints must only ever be appended (never edited in place or replaced): the rebuild test is the list length.
+  let fpIdx = null, fpCount = -1;
+  const fpIndex = () => {
+    if (fpCount !== footprints.length) {
+      fpCount = footprints.length;
+      fpIdx = { edges: segIndex(footprints.map((f) => ({ pts: f, w: 0, closed: true }))), polys: polyIndex(footprints) };
+    }
+    return fpIdx;
+  };
+  const freeSpot = (x, z, r) => roadClear(x, z, r) && !fpIndex().polys.inside(x, z) && !fpIndex().edges.hit(x, z, r) && !nearEntrance(x, z, r);
   {
     const options = [];
     for (const site of campus.construction) {
@@ -974,7 +1051,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
           part((W - 0.8) / 4 - 0.6, 3.3, 0.25, -W / 2 + 0.4 + ((ix + 0.5) * (W - 0.8)) / 4, l * 3.6 + 1.8, D / 2 - 0.4, infill);
           part((W - 0.8) / 4 - 0.6, 3.3, 0.25, -W / 2 + 0.4 + ((ix + 0.5) * (W - 0.8)) / 4, l * 3.6 + 1.8, -D / 2 + 0.4, infill);
         }
-      solidBox(W, levels * 3.6, D, spot[0], (levels * 3.6) / 2, spot[1], phi);
+      deferBox(W, levels * 3.6, D, spot[0], (levels * 3.6) / 2, spot[1], phi);
       footprints.push([[-W / 2, -D / 2], [W / 2, -D / 2], [W / 2, D / 2], [-W / 2, D / 2]].map(([x, z]) => [spot[0] + x * cosP + z * sinP, spot[1] - x * sinP + z * cosP]));
       places.push({ name: "Construction site", x: spot[0], z: spot[1] });
     }
@@ -989,11 +1066,11 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     const kind = flowering ? "gulmohar" : roll < 0.4 ? "rain" : roll < 0.78 ? "neem" : "ashoka";
     const scale = range(0.8, 1.1);
     const h = forest.add(kind, x, y, z, { yaw: rand() * Math.PI * 2, scale, variant: Math.floor(rand() * 2) });
-    if (collide) world.createCollider(RAPIER.ColliderDesc.cylinder(h / 2, kind === "ashoka" ? 0.25 : 0.4 * scale).setTranslation(x, y + h / 2, z));
+    if (collide) deferCylinder(h / 2, kind === "ashoka" ? 0.25 : 0.4 * scale, x, y + h / 2, z);
   }
   function palm(x, z, y = 0, collide = true) {
     const h = forest.add("palm", x, y, z, { yaw: rand() * Math.PI * 2, scale: range(0.9, 1.1), variant: Math.floor(rand() * 2) });
-    if (collide) world.createCollider(RAPIER.ColliderDesc.cylinder(Math.min(h, 3) / 2, 0.3).setTranslation(x, y + Math.min(h, 3) / 2, z));
+    if (collide) deferCylinder(Math.min(h, 3) / 2, 0.3, x, y + Math.min(h, 3) / 2, z);
   }
   function shrub(x, z, y, flowers) {
     forest.add(flowers ? (rand() < 0.5 ? "shrubRed" : "shrubWhite") : "shrub", x, y, z, { yaw: rand() * Math.PI * 2, scale: range(0.8, 1.2) });
@@ -1001,12 +1078,14 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
   // the far side of the street, opposite the main gate (see opposite.js)
   const opposite = buildOpposite({ RAPIER, world, scene, mid, phi, M: tiuModel.materials, forest, places });
   footprints.push(opposite.footprint);
-  const planted = [];
+  const planted = new Map(); // 16 m cells, so "is a tree within gap of here?" looks at a few neighbours, not every tree planted so far
   const tryTree = (x, z, gap) => {
     if (!inWorld(x, z, 6) || !freeSpot(x, z, 1.6)) return;
     if (campus.pitches.some((p) => inPoly(x, z, p.pts))) return;
-    if (planted.some((p) => Math.hypot(p[0] - x, p[1] - z) < gap)) return;
-    planted.push([x, z]);
+    const ci = Math.floor((x - gap) / 16), cj = Math.floor((z - gap) / 16), ck = Math.floor((x + gap) / 16), cl = Math.floor((z + gap) / 16);
+    for (let i = ci; i <= ck; i++) for (let j = cj; j <= cl; j++) for (const p of planted.get(i * 100003 + j) || []) if (Math.hypot(p[0] - x, p[1] - z) < gap) return;
+    const pk = Math.floor(x / 16) * 100003 + Math.floor(z / 16);
+    if (planted.has(pk)) planted.get(pk).push([x, z]); else planted.set(pk, [[x, z]]);
     const kind = rand();
     if (kind < 0.2) palm(x, z);
     else broadleaf(x, z, 0, kind > 0.9); // gulmohar is a splash of colour, not the rule
@@ -1022,7 +1101,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
         for (const sign of [-1, 1]) {
           const x = a[0] + ((b[0] - a[0]) * s) / len + ((-(b[1] - a[1]) / len) * side + range(-0.6, 0.6)) * sign;
           const z = a[1] + ((b[1] - a[1]) * s) / len + (((b[0] - a[0]) / len) * side + range(-0.6, 0.6)) * sign;
-          if (mainRoads.every((o) => o.pts.length < 2 || distToPath(x, z, o.pts) > 5.8)) tryTree(x, z, 9);
+          if (!mainIdx.hit(x, z, 5.8)) tryTree(x, z, 9);
         }
       }
     }
@@ -1068,6 +1147,9 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
       }
       return best;
     };
+    // a road whose bounding box is more than 15 m from the point cannot have anything within 8..15 m of it: skip it without measuring
+    const owBox = new Map(oneway.map((o) => [o, bb(o.pts)]));
+    const farFromBox = (x, z, b) => Math.hypot(Math.max(b[0] - x, 0, x - b[2]), Math.max(b[1] - z, 0, z - b[3])) > 15;
     const seen = new Set();
     const spots = [];
     for (const r of oneway) {
@@ -1080,7 +1162,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
           const z = a[1] + ((b[1] - a[1]) * d) / len;
           let other = null;
           for (const o of oneway) {
-            if (o === r) continue;
+            if (o === r || farFromBox(x, z, owBox.get(o))) continue;
             const n = nearest(x, z, o.pts);
             if (n && n.d > 8 && n.d < 15 && (!other || n.d < other.d)) other = n;
           }
@@ -1093,7 +1175,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
           const key = Math.round(mx / 1.6) + ":" + Math.round(mz / 1.6);
           if (seen.has(key)) continue;
           // not across a junction: every road must be at least a lane away
-          if (!campus.roads.every((q) => q.pts.length < 2 || distToPath(mx, mz, q.pts) > (ROAD_WIDTH[q.kind] || 3.5) / 2 + 0.7)) continue;
+          if (!roadClear(mx, mz, 0.7)) continue;
           seen.add(key);
           spots.push({ x: mx, z: mz, yaw: Math.atan2(-(b[1] - a[1]), b[0] - a[0]), w: Math.min(2.6, other.d - 7.4) });
         }
@@ -1144,7 +1226,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
         scene.add(im);
         addInstanceCull(im, spots.map((sp) => sp.x), spots.map((sp) => sp.z), { radius: 4, cy: 1 });
       }
-      for (const sp of spots) solidBox(2.25, 1.2, 0.5, sp.x, 0.6, sp.z, sp.yaw);
+      for (const sp of spots) deferBox(2.25, 1.2, 0.5, sp.x, 0.6, sp.z, sp.yaw);
     }
   }
 
@@ -1197,7 +1279,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
           cap.rotateY(Math.atan2(-(b[1] - a[1]), b[0] - a[0]) + Math.PI / 2);
           cap.translate(x, 7.5, z);
           concParts.push(pier, cap);
-          world.createCollider(RAPIER.ColliderDesc.cylinder(3.6, 0.9).setTranslation(x, 3.6, z));
+          deferCylinder(3.6, 0.9, x, 3.6, z);
         }
         carry = (carry - len) % 25;
         if (carry < 0) carry += 25;
@@ -1234,7 +1316,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
           const nzr = (b[0] - a[0]) / len;
           const x = a[0] + ((b[0] - a[0]) * s) / len + nxr * side;
           const z = a[1] + ((b[1] - a[1]) * s) / len + nzr * side;
-          if (!nearEntrance(x, z, 4) && footprints.every((f) => !inPoly(x, z, f)) && inWorld(x, z)) tall.push({ x, z, yaw: Math.atan2(nzr, -nxr) });
+          if (!nearEntrance(x, z, 4) && !fpIndex().polys.inside(x, z) && inWorld(x, z)) tall.push({ x, z, yaw: Math.atan2(nzr, -nxr) });
         }
       }
     }
@@ -1243,7 +1325,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     for (const s of posts) lamps.spots.push({ x: s.x, y: 4.6, z: s.z, r: 5.5, warm: true });
     for (const s of tall) lamps.spots.push({ x: s.x + Math.cos(s.yaw) * 2.4, y: 9.2, z: s.z - Math.sin(s.yaw) * 2.4, r: 13, warm: false });
     for (const s of [...posts, ...tall]) {
-      world.createCollider(RAPIER.ColliderDesc.cylinder(3, 0.13).setTranslation(s.x, 3, s.z));
+      deferCylinder(3, 0.13, s.x, 3, s.z);
       poles.push(toLocal(s.x, s.z));
     }
   }
@@ -1305,8 +1387,58 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     });
   }
   const chunks = mergeStaticChunks(scene, staticMeshes, { size: 300 }); // 8.5k buildings x ~15 materials: 100 m cells left thousands of lone meshes; 300 m cells cut gate-view draw calls 1279 -> 476
+  // The merged chunks own their own copies of this geometry: let go of the originals and the wall batches (about 100 MB of JS memory).
+  staticMeshes.length = 0;
+  wallBatches.clear();
+
+  // ---------- static colliders: only near the player ----------
+  // Everything in deferredStatics is filed in 96 m cells. A cell's colliders are created when the player (or where they will be in
+  // LOOK seconds) gets within RADIUS of it, and removed once the player is clearly past it (RADIUS * KEEP plus the fastest speed
+  // seen * LOOK, so stopping or turning does not make them flicker). RADIUS 260 m covers the street's navmesh and clearance map
+  // (built once at startup from the fixed colliders) and everything a car or bike can reach in seconds.
+  // The ground slabs, the four border walls, dynamic props and what tiu.js / opposite.js create stay as they are.
+  const staticColliders = (() => {
+    const CELL = 96, KEEP = 1.3, LOOK = 3, RADIUS = location.search.includes("statics=all") ? 1e7 : 260; // ?statics=all keeps everything (to compare against the old behaviour)
+    const cells = new Map();
+    for (const w of deferredStatics) {
+      const key = Math.floor(w[3] / CELL) + "," + Math.floor(w[5] / CELL);
+      let c = cells.get(key);
+      if (!c) cells.set(key, (c = { specs: [], box: [Infinity, Infinity, -Infinity, -Infinity], handles: null }));
+      c.specs.push(w);
+      const r = w[7] ? w[1] + 0.1 : w[0] / 2 + w[2]; // how far it reaches from its centre: a cylinder's radius, or half a box's length plus its thickness
+      c.box = [Math.min(c.box[0], w[3] - r), Math.min(c.box[1], w[5] - r), Math.max(c.box[2], w[3] + r), Math.max(c.box[3], w[5] + r)];
+    }
+    deferredStatics.length = 0;
+    let vmax = 0;
+    const make = (c) => {
+      c.handles = c.specs.map(([a, b, d, x, y, z, yaw, kind]) => world.createCollider(
+        kind ? RAPIER.ColliderDesc.cylinder(a, b).setTranslation(x, y, z) : RAPIER.ColliderDesc.cuboid(a / 2, b / 2, d / 2).setTranslation(x, y, z).setRotation(yawQuat(yaw))));
+    };
+    const drop = (c) => { for (const h of c.handles) world.removeCollider(h, true); c.handles = null; };
+    return {
+      // call every frame with the player's position and velocity in m/s
+      update(x, z, vx, vz) {
+        if (![x, z, vx, vz].every(Number.isFinite)) return;
+        vmax = Math.max(vmax, Math.hypot(vx, vz));
+        const bx = x + vx * LOOK, bz = z + vz * LOOK, far = RADIUS * KEEP + vmax * LOOK;
+        let made = false;
+        for (const c of cells.values()) {
+          const d = distSegRect(x, z, bx, bz, c.box);
+          if (!c.handles && d <= RADIUS) { make(c); made = true; }
+          else if (c.handles && d > far) drop(c);
+        }
+        // new colliders are only visible to ray and shape queries after the query structure is refreshed: do it now, so a teleport next to a wall does not wait a frame
+        if (made) world.updateSceneQueries?.();
+      },
+      stats() { let active = 0, total = 0; for (const c of cells.values()) { total += c.specs.length; if (c.handles) active += c.specs.length; } return { active, total, cells: cells.size }; },
+      // for tests: of the colliders whose centre is within r of the point, how many exist?
+      near(x, z, r) { let need = 0, have = 0; for (const c of cells.values()) for (const w of c.specs) if (Math.hypot(w[3] - x, w[5] - z) <= r) { need++; if (c.handles) have++; } return { need, have }; },
+    };
+  })();
+  staticColliders.update(mid[0], mid[1], 0, 0); // the first screen, the navmesh and the clearance map need the colliders around the university
 
   return {
+    staticColliders,
     updateSigns,
     chunks,
     places,
