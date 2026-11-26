@@ -1,0 +1,17 @@
+# Store text with LF so Windows (CRLF) and Mac/Linux edits produce real diffs, not whole-file noise.
+* text=auto eol=lf
+*.glb binary
+*.gltf binary
+*.bin binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ktx2 binary
+*.hdr binary
+*.exr binary
+*.wasm binary
+*.mp3 binary
+*.ogg binary
+*.wav binary
+*.fbx binary

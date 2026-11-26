@@ -26,3 +26,18 @@ _backup_pre_merge/
 tools/osm-tiles/
 tools/sector-v-features.json
 tools/validate-out/
+
+# edit snapshots: git history is the backup now (see the archive commit of 2026-11-26)
+*.before-*
+*.pre-*.bak
+*.bak
+# local tool state
+.claude/settings.local.json
+.playwright-mcp/
+.sqlew/
+/serve
+/serve-shm
+/serve-wal
+tools/smoke-out/
+# graphify graph: rebuilt per machine in ~20 s with `graphify update .`
+graphify-out/
