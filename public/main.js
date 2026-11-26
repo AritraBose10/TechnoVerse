@@ -158,9 +158,9 @@ if (HIGH) {
   composer.setPixelRatio(renderer.getPixelRatio());
   composer.addPass(new RenderPass(scene, camera));
   aoPass = new GTAOPass(scene, camera, innerWidth, innerHeight);
-  aoPass.updateGtaoMaterial({ radius: 1.1, distanceExponent: 1.4, thickness: 1.2, scale: 1.15, samples: 12, screenSpaceRadius: false });
+  aoPass.updateGtaoMaterial({ radius: 1.4, distanceExponent: 1.4, thickness: 1.2, scale: 1.4, samples: 12, screenSpaceRadius: false });
   aoPass.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 6, rings: 2, samples: 12 });
-  aoPass.blendIntensity = 0.9;
+  aoPass.blendIntensity = 1.0;
   composer.addPass(aoPass);
   composer.addPass(new OutputPass());
   composer.setSize(innerWidth, innerHeight);

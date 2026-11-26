@@ -12,8 +12,9 @@ import { upgradeFacade } from "/facades.js";
 import { createHeroTrees } from "/herotrees.js";
 
 const SUN_TINT = [1.0, 0.955, 0.87];
+const HAZE_BLUE_HEX = "#9cc4ec";
 const GRADE = {
-  uniforms: { tDiffuse: { value: null }, contrast: { value: 1.1 }, sat: { value: 1.2 }, vig: { value: 0.22 }, warm: { value: 0.035 }, sunUv: { value: [0.5, 0.5] }, glare: { value: 0 }, aspect: { value: 1.78 } },
+  uniforms: { tDiffuse: { value: null }, contrast: { value: 1.16 }, sat: { value: 1.27 }, vig: { value: 0.22 }, warm: { value: 0.035 }, sunUv: { value: [0.5, 0.5] }, glare: { value: 0 }, aspect: { value: 1.78 } },
   vertexShader: "varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }",
   fragmentShader: `
     uniform sampler2D tDiffuse; uniform float contrast, sat, vig, warm, glare, aspect; uniform vec2 sunUv; varying vec2 vUv;
@@ -62,7 +63,7 @@ const CLOUD_FS = (oct) => `
 // World-space "macro" variation for tiled ground materials. The grass and asphalt tiles repeat every few metres, which
 // is what makes the ground look like a texture instead of a place. This multiplies the albedo by two octaves of
 // low-frequency noise in WORLD space (patchy lush/dry grass, repaired and worn asphalt), so no two spots look alike.
-function macro(THREE, mat, { lo, hi, scaleA = 0.022, scaleB = 0.11, amp = 1, desat = 1, gain = 1, blades = 0, road = 0, key }) {
+function macro(THREE, mat, { lo, hi, scaleA = 0.022, scaleB = 0.11, amp = 1, desat = 1, gain = 1, blades = 0, road = 0, kerb = 0, soil = 0, key }) {
   mat.onBeforeCompile = (sh) => {
     sh.uniforms.mLo = { value: new THREE.Color(...lo) };
     sh.uniforms.mHi = { value: new THREE.Color(...hi) };
@@ -71,12 +72,14 @@ function macro(THREE, mat, { lo, hi, scaleA = 0.022, scaleB = 0.11, amp = 1, des
     sh.uniforms.mGain = { value: gain };
     sh.uniforms.mBlade = { value: blades };
     sh.uniforms.mRoad = { value: road };
+    sh.uniforms.mKerb = { value: kerb };
+    sh.uniforms.mSoil = { value: soil };
     sh.vertexShader = sh.vertexShader
       .replace("#include <common>", "#include <common>\nvarying vec3 vMW;")
       .replace("#include <begin_vertex>", "#include <begin_vertex>\nvMW = (modelMatrix * vec4(transformed, 1.0)).xyz;");
     sh.fragmentShader = sh.fragmentShader
       .replace("#include <common>", `#include <common>
-        varying vec3 vMW; uniform vec3 mLo, mHi; uniform float mAmp, mDes, mGain, mBlade, mRoad;
+        varying vec3 vMW; uniform vec3 mLo, mHi; uniform float mAmp, mDes, mGain, mBlade, mRoad, mKerb, mSoil;
         float mh(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
         float mn(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
           return mix(mix(mh(i), mh(i+vec2(1,0)), f.x), mix(mh(i+vec2(0,1)), mh(i+vec2(1,1)), f.x), f.y); }`)
@@ -117,6 +120,45 @@ function macro(THREE, mat, { lo, hi, scaleA = 0.022, scaleB = 0.11, amp = 1, des
             rc = mix(rc, mix(rc, vec3(0.16), 0.5), paint * (1.0 - chip) * 0.55);                      // paint worn thin in patches
             rc *= 1.0 - paint * 0.12 * mn(vec2(v * 2.0, u * 4.0 + 5.0));
             diffuseColor.rgb = mix(diffuseColor.rgb, rc, rf * min(mRoad, 1.0));
+          }
+          if (mKerb > 0.0) { // pavement: real pavers laid in world space (0.42 x 0.21 m, running bond) with per-paver tone and joints, plus a black-and-white painted kerb at the outer edge
+            float kf = 1.0 - smoothstep(10.0, 38.0, length(vViewPosition));
+            vec2 pw = vMW.xz / vec2(0.42, 0.21); vec2 pc2 = floor(vec2(pw.x + 0.5 * mod(floor(pw.y), 2.0), pw.y)); vec2 pf = fract(vec2(pw.x + 0.5 * mod(floor(pw.y), 2.0), pw.y));
+            float tone = mh(pc2);
+            vec3 pv = vec3(0.50, 0.37, 0.31) * (0.78 + 0.5 * tone) * mix(vec3(1.0), vec3(1.12, 0.98, 0.86), mh(pc2 + 7.0));
+            float joint = smoothstep(0.0, 0.06, min(min(pf.x, 1.0 - pf.x) * 0.42, min(pf.y, 1.0 - pf.y) * 0.21) * 5.0);
+            pv *= mix(0.55, 1.0, joint);
+            diffuseColor.rgb = mix(diffuseColor.rgb, pv * (0.9 + 0.2 * mn(vMW.xz * 0.7)), kf * 0.85);
+            float eu = min(vMapUv.x, 1.0 - vMapUv.x);
+            float band = 1.0 - smoothstep(0.019, 0.022, eu);
+            float stripe = step(0.5, fract(vMW.x * 0.9 + vMW.z * 0.9));
+            vec3 kc = mix(vec3(0.05), vec3(0.86, 0.85, 0.82), stripe) * (0.85 + 0.3 * mn(vMW.xz * 6.0));
+            diffuseColor.rgb = mix(diffuseColor.rgb, kc, band * mKerb);
+            float lipLine = smoothstep(0.019, 0.022, eu) * (1.0 - smoothstep(0.022, 0.032, eu));
+            diffuseColor.rgb *= 1.0 - lipLine * 0.35; // shadowed joint where the pavers meet the kerb
+          }
+          if (mSoil > 0.0) { // bare earth: dry/moist patches, clods, pebbles, desiccation cracks, sparse weeds; fades with distance
+            float sf = 1.0 - smoothstep(22.0, 95.0, length(vViewPosition));
+            float dry = smoothstep(0.35, 0.7, mn(vMW.xz * 0.09 + 31.0));
+            float cl = mn(vMW.xz * 2.6) * 0.4 + mn(vMW.xz * 9.0 + 4.0) * 0.35 + mn(vMW.xz * 31.0 + 9.0) * 0.25;
+            float fine = mn(vMW.xz * 90.0 + 2.0) - 0.5;
+            vec3 moist = vec3(0.30, 0.20, 0.13), dryc = vec3(0.60, 0.46, 0.33);
+            vec3 sc = mix(moist, dryc, dry * 0.8 + cl * 0.25) * (0.72 + cl * 0.55 + fine * 0.28);
+            vec2 pp = vMW.xz * 7.0; vec2 pi2 = floor(pp), pq = fract(pp);
+            float hp = mh(pi2); vec2 po = vec2(mh(pi2 + 3.1), mh(pi2 + 8.7)) * 0.5 + 0.25;
+            float dd = length(pq - po) * (0.7 + hp);
+            float peb = step(0.8, hp) * (1.0 - smoothstep(0.09, 0.15, dd));
+            vec3 pcol = mix(vec3(0.46, 0.43, 0.38), vec3(0.64, 0.58, 0.5), mh(pi2 + 5.0));
+            sc = mix(sc, pcol * (0.8 + 0.3 * pq.y), peb);
+            sc *= 1.0 - (1.0 - smoothstep(0.15, 0.24, dd)) * smoothstep(0.09, 0.15, dd) * step(0.8, hp) * 0.35; // dark rim grounds each stone
+            float crk = abs(mn(vMW.xz * 1.7 + 17.0) - 0.5), crk2 = abs(mn(vMW.xz * 4.3 + 5.0) - 0.5);
+            float cr = ((1.0 - smoothstep(0.0, 0.012, crk)) * step(0.5, mn(vMW.xz * 0.2 + 2.0)) + (1.0 - smoothstep(0.0, 0.009, crk2)) * 0.5) * dry;
+            sc *= 1.0 - cr * 0.4;
+            vec2 wp = vMW.xz * 2.2; vec2 wi = floor(wp), wf = fract(wp);
+            float hw = mh(wi + 11.0); float wd = length(wf - (vec2(mh(wi + 1.3), mh(wi + 6.1)) * 0.5 + 0.25));
+            float weed = step(0.93, hw) * (1.0 - smoothstep(0.1, 0.24, wd + (mn(vMW.xz * 28.0) - 0.5) * 0.18));
+            sc = mix(sc, vec3(0.2, 0.36, 0.12) * (0.8 + 0.5 * mn(vMW.xz * 21.0)), weed * 0.85);
+            diffuseColor.rgb = mix(diffuseColor.rgb * vec3(1.0, 0.9, 0.82), sc, sf * mSoil);
           }
           if (mBlade > 0.0) { // fine grass: tufts and blades from world-space noise, fading out with distance so it never shimmers
             float fade = 1.0 - smoothstep(18.0, 75.0, length(vViewPosition));
@@ -163,7 +205,30 @@ function turnOutward(g) {
 export function createLook({ THREE, scene, camera, renderer, high, worldInfo, sun, hemi }) {
   if (new URLSearchParams(location.search).get("look") === "0") return { gradePass: null, update() {} };
 
+  // hard sun: PCFShadowMap honours `radius` (PCFSoft ignores it), so the sun's shadows get a crisp, deep edge like the reference
+  if (high && sun) {
+    renderer.shadowMap.type = THREE.PCFShadowMap;
+    sun.shadow.radius = 1.1;
+    sun.shadow.normalBias = 0.03;
+    renderer.shadowMap.needsUpdate = true;
+  }
+
   // (the scattering sky is left as world.js sets it: lowering turbidity/raising rayleigh made it paler, not bluer)
+
+  // sky: the scattering sky goes pale and grey-teal toward the horizon (haze). Push it toward a deeper, more saturated blue,
+  // strongest overhead and gently at the horizon, so it matches the reference's clean morning blue. Patches the stock Sky shader text.
+  if (high) scene.traverse((o) => {
+    const sm = o.material;
+    if (!o.isMesh || !sm || !sm.uniforms || !sm.uniforms.turbidity || !sm.uniforms.sunPosition || sm.userData.lookSky) return;
+    const tag = "gl_FragColor = vec4( retColor, 1.0 );";
+    if (!sm.fragmentShader.includes(tag)) return;
+    sm.fragmentShader = sm.fragmentShader.replace(tag, `{ float lum = dot(retColor, vec3(0.2126, 0.7152, 0.0722));
+        retColor = mix(vec3(lum), retColor, 1.35);                 // more saturated
+        retColor *= mix(vec3(0.80, 0.92, 1.10), vec3(0.93, 0.98, 1.04), pow(1.0 - clamp(direction.y, 0.0, 1.0), 2.0)); // bluer, less so near the horizon
+        gl_FragColor = vec4( retColor, 1.0 ); }`);
+    sm.userData.lookSky = true;
+    sm.needsUpdate = true;
+  });
 
   // ground: find the materials by what world.js does to them (polygonOffset layers: grass 1, paver 3, lane asphalt 5, main road 6)
   const done = new WeakSet();
@@ -172,9 +237,16 @@ export function createLook({ THREE, scene, camera, renderer, high, worldInfo, su
     if (!o.isMesh || !m || Array.isArray(m) || done.has(m) || !m.isMeshStandardMaterial) return;
     const f = m.polygonOffset ? -m.polygonOffsetFactor : 0;
     const big = o.geometry?.parameters?.width === 2800;
-    if (big || f === 1 || f === 2) macro(THREE, m, { lo: [0.8, 0.95, 0.58], hi: [1.12, 1.3, 0.8], amp: big ? 1 : 1, desat: f === 1 ? 0.95 : 1.1, gain: f === 1 ? 0.84 : 1, blades: 1, key: f === 1 ? "grassLayer" : f === 2 ? "grass2" : "grass" }), done.add(m); // the landuse-grass layer (offset 1) is brighter than the ground plane under it: pull it into the same range
-    else if (f === 5 || f === 6) { m.roughness = 0.82; macro(THREE, m, { lo: [0.82, 0.8, 0.78], hi: [1.2, 1.15, 1.08], scaleA: 0.04, scaleB: 0.3, amp: 0.85, desat: 0.25, gain: 1.7, road: f === 6 ? 2 : 1, key: "asphalt" }); done.add(m); }
-    else if (f === 3) macro(THREE, m, { lo: [0.86, 0.84, 0.82], hi: [1.08, 1.06, 1.04], scaleA: 0.05, scaleB: 0.25, amp: 0.7, key: "paver" }), done.add(m);
+    if (big || f === 1 || f === 2) macro(THREE, m, { lo: [0.84, 1.02, 0.56], hi: [1.16, 1.42, 0.78], amp: big ? 1 : 1, desat: f === 1 ? 0.95 : 1.1, gain: f === 1 ? 0.97 : 1.08, blades: 1, key: f === 1 ? "grassLayer" : f === 2 ? "grass2" : "grass" }), (high && (m.envMapIntensity = 1.0)), done.add(m); // the landuse-grass layer (offset 1) is brighter than the ground plane under it: pull it into the same range
+    else if (f === 5 || f === 6) { m.roughness = 0.82; macro(THREE, m, { lo: [0.82, 0.8, 0.78], hi: [1.2, 1.15, 1.08], scaleA: 0.04, scaleB: 0.3, amp: 0.85, desat: 0.25, gain: 1.7, road: f === 6 ? 2 : 1, key: "asphalt" }); if (high) m.envMapIntensity = 0.6; done.add(m); }
+    else if (f === 3) {
+      // only the pavement ribbons (u runs 0..1 across the strip) get real pavers and the painted kerb; other offset-3 layers (bare earth) keep world-space UVs
+      const uv = o.geometry?.attributes?.uv; let ribbon = !!uv;
+      if (uv) for (let i = 0; i < uv.count; i += Math.max(1, (uv.count / 200) | 0)) if (uv.getX(i) < -0.01 || uv.getX(i) > 1.01) { ribbon = false; break; }
+      macro(THREE, m, { lo: [0.86, 0.84, 0.82], hi: [1.08, 1.06, 1.04], scaleA: 0.05, scaleB: 0.25, amp: 0.7, kerb: ribbon ? 1 : 0, soil: ribbon ? 0 : 1, key: ribbon ? "paver" : "dirt" });
+      if (high) m.envMapIntensity = 0.6;
+      done.add(m);
+    }
   });
 
   // building fronts: redraw the flat 256 px facade textures richer (facades.js)
@@ -184,6 +256,14 @@ export function createLook({ THREE, scene, camera, renderer, high, worldInfo, su
     if (!o.isMesh || !m || Array.isArray(m) || !m.map || seenMaps.has(m.map)) return;
     seenMaps.add(m.map);
     upgradeFacade(THREE, m.map);
+  });
+  // glass towers (orange-red framed curtain walls): glossy, sky-reflecting, dielectric (metal would mirror the env map's dark lower half)
+  const seenGlass = new WeakSet();
+  scene.traverse((o) => {
+    const m = o.material;
+    if (!o.isMesh || !m || Array.isArray(m) || seenGlass.has(m) || m.map?.userData?.richFacade !== "glassTower") return;
+    seenGlass.add(m);
+    m.roughness = 0.16; m.metalness = 0.0; m.envMapIntensity = 1.0; m.color.setRGB(0.82, 0.9, 1.0); m.needsUpdate = true;
   });
 
   // landmark glass (curtain walls, ribbon glazing): the models ship it half-transparent and double-sided, so you look
@@ -225,7 +305,7 @@ export function createLook({ THREE, scene, camera, renderer, high, worldInfo, su
   let gradePass = null;
   if (high) gradePass = new ShaderPass(GRADE);
 
-  const SUN_WARM = new THREE.Color(...SUN_TINT), _sv = new THREE.Vector3();
+  const SUN_WARM = new THREE.Color(...SUN_TINT), _sv = new THREE.Vector3(), HAZE_BLUE = new THREE.Color(HAZE_BLUE_HEX);
   let t = 0, lastHemi = -1, lastSun = -1;
   return {
     gradePass,
@@ -237,8 +317,14 @@ export function createLook({ THREE, scene, camera, renderer, high, worldInfo, su
       // light balance: a little less sky fill and a little more sun, so shadows have shape (daylight.js sets both every frame, before this)
       // (daylight rewrites them only every 0.5 s, so scale only when it has just done so, never on our own value)
       if (high && hemi && sun) {
-        if (hemi.intensity !== lastHemi) { hemi.intensity *= 0.72; lastHemi = hemi.intensity; }
-        if (sun.intensity !== lastSun) { sun.intensity *= 1.2; sun.color.multiply(SUN_WARM); lastSun = sun.intensity; }
+        if (hemi.intensity !== lastHemi) { hemi.intensity *= 0.55; lastHemi = hemi.intensity; }
+        if (sun.intensity !== lastSun) { sun.intensity *= 1.38; sun.color.multiply(SUN_WARM); lastSun = sun.intensity; }
+      }
+      // haze: thinner and bluer by day, so distant towers keep their colour instead of washing to lavender-grey
+      // (daylight.js rewrites the haze colour every half second; lerping toward a target is idempotent, so it cannot compound)
+      if (high && scene.fog) {
+        scene.fog.density = 0.0026 - 0.0010 * day;
+        scene.fog.color.lerp(HAZE_BLUE, 0.35 * day * day);
       }
       hero.update(dt, camera.position.x, camera.position.z);
       dome.position.copy(camera.position);

@@ -109,22 +109,23 @@ const STYLES = {
   "2f3b44": {
     name: "glassTower",
     draw(g, rnd) {
-      g.fillStyle = "#3a464f"; // aluminium mullions
+      const FR = "#e24a18", FR_HI = "#ff8f50", FR_LO = "#8a2a0e"; // orange-red powder-coated frames: thin, so the glass stays blue at a distance
+      g.fillStyle = FR;
       g.fillRect(0, 0, 256, 256);
       for (let i = 0; i < 2; i++) {
-        const x = 6 + i * 126;
-        glass(g, x, 6, 118, 190, "#4f89b8", "#a6cde2", rnd, 0.24);
-        g.fillStyle = "#59666f";
-        g.fillRect(x, 98, 118, 3); // transom
-        g.fillStyle = "rgba(255,255,255,0.35)";
-        g.fillRect(x, 6, 118, 1.5); // highlight on the top edge
-        g.fillStyle = "rgba(0,0,0,0.3)";
-        g.fillRect(x, 194, 118, 2);
+        const x = 4 + i * 126;
+        glass(g, x, 4, 122, 96, "#12468a", "#5a9fd6", rnd, 0.3);     // upper light: deep sky blue with a reflected cloud streak
+        glass(g, x, 104, 122, 98, "#1a5a9e", "#7db6e0", rnd, 0.32);
+        g.fillStyle = "rgba(255,255,255,0.5)"; g.fillRect(x, 4, 122, 1.4); g.fillRect(x, 104, 122, 1.4); // lit top edges
+        g.fillStyle = "rgba(0,0,0,0.4)"; g.fillRect(x, 98, 122, 2); g.fillRect(x, 200, 122, 2);          // shadowed bottom edges
+        g.fillStyle = FR_LO; g.fillRect(x + 120, 4, 2, 198);                                              // frame depth
+        g.fillStyle = FR_HI; g.fillRect(x - 1.5, 4, 1.2, 198);                                            // sun catching the frame
       }
-      vgrad(g, 6, 200, 244, 50, "#46606f", "#2d4352"); // spandrel panel
-      g.fillStyle = "rgba(255,255,255,0.25)";
-      g.fillRect(6, 200, 244, 1.5);
-      grain(g, rnd, 1500, 0.1, ["#ffffff", "#000000"]);
+      vgrad(g, 4, 207, 248, 41, "#1d4b7c", "#0f2a49");              // spandrel: dark blue glass
+      g.fillStyle = "rgba(255,255,255,0.2)"; g.fillRect(4, 207, 248, 1.2);
+      g.fillStyle = FR_HI; g.fillRect(0, 202, 256, 1.2);            // floor-line band
+      g.fillStyle = FR_LO; g.fillRect(0, 205, 256, 1.5);
+      grain(g, rnd, 900, 0.07, ["#ffffff", "#000000"]);
     },
   },
   cfd3d2: {
@@ -250,6 +251,26 @@ export function upgradeFacade(THREE, map) {
   map.image = big;
   map.userData.richFacade = style.name;
   map.generateMipmaps = true;
+  if (style.name === "glassTower") { // hand-made mip chain: averaged, orange + blue go lavender-grey in the distance; from 64 px down push each level back toward glass blue with a hint of frame orange
+    const chain = [big];
+    for (let n = 256, prev = big; n >= 1; n >>= 1) {
+      const c = document.createElement("canvas");
+      c.width = c.height = n;
+      const cg = c.getContext("2d");
+      cg.imageSmoothingQuality = "high";
+      cg.drawImage(prev, 0, 0, n, n);
+      if (n <= 64) {
+        const k = n <= 8 ? 0.4 : n <= 16 ? 0.3 : 0.18;
+        cg.globalAlpha = k; cg.fillStyle = "#2c6fb5"; cg.fillRect(0, 0, n, n);     // glass blue
+        cg.globalAlpha = k * 0.3; cg.fillStyle = "#e24a18"; cg.fillRect(0, 0, n, n); // a trace of the orange frames
+        cg.globalAlpha = 1;
+      }
+      chain.push(c); prev = c;
+    }
+    map.mipmaps = chain;
+    map.generateMipmaps = false;
+    map.minFilter = THREE.LinearMipmapLinearFilter;
+  }
   map.needsUpdate = true;
   return true;
 }

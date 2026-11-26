@@ -395,9 +395,9 @@ export function makeTrees({ scene, renderer }) {
     neem: canvasTexture(512, 512, (g, w, h) => leafClump(g, w, h, rnd, { count: 2200, len: 26, width: 0.26, hue: 88, hueVar: 10, sat: 55, light: 36 }), maxAniso),
     gulmohar: canvasTexture(512, 512, (g, w, h) => leafClump(g, w, h, rnd, { count: 2600, len: 16, width: 0.42, hue: 92, hueVar: 10, sat: 50, light: 34, flowers: 70, flowerHue: 14, flowerSize: 15 }), maxAniso),
     ashoka: canvasTexture(512, 512, (g, w, h) => leafClump(g, w, h, rnd, { count: 1100, len: 52, width: 0.2, hue: 110, hueVar: 8, sat: 50, light: 24, droop: 0.7 }), maxAniso),
-    shrub: canvasTexture(256, 256, (g, w, h) => leafClump(g, w, h, rnd, { count: 420, len: 12, width: 0.45, hue: 105, hueVar: 12, sat: 50, light: 28 }), maxAniso),
-    shrubRed: canvasTexture(256, 256, (g, w, h) => leafClump(g, w, h, rnd, { count: 380, len: 12, width: 0.45, hue: 105, hueVar: 12, sat: 50, light: 28, flowers: 26, flowerHue: 355, flowerSize: 6 }), maxAniso),
-    shrubWhite: canvasTexture(256, 256, (g, w, h) => leafClump(g, w, h, rnd, { count: 380, len: 12, width: 0.45, hue: 105, hueVar: 12, sat: 50, light: 28, flowers: 26, flowerHue: 50, flowerSize: 6 }), maxAniso),
+    shrub: canvasTexture(256, 256, (g, w, h) => leafClump(g, w, h, rnd, { count: 560, len: 12, width: 0.45, hue: 108, hueVar: 12, sat: 58, light: 31 }), maxAniso),
+    shrubRed: canvasTexture(256, 256, (g, w, h) => leafClump(g, w, h, rnd, { count: 520, len: 12, width: 0.45, hue: 108, hueVar: 12, sat: 58, light: 30, flowers: 80, flowerHue: 12, flowerSize: 8 }), maxAniso),
+    shrubWhite: canvasTexture(256, 256, (g, w, h) => leafClump(g, w, h, rnd, { count: 520, len: 12, width: 0.45, hue: 108, hueVar: 12, sat: 58, light: 30, flowers: 70, flowerHue: 38, flowerSize: 8 }), maxAniso),
   };
   // white flowers: lighten that texture's petals
   const frondTex = canvasTexture(128, 512, (g, w, h) => frondTexture(g, w, h, rnd), maxAniso);

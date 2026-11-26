@@ -228,9 +228,73 @@ export function makeMaterials() {
   });
 
   // Anodised aluminium frames and steel.
-  M.aluminium = new THREE.MeshStandardMaterial({ color: "#b9bcc0", roughness: 0.38, metalness: 0.85 });
-  M.frameDark = new THREE.MeshStandardMaterial({ color: "#2b2f33", roughness: 0.45, metalness: 0.7 });
-  M.frameWhite = new THREE.MeshStandardMaterial({ color: "#e8e8e4", roughness: 0.55, metalness: 0.1 });
+  // Painted and bare steel, as on real street furniture: enamel in streaks and brush marks, faded and grimy patches, chips down to
+  // grey steel and rust blooms, drips from the joints. Colour, relief (chips are recessed) and roughness (steel is smoother than paint)
+  // are painted together. One repeat = about 0.9 m (UVs are in metres), so it reads on rails 3-5 cm thick.
+  const paintedSteel = (seed, base, shade, { tile = 0.9, rustAmt = 1, chips = 90, grime = 0.14, metalness = 0.12, env = 0.6, tints = ["rgba(120,110,96,A)", "rgba(255,255,255,A)"] } = {}) =>
+    surface({
+      seed, size: 512, tile, bump: 2.0, metalness, envMapIntensity: env,
+      paint(c, h, r, s, rnd) {
+        c.fillStyle = base;
+        c.fillRect(0, 0, s, s);
+        for (let i = 0; i < 240; i++) { // brush and roller streaks along the bar
+          c.fillStyle = `rgba(${shade},${0.04 + rnd() * 0.09})`;
+          c.fillRect(rnd() * s, 0, 1 + rnd() * 2.5, s);
+        }
+        blotches(c, s, rnd, 28, 14, 80, tints, grime); // grime and sun-fade
+        r.fillStyle = "#a6a6a6";
+        r.fillRect(0, 0, s, s);
+        blotches(r, s, rnd, 24, 10, 60, ["rgba(255,255,255,A)", "rgba(80,80,80,A)"], 0.35);
+        for (let i = 0; i < chips; i++) { // chips in the paint: bare steel, or rust where the damp got in
+          const x = rnd() * s, y = rnd() * s, w = 2 + rnd() * 5, hh = 2 + rnd() * 6, rust = rnd() < 0.6 * rustAmt;
+          c.fillStyle = rust ? (rnd() < 0.5 ? "#9a5a30" : "#7d4624") : "#8a8f93";
+          c.fillRect(x, y, w, hh);
+          h.fillStyle = "#1a1a1a";
+          h.fillRect(x, y, w, hh);
+          r.fillStyle = rust ? "#ffffff" : "#4a4a4a";
+          r.fillRect(x, y, w, hh);
+          if (rust) { // the rust runs down
+            const g = c.createLinearGradient(0, y, 0, y + hh + 26 + rnd() * 40);
+            g.addColorStop(0, "rgba(110,62,34,0.5)");
+            g.addColorStop(1, "rgba(110,62,34,0)");
+            c.fillStyle = g;
+            c.fillRect(x + w * 0.2, y, w * 0.6, hh + 60);
+          }
+        }
+        for (let i = 0; i < 40; i++) { // scratches
+          const x = rnd() * s, y = rnd() * s, l = 8 + rnd() * 30;
+          c.strokeStyle = "rgba(90,92,96,0.35)";
+          c.lineWidth = 0.7;
+          c.beginPath(); c.moveTo(x, y); c.lineTo(x + (rnd() - 0.5) * 6, y + l); c.stroke();
+          h.strokeStyle = "rgba(0,0,0,0.5)";
+          h.beginPath(); h.moveTo(x, y); h.lineTo(x + (rnd() - 0.5) * 6, y + l); h.stroke();
+        }
+        grain(c, s, rnd, 2500, 60, 220, 0.06);
+        grain(h, s, rnd, 9000, 90, 170, 0.25);
+      },
+    });
+  M.railWhite = paintedSteel(61, "#e6e4dc", "120,112,100", { rustAmt: 1.1, chips: 36 });
+  M.railGreen = paintedSteel(62, "#1f8a34", "10,60,20", { chips: 34, tints: ["rgba(14,70,24,A)", "rgba(90,170,100,A)", "rgba(110,100,60,A)"] });
+  M.frameDark = paintedSteel(63, "#2b2f33", "0,0,0", { chips: 30, metalness: 0.3, env: 0.7, tints: ["rgba(70,74,80,A)", "rgba(10,10,12,A)", "rgba(110,100,86,A)"] });
+  M.frameWhite = paintedSteel(64, "#e8e8e4", "120,112,100", { chips: 26, rustAmt: 0.7 });
+  // anodised / brushed aluminium: fine streaks along the length, dull oxide bloom, scuffs
+  M.aluminium = surface({
+    seed: 65, size: 256, tile: 0.7, bump: 1.2, metalness: 0.7, envMapIntensity: 0.9,
+    paint(c, h, r, s, rnd) {
+      c.fillStyle = "#b9bcc0";
+      c.fillRect(0, 0, s, s);
+      for (let i = 0; i < 520; i++) {
+        const v = 150 + rnd() * 90 | 0;
+        c.fillStyle = `rgba(${v},${v},${v + 4},${0.08 + rnd() * 0.14})`;
+        c.fillRect(rnd() * s, 0, 0.8 + rnd() * 1.4, s);
+      }
+      blotches(c, s, rnd, 22, 14, 70, ["rgba(120,124,128,A)", "rgba(215,218,222,A)", "rgba(140,136,126,A)"], 0.16);
+      r.fillStyle = "#808080";
+      r.fillRect(0, 0, s, s);
+      blotches(r, s, rnd, 20, 10, 60, ["rgba(255,255,255,A)", "rgba(60,60,60,A)"], 0.4);
+      grain(h, s, rnd, 8000, 100, 160, 0.3);
+    },
+  });
   M.steelBlue = surface({
     seed: 41, tile: 1.5, bump: 1.2, metalness: 0.35,
     paint(c, h, r, s, rnd) {

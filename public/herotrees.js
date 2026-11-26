@@ -15,6 +15,8 @@ import { GLTFLoader } from "/vendor/jsm/loaders/GLTFLoader.js";
 const HERO_NEAR = 30;
 const HERO_FAR = 38;
 const MAX = 8;
+// trees.js reports the TRUNK height as a broadleaf set's height (rain 2.8 m, neem 2.4, gulmohar 2.6); the crown reaches about SPECIES.height. Scale models to that.
+const VISUAL_HEIGHT = { rain: 9, neem: 8, gulmohar: 7 };
 
 export function createHeroTrees({ THREE, scene, renderer, quality = "high" }) {
   const max = quality === "low" ? 0 : MAX; // phones and the governor's low tier keep the cheap trees only
@@ -40,6 +42,12 @@ export function createHeroTrees({ THREE, scene, renderer, quality = "high" }) {
           const g = await loader.loadAsync("/models/trees/" + f);
           g.scene.traverse((o) => {
             if (!o.isMesh) return;
+            if (/shadow/i.test(o.name)) { // the artists' baked soft ground-shadow patch (alpha blend): it must stay blended, write no depth, and neither cast nor receive real shadows
+              o.castShadow = false; o.receiveShadow = false; o.renderOrder = 1; o.userData.noAO = true;
+              const sm = o.material;
+              if (sm) { sm.transparent = true; sm.depthWrite = false; sm.polygonOffset = true; sm.polygonOffsetFactor = -2; sm.polygonOffsetUnits = -2; }
+              return;
+            }
             o.castShadow = true;
             o.receiveShadow = true;
             const m = o.material;
@@ -99,7 +107,7 @@ export function createHeroTrees({ THREE, scene, renderer, quality = "high" }) {
       const t = c.s.list[c.i];
       const model = list[(c.i * 7 + (t.x * 13 | 0)) % list.length | 0] || list[0];
       const obj = model.scene.clone(true);
-      const k = (c.s.height * t.scale) / model.height; // match the generated tree's height
+      const k = ((VISUAL_HEIGHT[kindOf(c.s.name)] || c.s.height) * t.scale) / model.height; // match the generated tree's height
       obj.scale.setScalar(k);
       obj.position.set(t.x, t.y - model.minY * k, t.z);
       obj.rotation.y = t.yaw;

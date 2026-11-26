@@ -609,6 +609,86 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
   const stripEnd = tiuModel.stripEnd;
   const beds = tiuModel.beds;
 
+  // ---------- raised painted kerb along both sides of the main roads ----------
+  // Granite-style kerbstones, 2.4 m each, half black and half white, 14 cm high at the outer edge of the pavement strip
+  // (the painted band in look.js sits right under them). Skipped across side roads and in front of the university,
+  // which has its own pavement.
+  {
+    const kerbTexM = texture(128, 32, (g, w, h) => {
+      g.fillStyle = "#e8e6de";
+      g.fillRect(0, 0, w, h);
+      g.fillStyle = "#1d1d1f";
+      g.fillRect(0, 0, w / 2, h);
+      speckle(g, w, h, 600, ["rgba(120,110,95,0.3)", "rgba(255,255,255,0.22)", "rgba(30,30,30,0.25)"], 2);
+    });
+    kerbTexM.repeat.set(2, 1); // 2.4 m stones carry two black/white pairs: half the instances of 1.2 m ones
+    const kerbGeo = new THREE.BoxGeometry(2.4, 0.14, 0.3);
+    const kerbMatM = new THREE.MeshStandardMaterial({ map: kerbTexM, roughness: 0.8 });
+    const spotsK = [];
+    // a grid of road segments, so "does a side road cross here?" costs a few tests per kerbstone instead of one per road on the map
+    const KC = 16, kgrid = new Map();
+    for (const r of campus.roads) {
+      if (r.pts.length < 2) continue;
+      const hw = (ROAD_WIDTH[r.kind] || 3.5) / 2 + 1.4;
+      for (let i = 0; i < r.pts.length - 1; i++) {
+        const a = r.pts[i], b = r.pts[i + 1];
+        const x0 = Math.floor((Math.min(a[0], b[0]) - hw) / KC), x1 = Math.floor((Math.max(a[0], b[0]) + hw) / KC);
+        const z0 = Math.floor((Math.min(a[1], b[1]) - hw) / KC), z1 = Math.floor((Math.max(a[1], b[1]) + hw) / KC);
+        for (let xi = x0; xi <= x1; xi++) for (let zj = z0; zj <= z1; zj++) {
+          const k = xi * 100003 + zj;
+          let l = kgrid.get(k);
+          if (!l) kgrid.set(k, (l = []));
+          l.push(a, b, hw);
+        }
+      }
+    }
+    const crossed = (x, z) => {
+      const l = kgrid.get(Math.floor(x / KC) * 100003 + Math.floor(z / KC));
+      if (!l) return false;
+      for (let q = 0; q < l.length; q += 3) {
+        const a = l[q], b = l[q + 1], dx = b[0] - a[0], dz = b[1] - a[1];
+        const t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (z - a[1]) * dz) / (dx * dx + dz * dz || 1)));
+        if (Math.hypot(x - a[0] - dx * t, z - a[1] - dz * t) < l[q + 2]) return true;
+      }
+      return false;
+    };
+    for (const r of mainRoads) {
+      if (r.pts.length < 2) continue;
+      const half = (ROAD_WIDTH[r.kind] + 4.4) / 2 - 0.15;
+      for (let i = 0; i < r.pts.length - 1; i++) {
+        const a = r.pts[i], b = r.pts[i + 1];
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        if (len < 1) continue;
+        const ux = (b[0] - a[0]) / len, uz = (b[1] - a[1]) / len;
+        for (let d = 1.2; d < len - 0.6; d += 2.4) {
+          for (const sg of [-1, 1]) {
+            const x = a[0] + ux * d + (-uz) * half * sg;
+            const z = a[1] + uz * d + ux * half * sg;
+            if (!inWorld(x, z, 4) || Math.abs(x - mid[0]) > 1100 || Math.abs(z - mid[1]) > 1100 || crossed(x, z)) continue; // 1.1 km round the university: every kerbstone in the 8 km map was 94,000 instances
+            const [lx, lz] = toLocal(x, z);
+            if (Math.abs(lx) < stripEnd + 14 && lz > -14 && lz < FENCE_Z + 8) continue; // the university has its own pavement
+            if (lx > -592 && lx < 133 && lz > 9 && lz < 26) continue; // the median street in front of it
+            spotsK.push({ x, z, yaw: Math.atan2(-uz, ux) });
+          }
+        }
+      }
+    }
+    if (spotsK.length) {
+      const imK = new THREE.InstancedMesh(kerbGeo, kerbMatM, spotsK.length);
+      const dm = new THREE.Object3D();
+      spotsK.forEach((sp, i) => {
+        dm.position.set(sp.x, 0.07, sp.z);
+        dm.rotation.set(0, sp.yaw, 0);
+        dm.updateMatrix();
+        imK.setMatrixAt(i, dm.matrix);
+      });
+      imK.castShadow = false;
+      imK.receiveShadow = true;
+      scene.add(imK);
+      addInstanceCull(imK, spotsK.map((q) => q.x), spotsK.map((q) => q.z), { radius: 2.4, cy: 0.1, maxDist: 160, nearDist: 20 });
+    }
+  }
+
   // ---------- other buildings ----------
   // Floors, facade and roof colour come from the map data where they are known (OpenStreetMap
   // tags or the street-level survey in tools/survey.json). Otherwise they are guessed from the
@@ -636,7 +716,8 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     if (a < 180) return { floors: Math.round(range(1, 2)), style: "plaster" };
     if (a < 500) return { floors: Math.round(range(2, 4)), style: pick(["plaster", "ochre", "punched"]) };
     if (a < 1500) return { floors: Math.round(range(3, 6)), style: pick(["punched", "ochre", "ribbon"]) };
-    return { floors: Math.round(range(5, 9)), style: pick(["ribbon", "punched", "glassTower"]) };
+    const st = pick(["ribbon", "glassTower", "glassTower", "punched"]);
+    return { floors: Math.round(st === "glassTower" ? range(8, 14) : range(5, 9)), style: st };
   }
   // A row of single-storey classrooms with red pitched roofs, filling the outline.
   function shedRow(pts, roofColor) {
@@ -768,6 +849,25 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
       const tank = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.1, 1.8, 12), mats.tank);
       tank.position.set(tx, h + 1, tz);
       add(tank);
+    }
+    // lift/stair head and AC condensers on the roof of anything of some size
+    if (floors >= 3 && (b.area || 200) > 150) {
+      const lw = Math.min(5, Math.sqrt(b.area || 100) / 4), lx2 = c[0] + range(-1, 1) * lw * 0.6, lz2 = c[1] + range(-1, 1) * lw * 0.6;
+      if (inPoly(lx2, lz2, pts) && inPoly(lx2 + lw / 2, lz2 + lw / 2, pts) && inPoly(lx2 - lw / 2, lz2 - lw / 2, pts)) {
+        const head = new THREE.Mesh(new THREE.BoxGeometry(lw, 2.6, lw * 0.8), mats.beige);
+        head.position.set(lx2, h + 1.4, lz2);
+        add(head);
+        const cap = new THREE.Mesh(new THREE.BoxGeometry(lw + 0.3, 0.2, lw * 0.8 + 0.3), mats.white);
+        cap.position.set(lx2, h + 2.8, lz2);
+        add(cap);
+      }
+      for (let k = 0; k < Math.min(4, floors); k++) {
+        const ax = c[0] + range(-1, 1) * Math.sqrt(b.area || 100) / 3.2, az = c[1] + range(-1, 1) * Math.sqrt(b.area || 100) / 3.2;
+        if (!inPoly(ax, az, pts) || !inPoly(ax + 0.9, az + 0.6, pts)) continue;
+        const ac = new THREE.Mesh(new THREE.BoxGeometry(1.8, 1.1, 1.2), mats.concrete);
+        ac.position.set(ax, h + 0.65, az);
+        add(ac, { cast: false });
+      }
     }
     if (b.name) {
       lazySign(b.name, pts, h);
@@ -1027,8 +1127,8 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
       }
       const parts = [
         [kerb, new THREE.MeshStandardMaterial({ map: kerbTex, roughness: 0.85 })],
-        [mergeGeometries(posts), new THREE.MeshStandardMaterial({ color: "#2b4fa3", roughness: 0.6, metalness: 0.3 })],
-        [mergeGeometries(rails), new THREE.MeshStandardMaterial({ color: "#e6e6e2", roughness: 0.55, metalness: 0.3 })],
+        [mergeGeometries(posts), tiuModel.materials.steelBlue],
+        [mergeGeometries(rails), tiuModel.materials.railWhite],
       ];
       const dummy = new THREE.Object3D();
       for (const [geo, mat] of parts) {

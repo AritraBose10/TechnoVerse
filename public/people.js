@@ -102,7 +102,9 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
     if (st.open && st.x1 - 0.55 - (st.cx1 + 0.45) > 0.7) st.sips.push({ x: st.cx1 + 0.45, z: st.counterFront + 0.3, taken: null });
     st.kind = ["tea", "snack", "drink"][i % 3]; // what this stall sells decides what changes hands
     st.qr = [(st.cx0 + st.cx1) / 2, st.counterTop, st.counterFront + 0.14]; // the payment QR code stands here
-    st.stock = st.kind === "drink" ? [st.cx1 - 0.45, 1.3, st.zf + 0.62] : [(st.cx0 + st.cx1) / 2 + 0.3, st.counterTop + 0.12, st.counterFront + 0.5];
+    st.stock = st.stockAt ?? (st.kind === "drink" ? [st.cx1 - 0.45, 1.3, st.zf + 0.62] : [(st.cx0 + st.cx1) / 2 + 0.3, st.counterTop + 0.12, st.counterFront + 0.5]);
+    // what the keeper does between customers depends on the trade: stir the kettle (tea), stir the kadai or the puffed rice (fried snacks, jhal muri), wipe the bottles and the freezer lid (drinks)
+    st.tends = st.workAt && !(st.kind === "snack" && st.variant === 2);
     for (let x = st.bench.x0 + 0.25; x <= st.bench.x1 - 0.2; x += 0.62) benchSeats.push({ stall: st, x, z: st.bench.z, y: st.bench.y, taken: null });
     keepers.push({ stall: st, x: (st.cx0 + st.cx1) / 2, z: st.counterBack + 0.48, home: (st.cx0 + st.cx1) / 2, kettle: st.kettle, top: st.counterTop, front: st.counterFront });
     void i;
@@ -116,6 +118,8 @@ export function buildPeople({ scene, world, RAPIER, local, phi, spots, kitLoadin
   shed.sips = [3.55, 4.5, 5.45, 6.4].map((d) => ({ x: shed.x1 - d, z: shed.counterFront - 0.18, taken: null }));
   shed.opening = null;
   shed.kind = "tea";
+  shed.workAt = shed.kettle;
+  shed.tends = true;
   shed.qr = [(shed.x0 + shed.x1) / 2, shed.counterTop, shed.counterFront + 0.14];
   shed.stock = [(shed.x0 + shed.x1) / 2 + 0.3, shed.counterTop + 0.12, shed.counterFront + 0.5];
   const counters = [...stalls, shed];
@@ -2685,7 +2689,7 @@ function person(role, x, z, heading = 0, mesh = true) {
     p.vz = 0;
     p.expr = p.baseExpr;
     const waiting = st.queue.find((q) => !q.served && q.deal && q.deal.stage === "order" && people.includes(q));
-    if (waiting && ["idle", "wipe", "street", "tidy"].includes(task.act)) {
+    if (waiting && ["idle", "wipe", "street", "tidy", "tend"].includes(task.act)) {
       task.act = "greet";
       task.target = waiting;
       task.t = range(2.2, 3);
@@ -2835,6 +2839,30 @@ function person(role, x, z, heading = 0, mesh = true) {
           task.t = range(2, 5);
         }
         break;
+      case "tend": {
+        const w = st.workAt;
+        if (goX(st.kind === "drink" ? w[0] : w[0] + 0.15)) {
+          p.want = 0;
+          const at = toWorld(w[0], w[2], w[1]);
+          if (st.kind === "drink") {
+            // a cloth over the bottles and the freezer lid, a glance at the street
+            p.gesture.wipe = 1;
+            p.gesture.at = toWorld(st.stock[0] - 0.1 + Math.sin(t * 0.9) * 0.2, st.stock[2], st.counterTop + 0.35);
+            p.lookAt = p.gesture.at;
+          } else {
+            // the kettle (or kadai, or the drum of puffed rice) kept moving with a spoon
+            p.gesture.stir = 1;
+            p.gesture.at = at;
+            p.lookAt = at;
+          }
+          p.expr = Math.sin(t * 0.3 + k.x) > 0.7 ? "relief" : "concentrating";
+        }
+        if (task.t < 0) {
+          task.act = "idle";
+          task.t = range(2, 5);
+        }
+        break;
+      }
       case "street":
         goX(k.home);
         p.want = 0;
@@ -2858,7 +2886,7 @@ function person(role, x, z, heading = 0, mesh = true) {
           }
         }
         if (task.t < 0) {
-          task.act = pickW([["wipe", 3], ["street", 3], ["tidy", 2]]);
+          task.act = pickW(st.tends ? [["tend", st.kind === "tea" ? 5 : 4], ["wipe", 2], ["street", 3], ["tidy", 2]] : [["wipe", 3], ["street", 3], ["tidy", 2]]);
           task.pose = pickW([["crossed", 3], ["hip", 2], ["behind", 1], ["brow", 1], ["chin", 1]]);
           task.t = range(4, 9);
         }
