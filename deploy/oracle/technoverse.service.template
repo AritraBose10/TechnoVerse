@@ -1,0 +1,25 @@
+[Unit]
+Description=TechnoVerse game server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=technoverse
+WorkingDirectory=/opt/technoverse
+Environment=NODE_ENV=production
+Environment=PORT=3000
+# voice relay: the coturn instance on this VM (server.js hands these to browsers through /ice)
+Environment=TURN_URLS=turn:__DOMAIN__:3478,turn:__DOMAIN__:3478?transport=tcp
+Environment=TURN_USERNAME=__TURN_USER__
+Environment=TURN_CREDENTIAL=__TURN_PASS__
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=2
+# the server keeps the static files in memory: leave headroom on a 12 GB VM
+MemoryMax=3G
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

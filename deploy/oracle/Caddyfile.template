@@ -1,0 +1,5 @@
+# Caddy gets and renews the HTTPS certificate by itself. WebSocket (/ws) passes through reverse_proxy untouched.
+# server.js already gzips text files and sets cache headers, so Caddy does not compress again.
+__DOMAIN__ {
+	reverse_proxy 127.0.0.1:3000
+}
