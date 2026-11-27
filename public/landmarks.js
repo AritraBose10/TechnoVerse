@@ -1,16 +1,15 @@
-// T-007: loadLandmarks — loads procedural GLB landmark models and places them at their
-// OSM polygon footprints inside the TechnoVerse world scene.
+// T-007: load procedural GLB landmarks at anchors derived from the mapped footprints.
 //
 // Coordinate system: world +x = east, +z = south, y = 0 is ground level.
-// Each GLB is authored in its own local frame (centered at footprint centroid, y=0 at grade);
-// this module translates and rotates it into world space to match the OSM polygon.
+// Each GLB is authored in its local footprint frame (vertex mean at the origin, y=0 at grade).
 //
 // Returns an array of building IDs that have been replaced by high-fidelity GLB models,
 // so world.js can skip drawing its extruded box for those IDs.
 
 import { GLTFLoader } from "/vendor/jsm/loaders/GLTFLoader.js";
+import { Box3 } from "three";
 
-// All 11 approved TechnoVerse Landmarks (T-007 approved list)
+// Original landmarks plus surveyed nearby buildings. Anchors always come from campus.json.
 const KNOWN_LANDMARKS = [
   {
     no: 1,
@@ -23,14 +22,14 @@ const KNOWN_LANDMARKS = [
     no: 2,
     id: 193308962,
     name: "Wipro Tower 5",
-    glb: "/models/landmarks/193308962.glb",
+    glb: "/models/landmarks/193308962.glb?v=20261128-frontage",
     yaw: 0
   },
   {
     no: 3,
     id: 134101085,
     name: "PWC Office",
-    glb: "/models/landmarks/134101085.glb",
+    glb: "/models/landmarks/134101085.glb?v=20261127-frontage",
     yaw: 0
   },
   {
@@ -58,7 +57,7 @@ const KNOWN_LANDMARKS = [
     no: 7,
     id: "sv4",
     name: "IIHM Global Campus",
-    glb: "/models/landmarks/sv4.glb",
+    glb: "/models/landmarks/sv4.glb?v=20261127-frontage",
     yaw: 0
   },
   {
@@ -79,7 +78,7 @@ const KNOWN_LANDMARKS = [
     no: 10,
     id: "ov359",
     name: "Ambuja Neotia EcoCentre",
-    glb: "/models/landmarks/ov359.glb",
+    glb: "/models/landmarks/ov359.glb?v=20261127-frontage",
     yaw: 0
   },
   {
@@ -87,6 +86,13 @@ const KNOWN_LANDMARKS = [
     id: "ov325",
     name: "Tea Junction",
     glb: "/models/landmarks/ov325.glb",
+    yaw: 0
+  },
+  {
+    no: 12,
+    id: 193478726,
+    name: "Hotel Monotel",
+    glb: "/models/landmarks/193478726.glb?v=20261127-frontage",
     yaw: 0
   }
 ];
@@ -97,9 +103,10 @@ const KNOWN_LANDMARKS = [
  * @param {object} opts
  * @param {THREE.Scene} opts.scene  - The main scene to add objects to.
  * @param {object}      opts.campus - Parsed campus.json with a `buildings` array.
- * @returns {Promise<Array<string|number>>} Resolves to an array of replaced building IDs.
+ * @param {Map}         opts.models - Receives successful replacements for world integration.
+ * @returns {Promise<Array<string|number>>} Resolves to successfully replaced building IDs.
  */
-export async function loadLandmarks({ scene, campus }) {
+export async function loadLandmarks({ scene, campus, models = new Map() }) {
   const loader = new GLTFLoader();
   const replaced = [];
 
@@ -132,9 +139,23 @@ export async function loadLandmarks({ scene, campus }) {
           glb,
           (gltf) => {
             const model = gltf.scene;
+            model.name = `landmark ${id}: ${name}`;
             model.position.set(cx, 0, cz);
             if (yaw !== 0) model.rotation.y = yaw;
+            model.updateMatrixWorld(true);
+            const bounds = new Box3().setFromObject(model);
+            if (bounds.isEmpty() || !Number.isFinite(bounds.max.y)) {
+              console.warn(`[landmarks] Empty model ${id}; keeping the generated building.`);
+              return resolve();
+            }
+            model.traverse((o) => {
+              if (o.isMesh) o.castShadow = o.receiveShadow = true;
+            });
             scene.add(model);
+            // The station and petrol canopies must remain open underneath. Their existing
+            // models have no verified collision layout, so do not invent perimeter walls.
+            const open = ["535333512", "ov240", "238285653"].includes(String(id));
+            models.set(String(id), { model, height: bounds.max.y, open });
             replaced.push(id);
             console.log(
               `[landmarks] Placed ${name} (${id}) at (${cx.toFixed(1)}, 0, ${cz.toFixed(1)})`

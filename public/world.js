@@ -109,7 +109,7 @@ function polyIndex(polys, cell = 32) {
 const bb = (pts) => { let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity; for (const [x, z] of pts) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (z < z0) z0 = z; if (z > z1) z1 = z; } return [x0, z0, x1, z1]; };
 const yawQuat = (a) => ({ x: 0, y: Math.sin(a / 2), z: 0, w: Math.cos(a / 2) });
 
-export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }) {
+export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel, landmarkModels = new Map() }) {
   // The map's extent (metres from the university pin) comes from campus.json: a box around the Sector V boundary
   // polygon (tools/sector-v-boundary.json). Without `meta` it is the old 615 m square.
   const WB = campus.meta?.bounds || { xMin: -WORLD_HALF, xMax: WORLD_HALF, zMin: -WORLD_HALF, zMax: WORLD_HALF };
@@ -877,12 +877,21 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     }
   }
   const footprints = [tiuPts, tiuModel.footprint];
-  // All 11 approved T-007 Landmarks replaced by faithful GLB models
-  const LANDMARKS = new Set([535333512, 193308962, 134101085, "ov332", "ov582", 382403604, "sv4", "ov240", 238285653, "ov359", "ov325"].map(String));
   for (const b of campus.buildings) {
-    if (b.id === TIU_ID || LANDMARKS.has(String(b.id))) continue;
+    if (b.id === TIU_ID) continue;
     const pts = outward(b.pts);
     footprints.push(pts);
+    const landmark = landmarkModels.get(String(b.id));
+    if (landmark) {
+      if (!landmark.open) {
+        for (const e of edgesOf(pts)) if (e.len >= 0.5) edgeCollider(e, landmark.height, Math.min(0.4, Math.sqrt(b.area || 100) / 10));
+      }
+      if (b.name) {
+        const c = centroid(pts);
+        places.push({ name: b.name, x: c[0], z: c[1] });
+      }
+      continue;
+    }
     if (b.style === "sheds") {
       shedRow(pts, b.roof);
       if (b.name) {
@@ -1387,6 +1396,12 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel }
     });
   }
   const chunks = mergeStaticChunks(scene, staticMeshes, { size: 300 }); // 8.5k buildings x ~15 materials: 100 m cells left thousands of lone meshes; 300 m cells cut gate-view draw calls 1279 -> 476
+  // Use the same distance/shadow policy for GLBs as the generated city chunks.
+  for (const { model } of landmarkModels.values()) model.traverse((mesh) => {
+    if (!mesh.isMesh) return;
+    const centre = new THREE.Box3().setFromObject(mesh).getCenter(new THREE.Vector3());
+    chunks.push({ mesh, x: centre.x, z: centre.z, cast: mesh.castShadow });
+  });
   // The merged chunks own their own copies of this geometry: let go of the originals and the wall batches (about 100 MB of JS memory).
   staticMeshes.length = 0;
   wallBatches.clear();

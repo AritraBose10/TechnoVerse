@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <title>T-007 Landmark Viewer — Salt Lake Sector V Metro Station</title>
+  <script type="importmap">{"imports":{"three":"/vendor/three.module.js"}}</script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #111; color: #eee; font-family: monospace; overflow: hidden; }
@@ -39,7 +40,6 @@
 
 <script type="module">
 import * as THREE from "/vendor/three.module.js";
-import { OrbitControls } from "/vendor/jsm/controls/OrbitControls.js";
 import { GLTFLoader }    from "/vendor/jsm/loaders/GLTFLoader.js";
 import { loadLandmarks } from "/landmarks.js";
 
@@ -57,10 +57,9 @@ scene.fog = new THREE.Fog(0x1a1f2e, 400, 900);
 
 // Camera
 const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.5, 2000);
-camera.position.set(200, 80, 200);
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(60, 9, -540);
-controls.update();
+const target = new THREE.Vector3(60, 9, -540);
+camera.position.set(220, 100, -400);
+camera.lookAt(target);
 
 // Ground plane
 const ground = new THREE.Mesh(
@@ -123,20 +122,18 @@ if (replaced.length > 0) {
 
 // View presets
 window.setView = function(name) {
-  const C = camera, O = controls;
   switch (name) {
-    case "south": C.position.set(60, 25, -380); O.target.set(60, 9, -540); break;
-    case "north": C.position.set(60, 25, -700); O.target.set(60, 9, -540); break;
-    case "top":   C.position.set(60, 250,  -540); O.target.set(60, 0, -540); break;
-    case "iso":   C.position.set(220, 100, -400); O.target.set(60, 9, -540); break;
+    case "south": camera.position.set(60, 25, -380); target.set(60, 9, -540); break;
+    case "north": camera.position.set(60, 25, -700); target.set(60, 9, -540); break;
+    case "top":   camera.position.set(60, 250, -540); target.set(60, 0, -540); break;
+    case "iso":   camera.position.set(220, 100, -400); target.set(60, 9, -540); break;
   }
-  O.update();
+  camera.lookAt(target);
 };
 
 // Render loop
 (function loop() {
   requestAnimationFrame(loop);
-  controls.update();
   renderer.render(scene, camera);
 })();
 

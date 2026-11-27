@@ -130,16 +130,20 @@ function disposeLabel(sprite) {
 const world = new RAPIER.World({ x: 0, y: -GRAVITY, z: 0 });
 world.timestep = STEP;
 const campus = await (await fetch("/campus.json")).json();
+// Only suppress a generated building once its replacement has actually loaded.
+const landmarkModels = new Map();
+const __landmarkT0 = performance.now();
+await loadLandmarks({ scene, campus, models: landmarkModels });
+const __landmarkLoadMs = Math.round(performance.now() - __landmarkT0);
 const __t0 = performance.now(), __heap0 = performance.memory ? performance.memory.usedJSHeapSize : 0;
-const worldInfo = buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel });
+const worldInfo = buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel, landmarkModels });
 // Startup cost of the world, for deciding what to stream. ?fp=1 adds a fingerprint of every mesh (same number = same world).
 window.__boot = {
-  buildWorldMs: Math.round(performance.now() - __t0), colliders: world.colliders.len(), sceneChildren: scene.children.length, buildings: campus.buildings.length,
+  landmarkLoadMs: __landmarkLoadMs, buildWorldMs: Math.round(performance.now() - __t0), colliders: world.colliders.len(), sceneChildren: scene.children.length, buildings: campus.buildings.length,
   heapMB: performance.memory ? Math.round((performance.memory.usedJSHeapSize - __heap0) / 1e6) : null,
   fp: location.search.includes("fp=1") ? (() => { let f = 0, n = 0; scene.traverse((o) => { if (!o.isMesh) return; n++; const p = o.geometry.attributes.position; f += p.count + p.getX(0) + p.getY(0) + p.getZ(p.count - 1) + o.position.x + o.position.z; if (o.isInstancedMesh) { for (let i = 0; i < o.instanceMatrix.array.length; i += 997) f += o.instanceMatrix.array[i]; f += o.count; } }); return [n, Math.round(f * 100) / 100]; })() : undefined,
 };
 console.info("[boot]", JSON.stringify(window.__boot));
-loadLandmarks({ scene, campus });
 const minimap = createMinimap({ campus, getMe: () => me, getPlayers: () => players, getCamYaw: () => camYaw });
 const { places, props, focus, entranceYaw, animate: animateWorld, captureReflections } = worldInfo;
 // Clearance (clearance.js): everything you can see at body height along the street becomes a no-walk zone

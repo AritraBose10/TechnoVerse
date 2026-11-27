@@ -1,0 +1,47 @@
+{
+  "surveyDate": "2026-11-27",
+  "radiusMetres": 300,
+  "origin": { "lat": 22.5760302, "lon": 88.4284409 },
+  "buildings": [
+    {
+      "id": 193308962, "name": "Wipro Tower 5", "design": "wipro",
+      "height": 41.8, "heightSource": "Eleven approximately storey-spaced horizontal bands visible in the frontage; 3.8 m/storey is an estimate, not a measured height.",
+      "pano": "k8XETmHtdyTDClhRZXwF0g", "viewpoint": [22.578788, 88.4304074], "heading": 43.22, "pitch": 0,
+      "captureDate": "2026-01", "status": "frontage-partly-obscured",
+      "observed": "Cream rendered massing, rounded green-tinted curtain-glass corner with pale horizontal bands, orange-red recessed balcony bays, and dark rectangular windows. Gate structures and trees hide much of the lower frontage.",
+      "unverified": "Rear elevation, roof equipment, exact height, entrance and the long elevation behind trees. The curved corner is approximated by the mapped multi-edge footprint."
+    },
+    {
+      "id": "ov359", "name": "Ambuja Neotia EcoCentre", "design": "ecocentre",
+      "height": 64.6, "heightSource": "Existing campus.json 17 floors, retained at the legacy 3.8 m/storey; not a surveyed height.",
+      "pano": "s7iwOLbQsWEgDAeFAft4FQ", "viewpoint": [22.5771075, 88.4286325], "heading": 233.17, "pitch": 35,
+      "captureDate": "2026-01", "status": "frontage-observed",
+      "observed": "Brick-red vertical strips, pale stone panels, blue-grey rectangular glazing, long vertical strips on the wings and stacked broad window panels in the central portion. Pale horizontal bands. No stepped mechanical crown visible from this view.",
+      "unverified": "Rear elevation, roof equipment, exact height and floor count. Existing Overture outline retained; separate AltAir-labelled footprint has not been reconciled."
+    },
+    {
+      "id": "sv4", "name": "IIHM Global Campus", "design": "iihm",
+      "height": 18.5, "heightSource": "Estimated from the two-storey entrance mass and the three-level central block visible behind it. Not a measured height.",
+      "pano": "W48AiTSUSgZtBVt4N_ih9w", "viewpoint": [22.5775218, 88.4280023], "heading": 54.29, "pitch": 15.15,
+      "captureDate": "2026-01", "status": "frontage-observed",
+      "observed": "Off-white two-storey frontage, tall glazed side bays, recessed central glazed entrance, two pale columns under a broad canopy, a dark upper ribbon, and a narrower central upper block with vertical glazing.",
+      "unverified": "Rear and side elevations, roof and exact height. Existing four-point survey footprint retained. The curved roof feature behind the frontage and flags are omitted because their geometry/anchors are uncertain."
+    },
+    {
+      "id": 134101085, "name": "PWC Office", "design": "pwc",
+      "height": 20, "heightSource": "Approximate visual massing from the street frontage; no height tag in campus.json. Exact floor count obscured. The previous 12-storey glass tower was unsupported.",
+      "pano": "JsyOmaU0vVQELftXhvIwug", "viewpoint": [22.5767198, 88.4294079], "heading": 4.75, "pitch": 13.18,
+      "captureDate": "2026-01", "status": "frontage-partly-obscured",
+      "observed": "White rendered facade and upper parapet, large lower green-tinted rectangular glazing, white mullions and an upper screened opening. Dark sign plates near entrance and roof. Trees obscure most of the long elevation.",
+      "unverified": "Long sides, rear, exact height, footprint-to-building identity beyond the mapped label. Treat as a provisional frontage interpretation, not a measured reconstruction."
+    },
+    {
+      "id": 193478726, "name": "Hotel Monotel", "design": "monotel",
+      "height": 30.4, "heightSource": "Eight approximately storey-spaced sections of the narrow front glazing in the observed view; 3.8 m/storey is an estimate, not a measured height.",
+      "pano": "QbGYEFnX2PG4kd984Tn2PQ", "viewpoint": [22.5779031, 88.4275573], "heading": 41.67, "pitch": 38.05,
+      "captureDate": "2026-01", "status": "frontage-observed",
+      "observed": "Broad largely blank tan stone front, narrow continuous vertical centre glazing with dark horizontal dividers, dark stone entrance piers and a broad canopy with a patterned underside. Low roof guardrail.",
+      "unverified": "Rear and long sides, exact height, entrances beyond the visible front. Flags, plants and signs outside the footprint are not part of this building model."
+    }
+  ]
+}

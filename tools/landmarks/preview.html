@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Nearby building frontage studies</title>
+<script type="importmap">{"imports":{"three":"/vendor/three.module.js"}}</script>
+<style>
+body{margin:0;padding:32px;background:#e9e8e3;color:#263235;font:15px/1.5 system-ui,sans-serif}main{max-width:1152px;margin:auto}h1{margin:0;font-size:30px}p{max-width:950px;margin:6px 0 20px}article{margin:24px 0;padding:20px;background:#fff;border:1px solid #d0d5d2;border-radius:8px}h2{margin:0;font-size:22px}small{color:#526260}.views{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:14px 0}canvas{width:100%;height:auto;display:block}a{color:#286851}.caption{font-size:12px;text-align:center}footer{border-top:1px solid #ddd;padding-top:10px;font-size:13px}
+</style><main><h1>Nearby building frontage studies</h1><p>January 2026 Street View references · Existing map footprints · No photographs used as textures. Heights remain estimates; these are frontage interpretations, not surveyed full-building reconstructions.</p><div id="models"></div></main>
+<script type="module">
+import * as THREE from "three";
+import { loadLandmarks } from "/landmarks.js";
+const survey = await (await fetch("/__survey.json")).json();
+const data = await (await fetch("/campus.json")).json();
+const wanted = new Set(survey.buildings.map((s) => String(s.id)));
+const campus = { buildings: data.buildings.filter((b) => wanted.has(String(b.id))) };
+const loaded = new THREE.Scene(), models = new Map();
+const ids = await loadLandmarks({ scene: loaded, campus, models });
+window.__report = { ids, models: [] };
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setSize(720, 510); renderer.setPixelRatio(1);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.2;
+for (const spec of survey.buildings) {
+  const entry = models.get(String(spec.id));
+  if (!entry) continue;
+  const scene = new THREE.Scene(); scene.background = new THREE.Color("#e5e9e8");
+  const model = entry.model.clone(true); model.position.set(0, 0, 0); scene.add(model);
+  scene.add(new THREE.HemisphereLight(0xeaf4ff, 0x8b877c, 2));
+  const sun = new THREE.DirectionalLight(0xfff4e1, 3); sun.position.set(-90, 140, 80); scene.add(sun);
+  const b = new THREE.Box3().setFromObject(model), size = b.getSize(new THREE.Vector3()), centre = b.getCenter(new THREE.Vector3());
+  const grid = new THREE.GridHelper(Math.max(size.x, size.z) * 2, 16, 0xbcc6bf, 0xd4dbd6); grid.position.y = -0.05; scene.add(grid);
+  const camera = new THREE.PerspectiveCamera(38, 720 / 510, 0.1, 3000);
+  const article = document.createElement("article");
+  const title = document.createElement("h2"); title.textContent = spec.name; article.append(title);
+  const subtitle = document.createElement("small"); subtitle.textContent = `Footprint ${spec.id} · ${spec.status} · Model height ${spec.height} m (estimated)`; article.append(subtitle);
+  const views = document.createElement("div"); views.className = "views"; article.append(views);
+  const radius = Math.max(size.x, size.y, size.z) * 1.85;
+  for (const [name, angle, elevation] of [["Street elevation", spec.heading + 180, 0.12], ["Three-quarter", spec.heading + 215, 0.55], ["Roof and footprint", spec.heading + 180, 1.7]]) {
+    const a = angle * Math.PI / 180;
+    camera.position.set(centre.x + Math.sin(a) * radius, centre.y + radius * elevation, centre.z - Math.cos(a) * radius);
+    camera.lookAt(centre); renderer.render(scene, camera);
+    const card = document.createElement("div"), canvas = document.createElement("canvas"); canvas.width = 720; canvas.height = 510;
+    canvas.getContext("2d").drawImage(renderer.domElement, 0, 0);
+    const label = document.createElement("div"); label.className = "caption"; label.textContent = name; card.append(canvas, label); views.append(card);
+  }
+  const footer = document.createElement("footer"), link = document.createElement("a");
+  link.href = `https://www.google.com/maps/@?api=1&map_action=pano&pano=${spec.pano}&heading=${spec.heading}&pitch=${spec.pitch}`;
+  link.textContent = "Open inspected Street View"; footer.append(link, document.createElement("br"), spec.unverified); article.append(footer);
+  document.getElementById("models").append(article);
+  window.__report.models.push({ id: spec.id, position: entry.model.position.toArray(), height: entry.height, sourceId: entry.model.children.find((o) => o.userData.sourceId)?.userData.sourceId || null });
+}
+renderer.dispose(); window.__done = true;
+</script></html>

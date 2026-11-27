@@ -1,7 +1,7 @@
 ---
 id: T-007
 owner: codex
-status: blocked
+status: review
 depends: [T-005]
 ---
 # Faithful models of Sector V landmarks
@@ -11,7 +11,16 @@ Replace the plain extruded boxes of the most recognisable buildings near TIU wit
 that look like the real buildings: shape, storeys, façade pattern, colours, signage placement. One
 building at a time, each reviewed before the next.
 
-## Approved list (Captain, 2026-11-22), in this order
+## Expanded scope (Captain, 2026-11-27)
+
+Captain requested all nearby buildings, accepted continuing with the stated 300 m radius,
+and explicitly approved world.js and main.js integration edits. Survey every footprint whose
+vertex-mean centre is within 300 m of the TIU origin. Preserve the existing authored TIU model.
+Street View is the primary visual reference. Record unobservable or uncertain buildings as
+unverified; do not manufacture façade details or call those buildings accurate. Work through
+the batch without requesting approval for each building; submit the batch for review at the end.
+
+## Original landmark list (Captain, 2026-11-22)
 1. Sector V Metro station (Purple Line, the elevated station; the viaduct already exists in world.js)
 2. Wipro (the campus building labelled "Wipro" in campus.json)
 3. PricewaterhouseCoopers (PwC) office
@@ -24,7 +33,7 @@ building at a time, each reviewed before the next.
 10. Ambuja Neotia Ecocentre
 11. Tea Junction
 Techno India University is NOT in this task (it already has its own model in `public/tiu.js`).
-Anything not on this list needs Captain's approval first.
+The 300 m expansion above supersedes the original landmark-only scope.
 
 ## References (Captain's decision: public street-level imagery)
 - Allowed for **reference only** (proportions, storey count, window rhythm, materials, colours,
@@ -95,7 +104,8 @@ pass their IDs into the world builder; suppress only their generated visuals whi
 footprints and deferred colliders; keep the ordinary generated building on a load failure.
 Continue deriving all world positions from `campus.json`. Verify missing-file fallback,
 replacement identity/placement, static colliders, smoke tests and before/after performance.
-No edits to either excluded file are authorized by the existing task's file list.
+**Resolved 2026-11-27:** Captain answered "yes" to adding world.js and main.js; the file
+list above now includes these integration changes.
 
 The existing 11 model files do not establish visual accuracy: the references file mostly lists
 OSM links and descriptions, not inspected Street View views. Each new or corrected model needs
@@ -167,5 +177,45 @@ if (window.__replacedLandmarkIds && window.__replacedLandmarkIds.includes(Number
 
 **Syntax check:** `node --input-type=module --check` passed on both
 `public/landmarks.js` and `tools/landmarks/build-station.mjs`.
+
+### 2026-11-28 — five Street View frontage replacements
+
+Rebuilt and replaced these assets from inspected January 2026 Google Street View panoramas:
+- Wipro Tower 5 (`193308962`): curved green-glass corner, pale floor bands and red recessed bays.
+- Ambuja Neotia EcoCentre (`ov359`): terracotta frontage, narrow blue-grey vertical glazing,
+  pale dividers and low central entrance panel.
+- IIHM Global Campus (`sv4`): two-storey white frontage, twin glazed bays, recessed entrance,
+  canopy/columns and a narrower upper block.
+- PwC office (`134101085`): provisional white frontage with lower green glazing and upper screen;
+  the view is partly obscured by trees.
+- Hotel Monotel (`193478726`): tan blank tower face, narrow centre glazing and tall recessed lobby.
+
+All hidden elevations remain plain. Heights are explicitly recorded as estimates in
+`tools/landmarks/survey.json`; no Street View pixels or logos are embedded. The reproducible
+300 m inventory contains 180 footprint centres: four are in this inspected set and 176 remain
+`unverified`. Wipro is an original task landmark outside that radius. The remaining legacy GLBs
+are not claimed as visually verified.
+
+Runtime integration now waits for successful GLB loads, suppresses only those generated building
+meshes, retains mapped footprints and deferred wall colliders, and falls back to the generated
+building when a model request fails. The public landmark viewer was repaired by removing its
+reference to an unvendored OrbitControls file.
+
+Checks:
+- `node tools/landmarks/validate-surveyed.mjs`: 5/5 assets pass footprint (max 0.3776 m), winding,
+  30k-triangle, four-material and 2 MB limits.
+- `node tools/landmarks/preview.mjs`: five exact placements, public viewer completion, deliberate
+  missing-model case and zero page errors; comparison sheet generated in ignored output.
+- `node tools/landmarks/integration.mjs`: one replacement per mapped ID, no generated overlap,
+  active deferred wall collisions, 20 seconds of street simulation, and IIHM 404 fallback.
+  Hardware WebGL render was 373 calls / 644,483 triangles versus 371 / 649,391 at the branch base,
+  within the existing 750-call / 1.5M-triangle budget.
+- `npm run check`: 46/46 files OK. Direct syntax checks passed for all landmark scripts and changed
+  runtime modules. `graphify update .` rebuilt 1,411 nodes / 2,249 edges.
+
+The repository's original `npm run smoke` was attempted with installed Chrome but its exhaustive
+`__tiu.cost()` child-by-child pass did not finish after roughly an hour; no smoke report was
+produced. The scoped hardware-WebGL integration above covers this change without modifying that
+shared harness.
 
 ## Review

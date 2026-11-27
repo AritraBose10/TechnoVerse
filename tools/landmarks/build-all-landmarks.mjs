@@ -4,6 +4,7 @@
 
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "node:url";
 import * as THREE from "../../public/vendor/three.module.js";
 
 const OUT_DIR = path.resolve("public/models/landmarks");
@@ -206,7 +207,7 @@ function packGLB(meshList, materials, rootName) {
 
     const uvBv = addBuf(uvArr, 34962);
     const uvAcc = accessors.length;
-    accessors.push({ bufferView: uvBv, byteOffset: 0, componentType: 5126, count, type: "VEC2", min: [0,0], max: [1,1] });
+    accessors.push({ bufferView: uvBv, byteOffset: 0, componentType: 5126, count, type: "VEC2", min: [minP[0] / 5, minP[1] / 5], max: [maxP[0] / 5, maxP[1] / 5] });
 
     const idxArr = new Uint32Array(count);
     for (let i = 0; i < count; i++) idxArr[i] = i;
@@ -516,6 +517,10 @@ const SPECS = [
 // ---------------------------------------------------------------------------
 // RUN GENERATION FOR ALL 10 BUILDINGS
 // ---------------------------------------------------------------------------
+export { boxPosNor, cylPosNor, polyCapPosNor, polyWallPosNor, merge, packGLB };
+
+// Importing the geometry helpers must not regenerate the legacy models.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 console.log("=================================================");
 console.log("GENERATING ALL 10 REMAINING TECHNOVERSE LANDMARKS");
 console.log("=================================================");
@@ -578,3 +583,5 @@ for (const spec of SPECS) {
 }
 
 console.log("\nAll landmark GLB models successfully generated!");
+
+}
