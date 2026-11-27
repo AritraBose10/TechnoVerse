@@ -1588,9 +1588,53 @@ export function makeCharacter(kit, opts = {}) {
   // Seated on the saddle, hands on the grips, feet on the pedals following the cranks, trunk
   // inclined forward (more when sprinting), head up to see the road. At a stop the left foot comes
   // down to the ground.
+  // where the elbow points while riding, from the midpoint of shoulder and grip: [out, down, back] in metres
+  const RIDE_POLE = { scooter: [0.1, 0.25, 0.1], motorcycle: [0.12, 0.25, 0.08], bicycle: [0.07, 0.28, 0.14] };
   let riding = false;
   let standHipH = null;
   const footFlat = legs.map(() => new THREE.Quaternion());
+  // The TechnoVerse avatar's hands: the clips leave them open with the fingers pointing down, so on a grip
+  // they looked like they were resting on it. Turn the wrist (fingers along the bike, palm down and a little
+  // inward) and curl the four fingers about their local X axis (checked: X+ closes the fist on both hands).
+  const fingerSets = ["Left", "Right"].map((S) => ["Index", "Middle", "Ring", "Pinky"].map((f) => [1, 2, 3].map((n) => bone(`${S}Hand${f}${n}`))));
+  const gripBasis = tv && fingerSets.every((set) => set.every((f) => f.every(Boolean))) ? [0, 1].map((i) => {
+    model.updateMatrixWorld(true);
+    const h = hands[i], inv = h.getWorldQuaternion(new THREE.Quaternion()).invert();
+    const F = fingerSets[i][1][0].getWorldPosition(new THREE.Vector3()).sub(h.getWorldPosition(new THREE.Vector3())).normalize();
+    const across = fingerSets[i][0][0].getWorldPosition(new THREE.Vector3()).sub(fingerSets[i][3][0].getWorldPosition(new THREE.Vector3())).normalize();
+    const N = new THREE.Vector3().crossVectors(F, across).normalize();
+    const toOther = hands[1 - i].getWorldPosition(new THREE.Vector3()).sub(h.getWorldPosition(new THREE.Vector3()));
+    if (N.dot(toOther) < 0) N.negate(); // at rest the palms face the body
+    return { f: F.applyQuaternion(inv), n: N.applyQuaternion(inv) };
+  }) : null;
+  const fingerRest = fingerSets.map((set) => set.map((f) => f.map((b) => b && b.quaternion.clone())));
+  let fingersCurled = false;
+  let fingersHeld = false;
+  const gq = { cur: new THREE.Quaternion(), pq: new THREE.Quaternion(), m0: new THREE.Matrix4(), m1: new THREE.Matrix4(), tq: new THREE.Quaternion(), ax: new THREE.Vector3(1, 0, 0) };
+  const gv = { f: new THREE.Vector3(), n: new THREE.Vector3(), F: new THREE.Vector3(), N: new THREE.Vector3(), c: new THREE.Vector3(), c2: new THREE.Vector3() };
+  function gripHand(i, r, other) {
+    if (!gripBasis) return;
+    const h = hands[i];
+    h.updateWorldMatrix(true, false);
+    h.getWorldQuaternion(gq.cur);
+    const { f, n } = gv;
+    f.copy(r.back).negate().multiplyScalar(0.85).addScaledVector(r.up, -0.35).normalize();
+    n.copy(other).sub(i === 0 ? r.gripL : r.gripR).normalize().multiplyScalar(0.25).addScaledVector(r.up, -1);
+    n.addScaledVector(f, -n.dot(f)).normalize();
+    // rotation taking the hand's (finger, palm) pair to the target pair
+    const F = gv.F.copy(gripBasis[i].f).applyQuaternion(gq.cur), N = gv.N.copy(gripBasis[i].n).applyQuaternion(gq.cur);
+    gq.m0.makeBasis(F, N, gv.c.crossVectors(F, N));
+    gq.m1.makeBasis(f, n, gv.c2.crossVectors(f, n));
+    gq.tq.setFromRotationMatrix(gq.m1.multiply(gq.m0.transpose())).multiply(gq.cur);
+    h.parent.getWorldQuaternion(gq.pq);
+    h.quaternion.copy(gq.pq).invert().multiply(gq.tq);
+    h.updateMatrixWorld(true);
+    const curl = [0.7, 1.0, 0.8];
+    fingerSets[i].forEach((finger, fi) => finger.forEach((b, j) => b.quaternion.copy(fingerRest[i][fi][j]).multiply(gq.tq.setFromAxisAngle(gq.ax, curl[j]))));
+    fingersCurled = true;
+    fingersHeld = true;
+  }
+
   function ride(dt, s) {
     const r = s.ride;
     riding = true;
@@ -1641,8 +1685,13 @@ export function makeCharacter(kit, opts = {}) {
       if (want === false) return;
       turn(arm, 1.05);
       turn(forearms[i], 0.45);
-      if (want) solveChain(arm, forearms[i], hands[i], want);
-      else solveChain(arm, forearms[i], hands[i], v3.copy(i === 0 ? r.gripL : r.gripR).addScaledVector(r.back, 0.05).addScaledVector(r.up, 0.02));
+      // the elbow bends out and down, behind the line from shoulder to grip (else the forearms splay to the bars)
+      const side = i === 0 ? -1 : 1;
+      const [pOut, pDown, pBack] = (r.posture ?? 1) < 0.15 ? RIDE_POLE.scooter : (r.posture ?? 1) < 0.4 ? RIDE_POLE.motorcycle : RIDE_POLE.bicycle;
+      const reach = want ? v3.copy(want) : v3.copy(i === 0 ? r.gripL : r.gripR).addScaledVector(r.back, 0.05).addScaledVector(r.up, 0.02);
+      const elbowPole = arm.getWorldPosition(v4).lerp(reach, 0.5).addScaledVector(r.right, side * pOut).addScaledVector(r.up, -pDown).addScaledVector(r.back, pBack);
+      solveChain(arm, forearms[i], hands[i], reach, elbowPole);
+      if (!want) gripHand(i, r, i === 0 ? r.gripR : r.gripL);
     });
     // legs: knees forward, ankles over the pedals (ball of the foot on the pedal)
     legs.forEach((leg, i) => {
@@ -1673,6 +1722,207 @@ export function makeCharacter(kit, opts = {}) {
     // face: concentrating a little when sprinting
     smile += (0.15 - 0.1 * r.effort - smile) * ease(dt, 3);
     for (const f of faces) f.morphTargetInfluences[f.morphTargetDictionary.mouthSmile] = clamp(smile, 0, 1);
+  }
+
+  // ---------- getting up off the ground ----------
+  // g: { t (s since the get-up began), lx, lz (head direction when lying, parent frame, unit), spin0 (holder spin
+  //      when it began), lead (+1 right foot steps forward, -1 left), floor (parent-frame ground height, 0 for the
+  //      player), groundAt (world fn, optional) }. Writes g.done, g.shift (metres along L the pelvis ended up), g.yaw.
+  const GU = { ready: false, legRest: [], handsAt: [new THREE.Vector3(), new THREE.Vector3()], handFrom: [new THREE.Vector3(), new THREE.Vector3()], fl: null, kneel: [new THREE.Vector3(), new THREE.Vector3()] };
+  const sm01 = (x) => { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); };
+  // turn hand i so its fingers point along F and its palm faces N (both world, unit), fingers curled by curl[3]
+  function orientHand(i, F, N, curl, w = 1) {
+    if (!gripBasis) return;
+    const h = hands[i];
+    h.updateWorldMatrix(true, false);
+    h.getWorldQuaternion(gq.cur);
+    const n = gv.n.copy(N).addScaledVector(F, -N.dot(F)).normalize();
+    const Fc = gv.F.copy(gripBasis[i].f).applyQuaternion(gq.cur), Nc = gv.N.copy(gripBasis[i].n).applyQuaternion(gq.cur);
+    gq.m0.makeBasis(Fc, Nc, gv.c.crossVectors(Fc, Nc));
+    gq.m1.makeBasis(F, n, gv.c2.crossVectors(F, n));
+    gq.tq.setFromRotationMatrix(gq.m1.multiply(gq.m0.transpose())).multiply(gq.cur);
+    if (w < 1) gq.tq.slerp(gq.cur.clone(), 1 - w);
+    h.parent.getWorldQuaternion(gq.pq);
+    h.quaternion.copy(gq.pq).invert().multiply(gq.tq);
+    h.updateMatrixWorld(true);
+    fingerSets[i].forEach((finger, fi) => finger.forEach((b, j) => b.quaternion.copy(fingerRest[i][fi][j]).multiply(gq.tq.setFromAxisAngle(gq.ax, curl[j] * w))));
+    fingersCurled = true;
+    fingersHeld = true;
+  }
+  function getUp(dt, g) {
+    riding = false;
+    sitting = false;
+    for (const a of Object.values(actions)) a.setEffectiveWeight(0);
+    actions.idle.setEffectiveWeight(1);
+    holder.rotation.set(0, Math.PI, 0);
+    holder.position.set(0, 0, 0);
+    mixer.update(dt);
+    holder.parent.updateMatrixWorld(true);
+    if (!GU.ready) {
+      // body measurements from the standing pose (scaled bodies work too)
+      const hq = holder.getWorldQuaternion(new THREE.Quaternion()).invert();
+      GU.footRel = legs.map((leg) => hq.clone().multiply(leg.foot.getWorldQuaternion(new THREE.Quaternion())));
+      const W = (b) => b.getWorldPosition(new THREE.Vector3());
+      const base = holder.parent.getWorldPosition(new THREE.Vector3()).y;
+      GU.hipH = W(hips).y - base;
+      GU.T = W(arms[0]).add(W(arms[1])).multiplyScalar(0.5).distanceTo(W(hips)); // pelvis to the shoulder line
+      GU.thigh = W(legs[0].up).distanceTo(W(legs[0].knee));
+      GU.shin = W(legs[0].knee).distanceTo(W(legs[0].foot));
+      GU.arm = W(arms[0]).distanceTo(W(forearms[0])) + W(forearms[0]).distanceTo(W(hands[0]));
+      GU.ankle = W(legs[0].foot).y - base;
+      GU.half = W(arms[0]).distanceTo(W(arms[1])) / 2;
+      GU.ready = true;
+    }
+    const t = g.t, lead = g.lead || 1;
+    const L = v4.set(g.lx, 0, g.lz).normalize(); // parent frame
+    const delta = Math.atan2(-g.lx, -g.lz); // spin at which the body lies face down with its head along L
+    const roll = wrapAngle((g.spin0 || 0) - delta);
+    const tRoll = Math.abs(roll) > 0.35 ? 0.8 : 0;
+    const u = t - tRoll;
+    const spin = u < 0 ? delta + roll * (1 - sm01(t / tRoll)) : delta;
+    // g.limbs: the limb pose the fall left the body in (crash.limbs, see main.js), faded out as the hands go down;
+    // applied now, while the holder still stands upright, so the whole body is then tipped as usual
+    if (g.limbs && u < 0.4) {
+      const k = 1 - sm01(u / 0.4), Ls = g.limbs;
+      const rightA = new THREE.Vector3(1, 0, 0).applyQuaternion(holder.parent.getWorldQuaternion(qa));
+      const tw = (b, ang) => { if (ang && Math.abs(ang) > 1e-3) turnInWorld(b, qc.setFromAxisAngle(rightA, ang * k)); };
+      tw(spine, (Ls.spine || 0) * 0.6); tw(chest, (Ls.spine || 0) * 0.4);
+      tw(arms[0], Ls.aL); tw(arms[1], Ls.aR);
+      tw(forearms[0], Ls.eL); tw(forearms[1], Ls.eR);
+      tw(legs[0].up, Ls.tL); tw(legs[1].up, Ls.tR);
+      tw(legs[0].knee, -(Ls.kL || 0)); tw(legs[1].knee, -(Ls.kR || 0));
+      tw(legs[0].foot, (Ls.kL || 0) * 0.5); tw(legs[1].foot, (Ls.kR || 0) * 0.5);
+      tw(neck, (Ls.head || 0) * 0.4); tw(head, (Ls.head || 0) * 0.6);
+    }
+    // g.fromFeet: the body lies with its pelvis one body-height from where the player stands (it fell about the feet)
+    const off = g.fromFeet ? GU.hipH : 0;
+    // ---- the schedule (seconds after the roll) ----
+    const a = sm01(u / 0.45), b = sm01((u - 0.45) / 0.6), c = sm01((u - 1.05) / 0.3), c2 = sm01((u - 1.2) / 0.35), lieW = sm01((u - 0.3) / 0.3), d = sm01((u - 1.6) / 0.45), e = sm01((u - 2.05) / 0.6), f = sm01((u - 2.65) / 0.3);
+    const T = GU.T, H0 = 0.2 * (GU.hipH / 1.007);
+    const kneelHip = GU.thigh + 0.06;
+    // g.hStart: the pelvis height the body lay at when the get-up began (the fall about the feet leaves it lower than H0)
+    const hDelta = g.hStart != null ? (g.hStart - H0) * (1 - a) : 0;
+    let hipY = H0 + hDelta, shY = H0 + hDelta;
+    if (u > 0.45) { hipY = lerpN(H0, H0 + 0.06, b); shY = lerpN(H0, 0.85 * GU.arm, b); }
+    if (u > 1.05) { hipY = lerpN(H0 + 0.06, kneelHip, c); shY = lerpN(0.85 * GU.arm, Math.max(kneelHip + 0.02, 0.9 * GU.arm), c); }
+    let elev = Math.asin(clamp((shY - hipY) / T, -1, 1)); // torso angle above the horizontal
+    let ang = Math.PI / 2 - elev;
+    const handAlong = 0.75 * T; // hands planted beside the chest, a little behind the shoulders
+    let fwd = T - T * Math.cos(elev); // the shoulders stay where they lay while the chest comes up over the hands
+    if (u > 1.55) {
+      ang = lerpN(ang, 0.25, d);
+      hipY = lerpN(kneelHip, kneelHip + 0.03, d);
+    }
+    const leadAlong = fwd + 0.42;
+    if (u > 2.05) {
+      const fwd0 = fwd;
+      hipY = lerpN(kneelHip + 0.03, GU.hipH, e);
+      fwd = lerpN(fwd0, leadAlong - 0.04, e);
+      ang = lerpN(0.25, 0, e) + 0.22 * Math.sin(Math.PI * e);
+    }
+    if (u > 2.65) ang *= 1 - f;
+    g.shift = fwd + off;
+    g.yaw = spin;
+    // ---- the root: tilt toward L about the hips, then put the hips where they belong ----
+    const tilt = qa.setFromAxisAngle(v1.set(L.z, 0, -L.x), u < 0 ? Math.PI / 2 : ang);
+    holder.quaternion.copy(tilt).multiply(qb.setFromAxisAngle(UP, Math.PI + spin));
+    holder.position.set(0, 0, 0);
+    holder.parent.updateMatrixWorld(true);
+    const parent = holder.parent;
+    const floor = g.floor || 0;
+    const want = new THREE.Vector3(L.x * (fwd + off), floor + (u < 0 ? H0 + 0.05 * Math.sin(Math.PI * t / tRoll) : hipY), L.z * (fwd + off));
+    hips.getWorldPosition(v1);
+    holder.position.copy(want).sub(parent.worldToLocal(v1.clone()));
+    holder.updateMatrixWorld(true);
+    // world helpers
+    const toW = (x) => parent.localToWorld(x);
+    const Lw = toW(new THREE.Vector3().copy(L)).sub(toW(new THREE.Vector3())).normalize();
+    const Rw = new THREE.Vector3().crossVectors(Lw, UP).normalize();
+    const O = toW(new THREE.Vector3(L.x * off, floor, L.z * off));
+    // the ground under p; a wall or a car beside the body is not ground (hands and feet stay within a few cm of the floor level)
+    const ground = (p) => { const y = g.groundAt ? g.groundAt(p.x, p.z, p.y + 0.8) : null; return y === null || y === undefined ? O.y : clamp(y, O.y - 0.1, O.y + 0.1); };
+    const turnR = (bn, angle) => { if (Math.abs(angle) > 1e-4) turnInWorld(bn, qc.setFromAxisAngle(Rw, angle)); };
+    if (u < 0) {
+      // rolling over onto the front: arms drawn in, legs as they lie
+      return;
+    }
+    // ---- trunk and head: the back arches as the chest comes up; the head looks ahead ----
+    const arch = 0.3 * b * (1 - c) + 0.1 * c * (1 - d);
+    turnR(spine, arch * 0.6); // positive about the body's right axis = extension (chest up when lying face down)
+    turnR(chest, arch * 0.4);
+    const look = 0.3 * sm01((a - 0.6) / 0.4) * (1 - d) + 0.15 * d * (1 - e);
+    turnR(neck, look * 0.5);
+    turnR(head, look * 0.5);
+    // ---- legs: knees come under the hips (shins on the ground), then the lead foot steps forward, then the other ----
+    const kneelW = Math.max(lieW, c2) * (1 - f);
+    if (kneelW > 0.01) {
+      const hipG = new THREE.Vector3().copy(O).addScaledVector(Lw, fwd);
+      for (let i = 0; i < 2; i++) {
+        const side = i === 0 ? -1 : 1;
+        const isLead = side === lead;
+        const leg = legs[i];
+        const K = new THREE.Vector3().copy(hipG).addScaledVector(Rw, side * 0.11).addScaledVector(Lw, -GU.shin * 0.97);
+        K.y = ground(K) + 0.075; // the ankle when the shin lies on the ground, toes pointed back
+        // before the knees come under: legs straight out behind on the ground
+        const Lie = new THREE.Vector3().copy(hipG).addScaledVector(Rw, side * 0.12).addScaledVector(Lw, -(GU.thigh + GU.shin));
+        Lie.y = ground(Lie) + 0.09;
+        K.lerpVectors(Lie, K, c2);
+        let tgt = K, pole = new THREE.Vector3().copy(hipG).addScaledVector(Lw, 0.5 * c2 - 0.4 * (1 - c2)).addScaledVector(UP, -0.4), flat = 0;
+        if (isLead) {
+          const s1 = sm01((u - 1.7) / 0.35);
+          const F = new THREE.Vector3().copy(O).addScaledVector(Lw, leadAlong).addScaledVector(Rw, side * 0.12);
+          F.y = ground(F) + GU.ankle + 0.12 * Math.sin(Math.PI * s1);
+          tgt = K.clone().lerp(F, s1);
+          pole = pole.lerp(new THREE.Vector3().copy(hipG).addScaledVector(Lw, 0.8).addScaledVector(UP, 0.4), s1);
+          flat = s1;
+        } else {
+          const s2 = sm01((u - 2.3) / 0.35);
+          const F = new THREE.Vector3().copy(O).addScaledVector(Lw, leadAlong).addScaledVector(Rw, side * 0.1);
+          F.y = ground(F) + GU.ankle + 0.1 * Math.sin(Math.PI * s2);
+          tgt = K.clone().lerp(F, s2);
+          pole = pole.lerp(new THREE.Vector3().copy(hipG).addScaledVector(Lw, 0.8).addScaledVector(UP, 0.4), sm01((u - 2.05) / 0.4));
+          flat = s2;
+        }
+        const cur = leg.foot.getWorldPosition(new THREE.Vector3());
+        solveChain(leg.up, leg.knee, leg.foot, cur.lerp(tgt, kneelW), pole);
+        // the foot: flat on the ground once it is planted, otherwise pointed back along the shin
+        const footNow = leg.foot.getWorldQuaternion(new THREE.Quaternion());
+        const flatQ = new THREE.Quaternion().copy(holder.parent.getWorldQuaternion(new THREE.Quaternion())).multiply(qb.setFromAxisAngle(UP, Math.PI + spin)).multiply(GU.footRel[i]);
+        footNow.slerp(flatQ, flat);
+        leg.foot.quaternion.copy(leg.knee.getWorldQuaternion(qa).invert()).multiply(footNow);
+        leg.foot.updateMatrixWorld(true);
+      }
+    }
+    // the legs first: the lead hand goes to where the lead knee ends up
+    // ---- hands: to the ground beside the chest, palms flat, fingers forward; the lead hand then onto the lead knee ----
+    const plant = a * (1 - sm01((u - 1.5) / 0.2));
+    const kneeHand = sm01((u - 1.75) / 0.3) * (1 - sm01((u - 2.35) / 0.3));
+    for (let i = 0; i < 2; i++) {
+      const side = i === 0 ? -1 : 1;
+      const isLead = side === lead;
+      if (!g.from) g.from = [null, null];
+      if (!g.from[i]) g.from[i] = hands[i].getWorldPosition(new THREE.Vector3()); // where the hand was when the push-up began
+      const P = GU.handsAt[i].copy(O).addScaledVector(Lw, handAlong).addScaledVector(Rw, side * (GU.half + 0.06));
+      P.y = ground(P) + 0.045;
+      const tgt = new THREE.Vector3().copy(g.from[i]).lerp(P, a).addScaledVector(UP, 0.1 * Math.sin(Math.PI * a) * (1 - b));
+      let w = plant;
+      if (isLead && kneeHand > 0) {
+        const k = legs[i].knee.getWorldPosition(new THREE.Vector3()).addScaledVector(UP, 0.05).addScaledVector(Lw, -0.06);
+        tgt.lerp(k, kneeHand);
+        w = Math.max(w, kneeHand);
+      }
+      if (w < 0.01) continue;
+      const sh = arms[i].getWorldPosition(new THREE.Vector3());
+      const pole = sh.clone().addScaledVector(Lw, -0.3).addScaledVector(Rw, side * 0.18).addScaledVector(UP, 0.1);
+      const cur = hands[i].getWorldPosition(new THREE.Vector3());
+      cur.lerp(tgt, w);
+      solveChain(arms[i], forearms[i], hands[i], cur, pole);
+      solveChain(arms[i], forearms[i], hands[i], cur, pole); // a second pass: one pass leaves the wrist a few cm off at full reach
+      // palm down, fingers forward and a little out; on the knee the fingers wrap over it
+      const F = new THREE.Vector3().copy(Lw).addScaledVector(Rw, side * 0.25).normalize();
+      orientHand(i, F, new THREE.Vector3(0, -1, 0), isLead && kneeHand > 0.5 ? [0.35, 0.45, 0.3] : [0.05, 0.08, 0.04], w);
+    }
+    g.done = u >= 2.95;
   }
 
   // ---------- sitting on a bench or stool ----------
@@ -1815,6 +2065,96 @@ export function makeCharacter(kit, opts = {}) {
   }
 
   const gearOf = (kind) => model.getObjectByName("gear-" + kind);
+
+  // ---- secondary motion: the hair chains and the polo's hem and sleeves on the TechnoVerse avatars ----
+  // SecondaryMotion v1 adds Hair_<Region>_<Chain>_<NN> and Cloth_Hem_* / Cloth_Sleeve_* bones (nothing in
+  // the animation clips moves them). Each chain is a verlet tail in world space that lags behind its rest
+  // position and is pulled back to it; the bone is then turned to point at the tail. Angles are capped:
+  // the polo's weights stretch the cloth (artists' own check failed), so hem 2.5 deg and sleeve 1 deg.
+  // Values are the artists' suggested_spring (manifest.json) except max, which is ours.
+  const SPRING = [
+    [/^Hair_Back/, { k: 0.35, d: 0.5, g: 0.03, drag: 0.2, max: 30 }],
+    [/^Hair_Crown/, { k: 0.3, d: 0.45, g: 0.02, drag: 0.2, max: 24 }],
+    [/^Hair_Fringe/, { k: 0.35, d: 0.45, g: 0.02, drag: 0.2, max: 24 }],
+    [/^Hair_Side/, { k: 0.55, d: 0.55, g: 0.01, drag: 0.2, max: 22 }],
+    [/^Cloth_Hem/, { k: 0.25, d: 0.4, g: 0.08, drag: 0.3, max: 2.5 }],
+    [/^Cloth_Sleeve/, { k: 0.4, d: 0.5, g: 0.04, drag: 0.3, max: 1 }],
+  ];
+  const chains = [];
+  {
+    const groups = {};
+    model.traverse((o) => {
+      const m = o.isBone && /^((?:Hair|Cloth)_[A-Za-z]+(?:_\d\d)?(?:_[LR]|_[FB][LR])?)_(\d\d)$/.exec(o.name);
+      if (m) (groups[m[1]] ||= []).push([+m[2], o]);
+    });
+    model.updateMatrixWorld(true);
+    for (const [name, list] of Object.entries(groups)) {
+      const spec = SPRING.find(([re]) => re.test(name));
+      if (!spec) continue;
+      const bones = list.sort((a, b) => a[0] - b[0]).map((x) => x[1]);
+      const wp = bones.map((b) => b.getWorldPosition(new THREE.Vector3()));
+      const tails = bones.map((b, i) => (i < bones.length - 1 ? wp[i + 1].clone() : wp[i].clone().add(wp[i].clone().sub(i ? wp[i - 1] : wp[i]))));
+      chains.push({
+        bones,
+        p: spec[1],
+        max: (spec[1].max * Math.PI) / 180,
+        rest: bones.map((b) => b.quaternion.clone()),
+        tailLocal: bones.map((b, i) => tails[i].clone().applyMatrix4(b.matrixWorld.clone().invert())),
+        E: bones.map(() => new THREE.Vector3()),
+        V: bones.map(() => new THREE.Vector3()),
+        rp: bones.map(() => new THREE.Vector3()),
+        ready: false,
+      });
+    }
+  }
+  const sq = { o: new THREE.Vector3(), r: new THREE.Vector3(), d: new THREE.Vector3(), n: new THREE.Vector3(), q: new THREE.Quaternion(), pq: new THREE.Quaternion(), tmp: new THREE.Vector3() };
+  function secondary(dt) {
+    if (!chains.length) return;
+    dt = Math.min(dt, 0.05);
+    if (dt <= 0) return;
+    const f = dt * 60;
+    for (const c of chains) {
+      const { o, r, d, n, q, pq, tmp } = sq;
+      for (let i = 0; i < c.bones.length; i++) {
+        const b = c.bones[i];
+        b.quaternion.copy(c.rest[i]);
+        b.updateWorldMatrix(i === 0, false);
+        o.setFromMatrixPosition(b.matrixWorld);
+        r.copy(c.tailLocal[i]).applyMatrix4(b.matrixWorld); // where the tail is at rest, in the world
+        const len = o.distanceTo(r);
+        // The tail is kept as an offset E from its rest point. Only a fraction (drag) of the rest point's own
+        // movement is felt as inertia, so a head bob does not throw a 2 cm hair segment to its limit.
+        if (!c.ready || c.rp[i].distanceToSquared(r) > 0.25) { c.E[i].set(0, 0, 0); c.V[i].set(0, 0, 0); c.rp[i].copy(r); } // first frame, or the body was moved
+        c.E[i].addScaledVector(d.copy(r).sub(c.rp[i]), -c.p.drag);
+        c.rp[i].copy(r);
+        const damp = Math.pow(1 - c.p.d, f);
+        const pull = 1 - Math.pow(1 - c.p.k, f);
+        c.V[i].multiplyScalar(damp).addScaledVector(c.E[i], -pull);
+        c.V[i].y -= c.p.g * 9.8 * dt * dt;
+        c.E[i].add(c.V[i]);
+        // keep the segment's length and its angle from rest within the limit
+        n.copy(r).add(c.E[i]);
+        d.copy(n).sub(o).normalize();
+        tmp.copy(r).sub(o).normalize();
+        const cos = THREE.MathUtils.clamp(d.dot(tmp), -1, 1);
+        if (Math.acos(cos) > c.max) {
+          n.copy(d).addScaledVector(tmp, -cos).normalize(); // the part of d across the rest direction
+          d.copy(tmp).multiplyScalar(Math.cos(c.max)).addScaledVector(n, Math.sin(c.max));
+        }
+        n.copy(o).addScaledVector(d, len);
+        c.E[i].copy(n).sub(r);
+        // turn the bone from its rest direction to the new one
+        q.setFromUnitVectors(tmp, d);
+        b.parent.getWorldQuaternion(pq);
+        b.quaternion.copy(pq).invert().multiply(q).multiply(pq).multiply(c.rest[i]);
+        b.updateMatrix();
+        b.updateWorldMatrix(false, false);
+      }
+      c.ready = true;
+    }
+  }
+
+
   return {
     model: holder,
     height,
@@ -1863,7 +2203,24 @@ export function makeCharacter(kit, opts = {}) {
       holder.parent?.updateMatrixWorld(true);
     },
     update(dt, s) {
+      fingersHeld = false;
+      this.updateBody(dt, s);
+      if (fingersCurled && !fingersHeld) {
+        fingersCurled = false; // off the grips: fingers back to rest (the clips may not key them)
+        fingerSets.forEach((set, i) => set.forEach((f, fi) => f.forEach((b, j) => b && b.quaternion.copy(fingerRest[i][fi][j]))));
+      }
+      secondary(dt);
+    },
+    /** the hair and polo spring bones of the TechnoVerse avatars (0 on every other body) */
+    springBones: () => chains.reduce((a, c) => a + c.bones.length, 0),
+    /** true when update() accepts `getUp` (the hands are planted with palms flat only on the TechnoVerse avatar; other bodies keep rest fingers) */
+    getUpSupported: true,
+    updateBody(dt, s) {
       clock += dt;
+      if (s.getUp) {
+        getUp(dt, s.getUp);
+        return;
+      }
       if (s.pose) {
         // a scripted pose (the crash): [{ name, t (s into the clip), w }], the clips blended by weight
         if (riding || sitting) { riding = false; sitting = false; }

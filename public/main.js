@@ -3,7 +3,6 @@ import * as THREE from "three";
 import RAPIER from "/vendor/rapier.es.js";
 import { createDriving } from "/drive.js";
 import { buildWorld } from "/world.js";
-import { createTileStream } from "/tilestream.js";
 import { buildClearance } from "/clearance.js";
 import { loadLandmarks } from "/landmarks.js";
 import { createMinimap } from "/minimap.js";
@@ -11,7 +10,7 @@ import { loadCharacterKit, loadCrowdBody, loadAvatarBody, loadPolo, makeCharacte
 import { vehiclesReady } from "/vehicles.js";
 import { buildBicycle, newRide, stepBike, BICYCLE_KINDS } from "/bicycle.js";
 import { buildDaylight } from "/daylight.js";
-import { newHuman, stepHuman, pushHuman, landHuman } from "/humanphys.js";
+import { newHuman, stepHuman, pushHuman, landHuman, GETUP_TIME } from "/humanphys.js";
 import { buildMotorcycle, MOTORCYCLE_KINDS, MOTORCYCLE_DESIGNS, makeEngineSound, setMotorcycleNight } from "/motorcycle.js";
 import { buildTraffic } from "/traffic.js";
 import { buildPeople } from "/people.js";
@@ -132,18 +131,14 @@ const world = new RAPIER.World({ x: 0, y: -GRAVITY, z: 0 });
 world.timestep = STEP;
 const campus = await (await fetch("/campus.json")).json();
 const __t0 = performance.now(), __heap0 = performance.memory ? performance.memory.usedJSHeapSize : 0;
-const bc = { x: 0, z: 0, t: 0, vx: 0, vz: 0 };
-// ?stream=1: stream the baked tiles around the player (debug hook: window.__stream.stats()). Off by default, nothing renders from the tiles yet.
-const tileStream = location.search.includes("stream=1") ? createTileStream() : null;
-if (tileStream) { window.__stream = tileStream; tileStream.start().catch((e) => console.warn("tile streaming off:", e.message)); } // player position/velocity, for worldInfo.staticColliders
 const worldInfo = buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel });
 // Startup cost of the world, for deciding what to stream. ?fp=1 adds a fingerprint of every mesh (same number = same world).
 window.__boot = {
-  buildWorldMs: Math.round(performance.now() - __t0), colliders: world.colliders.len(), sceneChildren: scene.children.length, statics: worldInfo.staticColliders.stats(), bc: worldInfo.staticColliders, buildings: campus.buildings.length,
+  buildWorldMs: Math.round(performance.now() - __t0), colliders: world.colliders.len(), sceneChildren: scene.children.length, buildings: campus.buildings.length,
   heapMB: performance.memory ? Math.round((performance.memory.usedJSHeapSize - __heap0) / 1e6) : null,
   fp: location.search.includes("fp=1") ? (() => { let f = 0, n = 0; scene.traverse((o) => { if (!o.isMesh) return; n++; const p = o.geometry.attributes.position; f += p.count + p.getX(0) + p.getY(0) + p.getZ(p.count - 1) + o.position.x + o.position.z; if (o.isInstancedMesh) { for (let i = 0; i < o.instanceMatrix.array.length; i += 997) f += o.instanceMatrix.array[i]; f += o.count; } }); return [n, Math.round(f * 100) / 100]; })() : undefined,
 };
-console.info("[boot]", JSON.stringify(window.__boot, (k, v) => (k === "bc" ? undefined : v)));
+console.info("[boot]", JSON.stringify(window.__boot));
 loadLandmarks({ scene, campus });
 const minimap = createMinimap({ campus, getMe: () => me, getPlayers: () => players, getCamYaw: () => camYaw });
 const { places, props, focus, entranceYaw, animate: animateWorld, captureReflections } = worldInfo;
@@ -1080,7 +1075,7 @@ let physicsTime = 0;
 let airTime = 0;
 const vel = { x: 0, z: 0 };
 const human = newHuman(0);
-const fall = { th: 0, w: 0 }; // the player's body physics (humanphys.js)
+const fall = { th: 0, w: 0, gu: null }; // the player's body physics (humanphys.js); gu: the get-up in progress (character.js getUp)
 let walkGrade = 0;
 let lastImpact = 0;
 const wrapAngle = (a) => Math.atan2(Math.sin(a), Math.cos(a));
@@ -1224,6 +1219,7 @@ let rideGrade = 0;
 let landBob = 0;
 function nearestBike() {
   if (!me) return null;
+  if (forcedBike != null) return bikes[forcedBike] || null;
   const p = me.group.position;
   let best = null;
   for (const b of bikes) {
@@ -1816,6 +1812,8 @@ function impactFx(speed, hard) {
   crashSound(speed, hard);
 }
 let crash = null;
+let forcedBike = null; // test hook: __tiu.forceBike(i)
+let paused = false; // test hook: __tiu.pause(true) stops the frame loop so tests can step it
 let limp = 0;
 const SLIDE_DECEL = 5.5; // m/s^2, a body on asphalt
 const BIKE_DECEL = 4;
@@ -2054,6 +2052,23 @@ function crashFrame(dt) {
       c.spin0 = c.spin;
       c.standDur = rr(2.3, 2.9);
     }
+  } else if (hero.getUpSupported) {
+    // up off the ground by planting the hands and stepping the feet (character.js getUp); it places the body itself
+    c.pt += dt;
+    c.gu ||= { t: 0, lx: c.lx, lz: c.lz, spin0: c.spin0, lead: c.vr.mirror || 1, floor: 0, groundAt };
+    c.gu.t = c.pt;
+    c.angle = -1;
+    hero.update(dt, { speed: 0, grounded: true, turnRate: 0, facing: me.group.rotation.y, lookAt: null, talk: 0, getUp: c.gu });
+    if (c.gu.done) {
+      // the holder is back to its idle place: move the player to where the pelvis ended up, facing as the body does
+      const y = me.group.rotation.y, cy = Math.cos(y), sy = Math.sin(y);
+      p.x += (c.gu.lx * cy + c.gu.lz * sy) * c.gu.shift;
+      p.z += (-c.gu.lx * sy + c.gu.lz * cy) * c.gu.shift;
+      me.group.rotation.y = y + c.gu.yaw;
+      c.spin = 0;
+      endCrash();
+    }
+    return;
   } else {
     c.pt += dt;
     const k = c.pt / c.standDur;
@@ -2233,12 +2248,14 @@ function frame() {
   requestAnimationFrame(frame);
   const rawDt = Math.min(clock.getDelta(), 0.1);
   stepFx(rawDt);
-  const dt = rawDt * timeScale * FX.slowK;
+  const dt = paused ? 0 : rawDt * timeScale * FX.slowK;
   const now = performance.now();
 
   if (!me) return; // the join screen has a pre-rendered flyover (CSS): nothing is drawn in 3D until the player is in
   const pos = me.group.position;
-  if (seq && hero) seqFrame(dt);
+  if (paused) {
+    // test hook: nothing moves (the scene is still drawn), the test steps it with crashStep / rideStep / advance
+  } else if (seq && hero) seqFrame(dt);
   else if (crash && hero) crashFrame(dt);
   else if (drive.active && hero) drive.frame(dt); // while driving, drive.js steps the physics world
   else if (riding && hero) rideFrame(dt);
@@ -2364,8 +2381,13 @@ function walkFrame(dt, now) {
   }
   // falling: an inverted pendulum about the feet (theta'' = g/L sin theta) until the body is on the
   // ground, then it lies there; in the last 1.4 s it pushes back up
+  if (fall.gu) human.fallen = Math.max(human.fallen, 0.2); // no walking until the get-up is finished
   if (human.fallen > 0) {
-    if (human.fallen < 1.4) fall.th = Math.max(0, fall.th - dt * (Math.PI / 2) / 1.2);
+    if (human.fallen < GETUP_TIME && fall.th >= Math.PI / 2 - 0.01 && hero?.getUpSupported) {
+      // lying face down, head the way the player faced (the fall tips the body forward about the feet): hands down, push up, knees, one foot forward, stand
+      fall.gu ||= { t: 0, lx: 0, lz: -1, spin0: 0, lead: Math.random() < 0.5 ? -1 : 1, floor: 0, groundAt, fromFeet: true, hStart: 0.124 };
+      fall.gu.t += dt;
+    } else if (human.fallen < 1.4) fall.th = Math.max(0, fall.th - dt * (Math.PI / 2) / 1.2);
     else if (fall.th < Math.PI / 2) {
       if (fall.th === 0) { fall.th = 0.08; fall.w = 0.8; }
       fall.w += (GRAVITY / 0.95) * Math.sin(fall.th) * dt;
@@ -2387,7 +2409,8 @@ function walkFrame(dt, now) {
       turnRate,
       leanFwd: human.leanFwd,
       leanSide: human.leanSide,
-      down: fall.th,
+      down: fall.gu ? 0 : fall.th,
+      getUp: fall.gu || undefined,
       stagger: human.stagger > 0 || limp > 0,
       facing: me.group.rotation.y,
       lookAt: nearest ? lookTarget.set(nearest.group.position.x, nearest.group.position.y + 1.8, nearest.group.position.z) : null,
@@ -2396,6 +2419,20 @@ function walkFrame(dt, now) {
       talk,
       groundAt,
     });
+    if (fall.gu?.done) {
+      // up: the player stands where the pelvis ended up, facing the way the body was
+      const g = fall.gu, y = me.group.rotation.y, cy = Math.cos(y), sy = Math.sin(y);
+      const nx = pos.x + (g.lx * cy + g.lz * sy) * g.shift, nz = pos.z + (-g.lx * sy + g.lz * cy) * g.shift;
+      me.group.rotation.y = y + g.yaw;
+      human.heading = me.group.rotation.y;
+      human.fallen = 0;
+      human.vx = human.vz = 0;
+      fall.th = 0;
+      fall.gu = null;
+      placeBody(nx, pos.y, nz);
+      pos.set(nx, pos.y, nz);
+      hero.update(0, { speed: 0, grounded: true, turnRate: 0, facing: me.group.rotation.y, lookAt: null, talk: 0 });
+    }
   }
 }
 let reflectionsDone = false;
@@ -2479,15 +2516,6 @@ function afterMove(dt, now, pos) {
     captureReflections();
   }
   animateWorld(now / 1000); // leaves moving in the breeze
-  { // static colliders (walls, kerbs, lamps, trunks) exist only near the player (my avatar, which is on the bike or in the car when I am; the camera before I join)
-    const at = me ? me.group.position : camera.position;
-    const t = now / 1000, dtc = Math.max(1e-3, t - bc.t);
-    if (bc.t) { bc.vx += ((at.x - bc.x) / dtc - bc.vx) * 0.2; bc.vz += ((at.z - bc.z) / dtc - bc.vz) * 0.2; }
-    Object.assign(bc, { x: at.x, z: at.z, t });
-    const sp = Math.hypot(bc.vx, bc.vz), k = sp > 40 ? 40 / sp : 1; // a teleport must not look like a 3 km/s lookahead
-    worldInfo.staticColliders.update(bc.x, bc.z, bc.vx * k, bc.vz * k);
-    tileStream?.update(bc.x, bc.z, bc.vx * k, bc.vz * k, now);
-  }
   updateStreet(dt, pos);
   minimap.update(dt);
   for (const p of props) {
@@ -2676,7 +2704,7 @@ window.__tiu = {
     parkBike(b, x, 0, z, entranceYaw + turn);
     return { x: b.x, z: b.z, heading: b.heading };
   },
-  rideInfo: () => riding && { v: +riding.r.v.toFixed(2), kmh: +(riding.r.v * 3.6).toFixed(1), rpm: Math.round(riding.r.rpm), gear: riding.r.gearNo, design: riding.bike.model.design, heading: riding.r.heading, steer: +riding.r.steer.toFixed(3), lean: +riding.r.lean.toFixed(3), footDown: +riding.r.footDown.toFixed(2), grade: +rideGrade.toFixed(3) },
+  rideInfo: () => riding && { v: +riding.r.v.toFixed(2), kmh: +(riding.r.v * 3.6).toFixed(1), rpm: Math.round(riding.r.rpm), gear: riding.r.gearNo, design: riding.bike.model.design, heading: riding.r.heading, steer: +riding.r.steer.toFixed(3), lean: +riding.r.lean.toFixed(3), footDown: +riding.r.footDown.toFixed(2), grade: +rideGrade.toFixed(3), saddle: _w.saddle.toArray(), gripL: _w.gripL.toArray(), gripR: _w.gripR.toArray() },
   slow(k = 1) {
     timeScale = k;
   },
@@ -2698,7 +2726,25 @@ window.__tiu = {
   hero: () => Boolean(hero),
   // push the player (impulse in N*s, world x/z): __tiu.push(60, 0) is a shoulder bump
   push: (jx, jz) => pushHuman(human, jx, jz),
-  body: () => ({ v: +Math.hypot(human.vx, human.vz).toFixed(2), state: human.state, stamina: +human.stamina.toFixed(2), leanFwd: +human.leanFwd.toFixed(3), leanSide: +human.leanSide.toFixed(3), fallen: +human.fallen.toFixed(2), th: +fall.th.toFixed(2) }),
+  body: () => ({ v: +Math.hypot(human.vx, human.vz).toFixed(2), state: human.state, stamina: +human.stamina.toFixed(2), leanFwd: +human.leanFwd.toFixed(3), leanSide: +human.leanSide.toFixed(3), fallen: +human.fallen.toFixed(2), th: +fall.th.toFixed(2), gu: fall.gu ? +fall.gu.t.toFixed(3) : null }),
+  // test hooks: crash(6, "wall") crashes the rider off the bike they are on; crashStep(dt) steps that crash and returns
+  // its state; rideStep(dt) steps the ride; pause(true) stops the simulation (the scene is still drawn); forceBike(i)
+  // makes bike i the one E picks, wherever the player stands (null to undo)
+  crash: (v = 6, what = "wall") => riding && crashIntoVehicle(null, v, null, what),
+  crashStep(dt = 1 / 30) {
+    if (crash && hero) crashFrame(dt);
+    const c = crash;
+    return c ? { phase: c.phase, t: +c.t.toFixed(3), pt: +c.pt.toFixed(3), lx: c.lx, lz: c.lz, floor: c.floor, spin: c.spin, spin0: c.spin0, lead: c.vr.mirror, done: false } : { done: true };
+  },
+  rideStep(dt = 1 / 30) {
+    if (riding && hero) rideFrame(dt);
+  },
+  pause(on = true) {
+    paused = Boolean(on);
+  },
+  forceBike(i = null) {
+    forcedBike = i;
+  },
   // run the getting-on/off sequence ahead without drawing: __tiu.advance(1.5); returns the step
   advance(seconds) {
     for (let t = 0; t < seconds && seq; t += 1 / 30) seqFrame(1 / 30);

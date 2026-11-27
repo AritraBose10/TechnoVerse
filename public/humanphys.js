@@ -193,6 +193,10 @@ export function stepHuman(h, input, ground, dt) {
   return { vx: h.vx, vz: h.vz };
 }
 
+// How long the get-up off the ground takes (seconds, character.js getUp, rolling over included). `fallen`
+// is set so that the body lies a moment first and then has this long left to get up.
+export const GETUP_TIME = 3.75;
+
 /**
  * Pushed: impulse (N*s) in the world (jx, jz) — a shoulder bump is about 40-70 N*s, a car at
  * walking pace 300+. Returns "sway" | "stagger" | "fall".
@@ -209,7 +213,7 @@ export function pushHuman(h, jx, jz) {
     h.stagger = 0.4 + capture * 0.9; // a few quick steps to catch the body
     return "stagger";
   }
-  h.fallen = 2.5 + capture; // down, sliding to a stop, then getting up
+  h.fallen = GETUP_TIME + 1.8 + 0.4 * capture; // down, sliding to a stop, lying a moment, then getting up
   return "fall";
 }
 
@@ -223,6 +227,6 @@ export function landHuman(h, v) {
     h.vz *= 0.6;
     return "stumble";
   }
-  h.fallen = 3;
+  h.fallen = GETUP_TIME + 1.8;
   return "fall";
 }

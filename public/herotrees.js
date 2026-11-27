@@ -24,6 +24,31 @@ export function createHeroTrees({ THREE, scene, renderer, quality = "high" }) {
   const pool = []; // { obj, set, index, kind } objects in use or free
   let ready = false;
   let clock = 0;
+  const heroTime = { value: 0 }; // seconds, advanced every frame: drives the leaf sway
+
+  // Leaves sway like the generated trees (same amplitude and rhythm, see leafMaterial in trees.js). Models differ in which
+  // axis is up in their own space (the artists' rain tree is Z-up with a node matrix that stands it up; Poly Haven models are
+  // Y-up), so the height and the two horizontal axes are worked out per model at load and passed in via userData.sway.
+  function swayShader(shader) {
+    const sw = this.userData.sway;
+    if (!sw) return;
+    shader.uniforms.uHeroTime = heroTime;
+    shader.uniforms.uUp = { value: new THREE.Vector3(...sw.up) };
+    shader.uniforms.uH1 = { value: new THREE.Vector3(...sw.h1) };
+    shader.uniforms.uH2 = { value: new THREE.Vector3(...sw.h2) };
+    shader.uniforms.uHeight = { value: sw.height };
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nuniform float uHeroTime; uniform vec3 uUp; uniform vec3 uH1; uniform vec3 uH2; uniform float uHeight;")
+      .replace("#include <begin_vertex>", `#include <begin_vertex>
+        {
+          float phase = modelMatrix[3].x * 0.37 + modelMatrix[3].z * 0.29;
+          float hgt = dot(position, uUp);
+          float k = clamp(hgt / uHeight, 0.0, 1.0);
+          float a = k * (sin(uHeroTime * 1.3 + phase + hgt * 0.4) * 0.09 + sin(uHeroTime * 3.1 + position.x) * 0.025);
+          float b = k * (cos(uHeroTime * 1.1 + phase * 1.3) * 0.07 + sin(uHeroTime * 2.7 + position.z) * 0.025);
+          transformed += uH1 * a + uH2 * b;
+        }`);
+  }
 
   async function load() {
     let manifest;
@@ -57,7 +82,20 @@ export function createHeroTrees({ THREE, scene, renderer, quality = "high" }) {
             o.userData.noAO = true;
           });
           const box = new THREE.Box3().setFromObject(g.scene);
-          species[name].push({ scene: g.scene, height: Math.max(0.1, box.max.y - box.min.y), minY: box.min.y });
+          const height = Math.max(0.1, box.max.y - box.min.y);
+          g.scene.updateMatrixWorld(true);
+          g.scene.traverse((o) => {
+            if (!o.isMesh || !o.material || /shadow/i.test(o.name) || !(o.material.alphaTest > 0)) return; // cut-out leaf cards only
+            const inv = new THREE.Matrix3().setFromMatrix4(o.matrixWorld).invert(); // world -> this mesh's own space
+            const up = new THREE.Vector3(0, 1, 0).applyMatrix3(inv).normalize();
+            const h1 = new THREE.Vector3(1, 0, 0).applyMatrix3(inv).normalize();
+            const h2 = new THREE.Vector3(0, 0, 1).applyMatrix3(inv).normalize();
+            o.material.userData.sway = { up: up.toArray(), h1: h1.toArray(), h2: h2.toArray(), height };
+            o.material.onBeforeCompile = swayShader;
+            o.material.customProgramCacheKey = () => "herotree-sway";
+            o.userData.heroLeaf = true;
+          });
+          species[name].push({ scene: g.scene, height, minY: box.min.y });
         } catch (e) {
           console.warn("hero tree failed:", f, e?.message);
         }
@@ -73,11 +111,13 @@ export function createHeroTrees({ THREE, scene, renderer, quality = "high" }) {
   function release(h) {
     h.set.hero[h.index] = 0;
     scene.remove(h.obj);
+    h.obj.traverse((o) => { if (o.userData.heroTint) o.material.dispose(); }); // the per-tree tinted leaf material (geometry and textures are shared)
     h.set = null;
   }
 
   function update(dt, px, pz) {
     if (!ready || max === 0) return;
+    heroTime.value += dt;
     clock += dt;
     if (clock < 0.25) return;
     clock = 0;
@@ -111,6 +151,17 @@ export function createHeroTrees({ THREE, scene, renderer, quality = "high" }) {
       obj.scale.setScalar(k);
       obj.position.set(t.x, t.y - model.minY * k, t.z);
       obj.rotation.y = t.yaw;
+      // each tree a slightly different green, same formula as the generated trees (age, water, road dust)
+      const kk = 0.86 + ((Math.sin(t.x * 12.9 + t.z * 78.2) * 43758.5) % 1 + 1) % 1 * 0.26;
+      obj.traverse((o) => {
+        if (!o.userData.heroLeaf) return;
+        const src = o.material, m = src.clone();
+        m.onBeforeCompile = src.onBeforeCompile;
+        m.customProgramCacheKey = src.customProgramCacheKey;
+        m.color.setRGB(kk, kk * (0.97 + 0.05 * Math.sin(t.x)), kk * 0.95);
+        o.material = m;
+        o.userData.heroTint = true;
+      });
       scene.add(obj);
       c.s.hero[c.i] = 1;
       pool.push({ obj, set: c.s, index: c.i });
