@@ -1,7 +1,7 @@
 ---
 id: T-007
 owner: codex
-status: review
+status: blocked
 depends: [T-005]
 ---
 # Faithful models of Sector V landmarks
@@ -71,6 +71,37 @@ Anything not on this list needs Captain's approval first.
 
 ## Questions
 
+### 2026-11-27 — nearby-building expansion: integration scope needed
+
+Captain requested accurate nearby buildings using Google Street View, then said "continue"
+after the proposed reopening. Working extent: the stated 300 m radius around the TIU data
+origin (180 footprint centres, including existing campus buildings). TIU's existing authored
+model remains excluded from replacement. This is preparation only; no model or runtime edits
+have been made.
+
+The existing file boundary prevents the requested expansion from rendering correctly:
+- `public/world.js:881-883` skips a hard-coded set of the original 11 landmark IDs before
+  generating buildings. Any additional GLB loaded by `public/landmarks.js` would overlap its
+  generated building. The generated meshes are subsequently merged into chunks at line 1389,
+  so deleting an individual building afterward is not a safe integration method.
+- `public/main.js:135` builds the world before the asynchronous landmark load at line 144.
+  Simply expanding the unconditional skip list would leave holes when a GLB fails to load.
+- The current skip also bypasses the footprint and wall-collider creation below it. Integration
+  must retain the appropriate footprint and deferred static-collider coverage for replacements.
+
+Requested scope addition: `public/world.js` and `public/main.js`, for landmark integration only.
+Concrete approach: prepare successful model replacements through `public/landmarks.js`;
+pass their IDs into the world builder; suppress only their generated visuals while retaining
+footprints and deferred colliders; keep the ordinary generated building on a load failure.
+Continue deriving all world positions from `campus.json`. Verify missing-file fallback,
+replacement identity/placement, static colliders, smoke tests and before/after performance.
+No edits to either excluded file are authorized by the existing task's file list.
+
+The existing 11 model files do not establish visual accuracy: the references file mostly lists
+OSM links and descriptions, not inspected Street View views. Each new or corrected model needs
+its own visible evidence. Unobserved sides must remain plain and be identified as unverified.
+
+
 ### Hook needed in main.js and world.js (Claude to add)
 
 After the world has finished building, add these lines in `main.js`
@@ -91,6 +122,15 @@ if (window.__replacedLandmarkIds && window.__replacedLandmarkIds.includes(Number
 (Or pass `replacedLandmarkIds` through `world.build()` options — whatever Claude prefers.)
 
 ## Result
+
+### 2026-11-27 — expansion preflight (not implementation)
+- Branch: `codex/T-007-nearby-buildings`, from `main` at 2551f68.
+- Confirmed 180 footprint centres within 300 m and 11 existing landmark GLBs.
+- January 2026 Google Street View coverage was observed at TIU's Street Number 2 frontage
+  (panorama `4PtrWRVgSwAB-eQ29Y_avg`). A full building-by-building survey remains outstanding.
+- Stopped at the file-scope boundary above, as AGENTS.md rule 3 requires. No models or runtime
+  files changed. This task is not complete; previous station results below are historical.
+
 
 ### Building 1: Salt Lake Sector V Metro Station (OSM ID 535333512)
 
