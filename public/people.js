@@ -3055,7 +3055,7 @@ function person(role, x, z, heading = 0, mesh = true) {
         // only draw and animate those in view; animate the far ones less often
         sphere.center.set(wx, p.y + 1, wz);
         const dist = cam.distanceTo(sphere.center);
-        const visible = dist < DRAW_DIST && frustum.intersectsSphere(sphere);
+        const visible = dist < Math.min(DRAW_DIST, crowdApi.maxDist || Infinity) && frustum.intersectsSphere(sphere);
         p.group.visible = visible && !p.hidden;
         p.dtAcc += dt;
         if (!visible) continue;

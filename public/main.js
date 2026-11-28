@@ -2513,7 +2513,8 @@ function cullStreet(dt, pos) {
       if (ud.lodFar ? d2 < 32 * 32 : d2 > 38 * 38) { if (ud.setLod(!ud.lodFar) !== false) ud.lodFar = !ud.lodFar; }
     }
   }
-  if (crowd) for (const p of crowd.people) if (p.group) p.group.visible = near(p.group);
+  // people.js culls the crowd itself every frame (view + distance); setting visible here drew everyone within cullRange, behind the camera and on full bodies, one frame in every 0.25 s
+  if (crowd) crowd.maxDist = cullRange;
 }
 function afterMove(dt, now, pos) {
   watchPerformance(dt / (timeScale || 1));
