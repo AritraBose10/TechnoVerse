@@ -15,7 +15,7 @@ const KNOWN_LANDMARKS = [
     no: 1,
     id: 535333512,
     name: "Sector V Metro Station",
-    glb: "/models/landmarks/535333512.glb",
+    glb: "/models/landmarks/535333512.glb?v=20261128-streetview",
     yaw: 0.5552 // long axis aligned
   },
   {
@@ -93,6 +93,13 @@ const KNOWN_LANDMARKS = [
     id: 193478726,
     name: "Hotel Monotel",
     glb: "/models/landmarks/193478726.glb?v=20261127-frontage",
+    yaw: 0
+  },
+  {
+    no: 13,
+    id: 193475626,
+    name: "Millennium City IT Park",
+    glb: "/models/landmarks/193475626.glb?v=20261128-streetview",
     yaw: 0
   }
 ];

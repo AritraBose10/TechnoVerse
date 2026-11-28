@@ -7,12 +7,13 @@ import path from "path";
 
 const OUT_PATH = path.resolve("public/models/landmarks/535333512.glb");
 
-// Real-world dimensions from OSM footprint and satellite measurement:
+// Plan dimensions come from the OSM footprint. Elevation and colours come from the
+// Jan 2026 Street View frontage recorded in station-survey.json.
 // Footprint pts: [[-3.17,-508.44],[115.08,-581.79],[122.53,-569.96],[4.26,-496.63]]
-// Length along long axis: ~139.15 m, Width: ~13.95 m, Height: 18.5 m (4 floors × 4.5 m + roof)
+// Length along long axis: ~139.15 m, width: ~13.95 m, estimated height: 14.6 m.
 const L = 139.15;
 const W = 13.95;
-const H_TOTAL = 18.5;
+const H_TOTAL = 14.6;
 
 console.log(`Generating Sector V Metro Station (L=${L}m, W=${W}m, H=${H_TOTAL}m)...`);
 
@@ -134,10 +135,65 @@ function box(w, h, d, tx, ty, tz, rx) { return boxPosNor(w, h, d, tx, ty, tz, rx
 function cyl(r, h, segs, tx, ty, tz) { return cylPosNor(r, h, segs, tx, ty, tz); }
 
 // Material groups accumulate geometry pieces
-const concrete = []; // grey structural concrete
-const facade = [];   // warm ochre cladding panels
-const roof = [];     // grey aluminium roof sheets / truss steel
-const glass = [];    // blue-tinted transparent glass
+const concrete = []; // pale structural concrete and end towers
+const facade = [];   // observed peach composite-panel band
+const roof = [];     // light-grey aluminium panel grid and blue roof trim
+const glass = [];    // dark station windows and openings
+
+// -----------------------------------------------------------------------
+// JAN 2026 SURVEYED EXTERIOR
+// -----------------------------------------------------------------------
+// Street View shows a long, flat-roofed station block rather than the barrel-vault
+// form used by the first procedural model. Ground level is largely open parking;
+// the street elevation above it is a grey panel grid with a peach window band.
+if (true) {
+  const sideZ = W / 2 - 0.16;
+  const columnZ = W / 2 - 1.35;
+
+  // Open ground floor: paired square piers carry a deep deck. The low roadside
+  // wall seen between parked cars is deliberately discontinuous at entrances.
+  for (let x = -L / 2 + 5; x < L / 2 - 3; x += 9.2) {
+    concrete.push(box(0.72, 4.65, 0.82, x, 2.325, -columnZ));
+    concrete.push(box(0.72, 4.65, 0.82, x, 2.325, columnZ));
+  }
+  concrete.push(box(L - 1.0, 0.55, W - 0.35, 0, 4.55, 0));
+  for (const z of [-sideZ, sideZ]) {
+    roof.push(box(L - 20, 1.05, 0.26, 5, 1.0, z));
+    concrete.push(box(L - 1.5, 0.5, 0.42, 0, 4.25, z));
+  }
+
+  // Three-storey rectangular station box. Light grey panel fields sit above and
+  // below the continuous peach band; dark windows repeat at the observed rhythm.
+  for (const z of [-sideZ, sideZ]) {
+    roof.push(box(L - 1.2, 2.0, 0.34, 0, 5.65, z));
+    facade.push(box(L - 1.2, 4.25, 0.38, 0, 8.75, z));
+    roof.push(box(L - 1.2, 2.45, 0.34, 0, 12.1, z));
+    for (let x = -L / 2 + 8; x < L / 2 - 4; x += 6.3) {
+      glass.push(box(2.25, 2.25, 0.16, x, 8.85, z + Math.sign(z) * 0.24));
+      roof.push(box(0.1, 8.0, 0.1, x - 3.1, 9.0, z + Math.sign(z) * 0.28));
+    }
+    for (const y of [6.65, 10.85, 13.32]) roof.push(box(L - 1.1, 0.1, 0.12, 0, y, z + Math.sign(z) * 0.29));
+  }
+
+  // Tall signed end core and the smaller far-end core match the two pale vertical
+  // masses visible along Chavlpatty Road. The sign itself is supplied by the shared
+  // street atlas, so this model does not embed a copied logo or image.
+  concrete.push(box(9.2, 14.35, W - 0.45, -54.5, 7.175, 0));
+  concrete.push(box(6.8, 13.7, W - 0.45, 55.0, 6.85, 0));
+  for (const side of [-1, 1]) {
+    glass.push(box(0.18, 2.8, 2.1, -49.82, 8.9, side * 3.7));
+    glass.push(box(0.18, 2.8, 2.1, 58.48, 8.9, side * 3.7));
+  }
+
+  // Flat roof and the thin blue edge visible above the panelled frontage.
+  roof.push(box(L + 0.8, 0.34, W + 0.25, 0, 13.56, 0));
+  glass.push(box(L + 1.0, 0.22, 0.34, 0, 13.82, -W / 2 - 0.05));
+  glass.push(box(L + 1.0, 0.22, 0.34, 0, 13.82, W / 2 + 0.05));
+
+  // Open entrance/parking voids remain dark behind the roadside columns.
+  glass.push(box(39, 3.1, 0.14, -18, 2.55, -sideZ - 0.05));
+  glass.push(box(31, 3.1, 0.14, 24, 2.55, -sideZ - 0.05));
+} else {
 
 // -----------------------------------------------------------------------
 // 1. GROUND LEVEL (y: 0 .. 5.5 m) — Portal piers and foundations
@@ -304,6 +360,7 @@ for (const side of [-1, 1]) {
   concrete.push(box(36.2, 0.15, 0.18, 0, 9.45, sz));
   concrete.push(box(36.2, 0.15, 0.18, 0, 8.15, sz));
 }
+}
 
 // -----------------------------------------------------------------------
 // 6. MERGE ALL MATERIAL GROUPS
@@ -354,29 +411,29 @@ function packGLB(meshList) {
     {
       name: "Concrete_Structure",
       pbrMetallicRoughness: {
-        baseColorFactor: [0.28, 0.31, 0.35, 1.0], // weathered #474f59
-        metallicFactor: 0.1, roughnessFactor: 0.8
+        baseColorFactor: [0.70, 0.69, 0.64, 1.0],
+        metallicFactor: 0.05, roughnessFactor: 0.82
       }
     },
     {
-      name: "Ochre_Facade",
+      name: "Peach_Panel_Band",
       pbrMetallicRoughness: {
-        baseColorFactor: [0.74, 0.64, 0.49, 1.0], // warm ochre #bca37d
-        metallicFactor: 0.15, roughnessFactor: 0.55
+        baseColorFactor: [0.70, 0.45, 0.34, 1.0],
+        metallicFactor: 0.12, roughnessFactor: 0.56
       }
     },
     {
-      name: "Canopy_Roof",
+      name: "Grey_Cladding",
       pbrMetallicRoughness: {
-        baseColorFactor: [0.55, 0.54, 0.52, 1.0], // aluminium #8d8a84
-        metallicFactor: 0.5, roughnessFactor: 0.4
+        baseColorFactor: [0.72, 0.75, 0.76, 1.0],
+        metallicFactor: 0.34, roughnessFactor: 0.48
       }
     },
     {
-      name: "Station_Glass",
+      name: "Station_Windows_And_Blue_Trim",
       pbrMetallicRoughness: {
-        baseColorFactor: [0.49, 0.66, 0.77, 0.35], // tinted blue-green
-        metallicFactor: 0.1, roughnessFactor: 0.1
+        baseColorFactor: [0.12, 0.24, 0.29, 0.78],
+        metallicFactor: 0.18, roughnessFactor: 0.24
       },
       alphaMode: "BLEND",
       doubleSided: true

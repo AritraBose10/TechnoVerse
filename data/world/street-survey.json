@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "surveyedAt": "2026-11-28",
+  "captures": [
+    {
+      "id": "gm-burger-king-2026-11",
+      "source": "Google Maps place photo",
+      "panoId": "CIABIhBjz_wyjtzrLR3e-xfg8CGs",
+      "captureDate": "2026-11",
+      "heading": 90,
+      "url": "https://www.google.com/maps/place/Burger+King/@22.5762535,88.4309726,3a,75y,90t/data=!3m8!1e2!3m6!1sCIABIhBjz_wyjtzrLR3e-xfg8CGs!2e10!3e12!4m7!3m6!1s0x3a02757e3ac61c9b:0xa64357812e16cef1!8m2!3d22.5765004!4d88.430704!10e5!16s%2Fg%2F11sjv34962",
+      "items": ["burger-king"],
+      "observed": "Low ground-floor frontage with a dark green name band, pale side panel, broad glazing, dark mullions and a recessed glazed door.",
+      "limits": "Contributed still photo rather than a navigable panorama; heading is the Maps viewer heading. No pixels or logo artwork are reused."
+    },
+    {
+      "id": "gm-nizams-2024-06",
+      "source": "Google Maps place photo",
+      "panoId": "CIHM0ogKEICAgIDz9_vMhAE",
+      "captureDate": "2024-06",
+      "heading": 90,
+      "url": "https://www.google.com/maps/place/Nizams+Kathi+roll/@22.5762138,88.4307707,3a,75y,90t/data=!3m8!1e2!3m6!1sCIHM0ogKEICAgIDz9_vMhAE!2e10!3e12!4m7!3m6!1s0x3a027503e0191f8b:0x49222b98f524bdde!8m2!3d22.5763211!4d88.4308289!10e5!16s%2Fg%2F11sj7r86vm",
+      "items": ["nizams-express"],
+      "observed": "Black fascia with yellow NIZAM'S EXPRESS lettering, a shallow canopy, metal-framed opening and a bright glazed service bay.",
+      "limits": "Contributed still photo rather than a navigable panorama; heading is the Maps viewer heading. Script lettering and logo marks are intentionally omitted."
+    },
+    {
+      "id": "gm-dominos-2026-05",
+      "source": "Google Maps place photo",
+      "panoId": "CIABIhBimPLVrgYAX1oZPTkEPr1h",
+      "captureDate": "2026-05",
+      "heading": 90,
+      "url": "https://www.google.com/maps/place/Domino's+Pizza+%7C+Sector+5,+Millennium+City/@22.5761252,88.4309622,3a,75y,90t/data=!3m8!1e2!3m6!1sCIABIhBimPLVrgYAX1oZPTkEPr1h!2e10!3e12!4m7!3m6!1s0x3a0275a556387201:0x67bec2a453f5582!8m2!3d22.5761625!4d88.4309829!10e5!16s%2Fg%2F124yggfcr",
+      "items": ["dominos"],
+      "observed": "Long navy fascia over a fully glazed shopfront, central glazed entrance, dark lower plinth and pale end walls.",
+      "limits": "Contributed still photo rather than a navigable panorama; heading is the Maps viewer heading. The domino symbol and wordmark styling are not reproduced."
+    },
+    {
+      "id": "gm-tea-junction-2023-09",
+      "source": "Google Maps place photo",
+      "panoId": "CIHM0ogKEICAgICZ7KTQRg",
+      "captureDate": "2023-09",
+      "heading": 90,
+      "url": "https://www.google.com/maps/place/Tea+Junction/@22.5770028,88.428654,3a,75y,90t/data=!3m8!1e2!3m6!1sCIHM0ogKEICAgICZ7KTQRg!2e10!3e12!4m7!3m6!1s0x3a027514b882cc2b:0x513618b0cb912b47!8m2!3d22.5768502!4d88.4284615!10e5!16s%2Fg%2F11h6d728m3",
+      "items": ["tea-junction"],
+      "observed": "Compact yellow-and-orange kiosk frontage with a lit menu/name band, dark frame, open service counter and glass display case.",
+      "limits": "Contributed still photo rather than a navigable panorama; heading is the Maps viewer heading. Menu artwork is not reproduced."
+    },
+    {
+      "id": "gm-ecocentre-2026-01",
+      "source": "Google Street View",
+      "panoId": "s7iwOLbQsWEgDAeFAft4FQ",
+      "captureDate": "2026-01",
+      "heading": 233.17,
+      "url": "https://www.google.com/maps/@?api=1&map_action=pano&pano=s7iwOLbQsWEgDAeFAft4FQ&heading=233.17&pitch=0&fov=75",
+      "items": ["ecocentre-name"],
+      "observed": "The warm brick-and-pale-stone entrance frontage carries the AMBUJA NEOTIA ECOCENTRE name in light plain lettering on the central lower panel.",
+      "limits": "Trees partly obscure the lower elevation. Letter spacing is approximated with a generic font; no corporate mark is reproduced."
+    },
+    {
+      "id": "gm-millennium-2026-01",
+      "source": "Google Street View",
+      "panoId": "EnaVFkFdUhP39JmdokX_9Q",
+      "captureDate": "2026-01",
+      "heading": 0.23,
+      "url": "https://www.google.com/maps/@22.5761324,88.4309624,3a,75y,0.23h,90t/data=!3m7!1e1!3m5!1sEnaVFkFdUhP39JmdokX_9Q!2e0",
+      "items": ["millennium-city-name", "burger-king", "nizams-express", "dominos"],
+      "observed": "Twin rounded curtain-glass wings, striped lower podium, central recessed entrance and canopy, raised palm-planted terrace, roadside fence and the low Burger King/Nizam's frontage read as one Millennium City composition.",
+      "limits": "Trees and traffic obscure parts of the podium. Rear elevations and roof equipment are not visible."
+    },
+    {
+      "id": "gm-sector-v-metro-2026-01",
+      "source": "Google Street View",
+      "panoId": "d4jOdnTrmvyAt_dOVGMdvw",
+      "captureDate": "2026-01",
+      "heading": 90,
+      "url": "https://www.google.com/maps/@22.5809907,88.4283422,3a,75y,90h,90t/data=!3m7!1e1!3m5!1sd4jOdnTrmvyAt_dOVGMdvw!2e0",
+      "items": ["sector-v-metro-name"],
+      "observed": "Long flat-roofed grey-and-peach panelled station block, dark repeated windows, open parking bays on concrete piers, pale end tower, blue roof trim and bilingual station name.",
+      "limits": "The atlas carries the English plain-text name only; the metro symbol and Bengali lettering are not copied."
+    },
+    {
+      "id": "gm-street13-2026-01",
+      "source": "Google Street View",
+      "panoId": "EnaVFkFdUhP39JmdokX_9Q",
+      "captureDate": "2026-01",
+      "heading": 180,
+      "url": "https://www.google.com/maps/@22.5761324,88.4309624,3a,75y,180h,90t/data=!3m7!1e1!3m5!1sEnaVFkFdUhP39JmdokX_9Q!2e0",
+      "items": ["street13-south-stalls", "street13-median-lamps"],
+      "observed": "Continuous low corrugated-roof food-stall row under mature trees, open service fronts with painted counters, blue-white kerbs, a planted divider and modern double-arm lamps.",
+      "limits": "Individual temporary stall names and parked vehicles vary; the row records stable massing and frontage rhythm only."
+    },
+    {
+      "id": "gm-metro-approach-2026-01",
+      "source": "Google Street View",
+      "panoId": "KoNBkvK7DbVeWZFQrab-kg",
+      "captureDate": "2026-01",
+      "heading": 335,
+      "url": "https://www.google.com/maps/@22.5798204,88.4289532,3a,75y,335h,90t/data=!3m7!1e1!3m5!1sKoNBkvK7DbVeWZFQrab-kg!2e0",
+      "items": ["metro-approach-stalls", "metro-approach-railing"],
+      "observed": "Undivided two-way approach with blue-white kerbs, paved footpaths, mature trees, black ornamental fencing, roadside food stalls and carts, and the elevated viaduct crossing the junction ahead.",
+      "limits": "People, autos and parked vehicles are dynamic and remain in the traffic/crowd systems rather than this static layer."
+    }
+  ]
+}

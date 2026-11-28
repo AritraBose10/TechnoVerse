@@ -10,6 +10,7 @@ import { addInstanceCull } from "/instcull.js";
 import { distSegRect } from "/streamer.js";
 import { buildTIU } from "/tiu.js";
 import { buildOpposite } from "/opposite.js";
+import { buildStreetLayer } from "/streetlife.js";
 import { heritageLamps, streetLights } from "/street.js";
 import { Sky } from "/vendor/jsm/objects/Sky.js";
 
@@ -109,7 +110,7 @@ function polyIndex(polys, cell = 32) {
 const bb = (pts) => { let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity; for (const [x, z] of pts) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (z < z0) z0 = z; if (z > z1) z1 = z; } return [x0, z0, x1, z1]; };
 const yawQuat = (a) => ({ x: 0, y: Math.sin(a / 2), z: 0, w: Math.cos(a / 2) });
 
-export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel, landmarkModels = new Map() }) {
+export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel, landmarkModels = new Map(), streetData = null }) {
   // The map's extent (metres from the university pin) comes from campus.json: a box around the Sector V boundary
   // polygon (tools/sector-v-boundary.json). Without `meta` it is the old 615 m square.
   const WB = campus.meta?.bounds || { xMin: -WORLD_HALF, xMax: WORLD_HALF, zMin: -WORLD_HALF, zMax: WORLD_HALF };
@@ -877,10 +878,15 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel, 
     }
   }
   const footprints = [tiuPts, tiuModel.footprint];
+  const streetReplacements = new Set((streetData?.items || []).flatMap((item) => {
+    if (item.replaceBuildingIds) return item.replaceBuildingIds.map(String);
+    return item.replaceBuilding && item.mount?.building != null ? [String(item.mount.building)] : [];
+  }));
   for (const b of campus.buildings) {
     if (b.id === TIU_ID) continue;
     const pts = outward(b.pts);
     footprints.push(pts);
+    if (streetReplacements.has(String(b.id))) continue;
     const landmark = landmarkModels.get(String(b.id));
     if (landmark) {
       if (!landmark.open) {
@@ -956,6 +962,8 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel, 
       places.push({ name: b.name, x: c[0], z: c[1] });
     }
   }
+
+  const streetLayer = buildStreetLayer({ scene, campus, data: streetData, registerMesh: add });
 
   // ---------- swimming pool ----------
   for (const w of campus.water || []) {
@@ -1454,6 +1462,7 @@ export function buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel, 
 
   return {
     staticColliders,
+    streetLayer,
     updateSigns,
     chunks,
     places,

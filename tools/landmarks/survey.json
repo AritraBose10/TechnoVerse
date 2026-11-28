@@ -42,6 +42,14 @@
       "captureDate": "2026-01", "status": "frontage-observed",
       "observed": "Broad largely blank tan stone front, narrow continuous vertical centre glazing with dark horizontal dividers, dark stone entrance piers and a broad canopy with a patterned underside. Low roof guardrail.",
       "unverified": "Rear and long sides, exact height, entrances beyond the visible front. Flags, plants and signs outside the footprint are not part of this building model."
+    },
+    {
+      "id": 193475626, "name": "Millennium City IT Park", "design": "millennium",
+      "height": 45.6, "heightSource": "Twelve visible curtain-wall storey bands at an estimated 3.8 m per storey; not a measured height.",
+      "pano": "EnaVFkFdUhP39JmdokX_9Q", "viewpoint": [22.5761324, 88.4309624], "heading": 0.23, "pitch": 0,
+      "captureDate": "2026-01", "status": "frontage-observed",
+      "observed": "Twin blue-grey curtain-glass wings with broad rounded street corners, slim pale horizontal floor bands, dark roof overhangs, a striped lower podium, a deep central entrance canopy, palms, a raised terrace and the low Burger King/Nizam's frontage along the street edge.",
+      "unverified": "Rear elevations, roof equipment and exact height. The curved wings follow the mapped multi-edge footprint; curves are represented by its existing facets. Storefronts, palms and the entrance forecourt remain separate data-driven street objects."
     }
   ]
 }

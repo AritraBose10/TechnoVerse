@@ -1,0 +1,17 @@
+{
+  "id": 535333512,
+  "name": "Salt Lake Sector V Metro Station",
+  "surveyedAt": "2026-11-28",
+  "captureDate": "2026-01",
+  "pano": "d4jOdnTrmvyAt_dOVGMdvw",
+  "viewpoint": [22.5809907, 88.4283422],
+  "heading": 90,
+  "observed": "Long flat-roofed station block with light-grey square panel cladding, a broad peach band, repeated dark rectangular windows, an open ground-level parking/entrance zone on concrete piers, pale vertical end cores, thin blue roof-edge trim and the bilingual Salt Lake Sector V name on the near core.",
+  "approach": {
+    "pano": "KoNBkvK7DbVeWZFQrab-kg",
+    "viewpoint": [22.5798204, 88.4289532],
+    "heading": 335,
+    "observed": "Street Number 11 is an undivided two-way approach with blue-white kerbs, paved footpaths, mature trees, black ornamental fencing, roadside food stalls and carts, slim lamps and the elevated viaduct crossing the junction ahead."
+  },
+  "unverified": "Interior, roof equipment, rear service elevation and exact height. The OSM footprint and existing long-axis alignment are retained."
+}

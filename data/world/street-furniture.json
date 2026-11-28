@@ -1,0 +1,135 @@
+{
+  "version": 1,
+  "phase": 1,
+  "atlas": {
+    "path": "/models/street/sign-atlas.webp",
+    "width": 2048,
+    "height": 512
+  },
+  "items": [
+    {
+      "id": "burger-king",
+      "kind": "storefront",
+      "name": "BURGER KING",
+      "status": "observed",
+      "replaceBuilding": true,
+      "evidence": "gm-burger-king-2026-11",
+      "anchor": { "type": "label", "sid": "osm:node/12209860058", "cached": [236.69, -40.27] },
+      "mount": { "building": "ov604", "frame": { "ux": 1, "uz": 0, "nx": 0, "nz": 1 }, "offset": 0.12 },
+      "facade": { "width": 6, "height": 3.35, "depth": 5.2, "signBottom": 2.48, "signTop": 3.28, "doorAt": 0.72, "awningDepth": 0 },
+      "atlasRect": [0, 0, 640, 128],
+      "sign": { "background": "#174a36", "foreground": "#f7f0d8", "font": "700 76px Arial" }
+    },
+    {
+      "id": "nizams-express",
+      "kind": "storefront",
+      "name": "NIZAM'S EXPRESS",
+      "status": "observed",
+      "replaceBuilding": true,
+      "evidence": "gm-nizams-2024-06",
+      "anchor": { "type": "label", "sid": "osm:node/12209860059", "cached": [244.18, -36.54] },
+      "mount": { "building": "ov604", "frame": { "ux": 1, "uz": 0, "nx": 0, "nz": 1 }, "offset": 0.12 },
+      "facade": { "width": 5.2, "height": 3.3, "depth": 5, "signBottom": 2.5, "signTop": 3.24, "doorAt": 0.28, "awningDepth": 0.65 },
+      "atlasRect": [640, 0, 640, 128],
+      "sign": { "background": "#17191a", "foreground": "#f2c44f", "font": "700 64px Arial" }
+    },
+    {
+      "id": "dominos",
+      "kind": "storefront",
+      "name": "Domino's",
+      "status": "observed",
+      "replaceBuilding": true,
+      "replaceBuildingIds": ["ov602", "ov603"],
+      "evidence": "gm-dominos-2026-05",
+      "anchor": { "type": "label", "sid": "osm:node/2454098356", "cached": [277.92, -52.94] },
+      "mount": { "building": "ov603", "frame": { "ux": 1, "uz": 0, "nx": 0, "nz": 1 }, "offset": 0.12 },
+      "facade": { "width": 8.4, "height": 3.45, "depth": 6.2, "signBottom": 2.55, "signTop": 3.38, "doorAt": 0.52, "awningDepth": 0 },
+      "atlasRect": [1280, 0, 640, 128],
+      "sign": { "background": "#173b63", "foreground": "#f7f7f3", "font": "700 76px Arial", "trim": "#a53636" }
+    },
+    {
+      "id": "tea-junction",
+      "kind": "storefront",
+      "name": "Tea Junction",
+      "status": "observed",
+      "evidence": "gm-tea-junction-2023-09",
+      "anchor": { "type": "building", "id": "ov325" },
+      "mount": { "building": "ov325", "edge": 0, "t": 0.5, "offset": 0.12 },
+      "facade": { "width": 5.25, "height": 3.1, "signBottom": 2.35, "signTop": 3.02, "doorAt": 0.82, "awningDepth": 0.45 },
+      "atlasRect": [0, 160, 480, 128],
+      "sign": { "background": "#e7a52e", "foreground": "#38251b", "font": "700 68px Arial", "trim": "#b44d27" }
+    },
+    {
+      "id": "ecocentre-name",
+      "kind": "building-sign",
+      "name": "AMBUJA NEOTIA ECOCENTRE",
+      "status": "observed",
+      "evidence": "gm-ecocentre-2026-01",
+      "anchor": { "type": "building", "id": "ov359" },
+      "mount": { "building": "ov359", "edge": 12, "t": 0.52, "offset": 0.1 },
+      "facade": { "width": 18, "signBottom": 4.15, "signTop": 5.95 },
+      "atlasRect": [512, 160, 1280, 128],
+      "sign": { "background": "#9b6256", "foreground": "#f1eadb", "font": "700 62px Arial" }
+    },
+    {
+      "id": "millennium-city-name",
+      "kind": "building-sign",
+      "name": "MILLENNIUM CITY IT PARK",
+      "status": "observed",
+      "evidence": "gm-millennium-2026-01",
+      "anchor": { "type": "building", "id": 193475626, "cached": [291.98, -86.81] },
+      "mount": { "building": 193475626, "frame": { "ux": 0.915, "uz": 0.403, "nx": -0.403, "nz": 0.915 }, "offset": 0.18 },
+      "facade": { "width": 16, "signBottom": 5.95, "signTop": 7.05 },
+      "atlasRect": [0, 320, 960, 128],
+      "sign": { "background": "#353d41", "foreground": "#e3e6e5", "font": "700 58px Arial" }
+    },
+    {
+      "id": "sector-v-metro-name",
+      "kind": "building-sign",
+      "name": "SALT LAKE SECTOR V",
+      "status": "observed",
+      "evidence": "gm-sector-v-metro-2026-01",
+      "anchor": { "type": "building", "id": 535333512 },
+      "mount": { "building": 535333512, "edge": 0, "t": 0.14, "offset": 0.18 },
+      "facade": { "width": 8.2, "signBottom": 8.0, "signTop": 9.45 },
+      "atlasRect": [1024, 320, 768, 128],
+      "sign": { "background": "#b2afa4", "foreground": "#202426", "font": "700 54px Arial" }
+    },
+    {
+      "id": "street13-south-stalls",
+      "kind": "stall-row",
+      "status": "observed",
+      "evidence": "gm-street13-2026-01",
+      "anchor": { "type": "road", "sid": "osm:way/562984694" },
+      "mount": { "road": "osm:way/562984694", "segment": 8, "t": 0.5, "side": "right", "offset": 17 },
+      "facade": { "length": 54, "bays": 12, "height": 2.85, "depth": 4.4 }
+    },
+    {
+      "id": "street13-median-lamps",
+      "kind": "lamp-row",
+      "status": "observed",
+      "evidence": "gm-street13-2026-01",
+      "anchor": { "type": "road", "sid": "osm:way/562984694" },
+      "mount": { "road": "osm:way/562984694", "segment": 8, "t": 0.5, "side": "right", "offset": 3.3 },
+      "facade": { "length": 96, "spacing": 24, "height": 8.2, "armWidth": 3.8 }
+    },
+    {
+      "id": "metro-approach-stalls",
+      "kind": "stall-row",
+      "status": "observed",
+      "evidence": "gm-metro-approach-2026-01",
+      "anchor": { "type": "road", "sid": "osm:way/158013562" },
+      "mount": { "road": "osm:way/158013562", "segment": 1, "t": 0.65, "side": "left", "offset": 9.5 },
+      "facade": { "length": 31, "bays": 7, "height": 2.65, "depth": 3.6 }
+    },
+    {
+      "id": "metro-approach-railing",
+      "kind": "railing-row",
+      "status": "observed",
+      "evidence": "gm-metro-approach-2026-01",
+      "anchor": { "type": "road", "sid": "osm:way/158013562" },
+      "mount": { "road": "osm:way/158013562", "segment": 2, "t": 0.5, "side": "left", "offset": 8.8 },
+      "facade": { "length": 46, "spacing": 1.65, "height": 1.35 }
+    }
+  ]
+}

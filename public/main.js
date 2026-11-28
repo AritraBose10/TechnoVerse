@@ -130,13 +130,15 @@ function disposeLabel(sprite) {
 const world = new RAPIER.World({ x: 0, y: -GRAVITY, z: 0 });
 world.timestep = STEP;
 const campus = await (await fetch("/campus.json")).json();
+const streetMode = new URLSearchParams(location.search).get("street");
+const streetData = streetMode === "0" ? null : await (await fetch("/models/street/street-furniture.json")).json();
 // Only suppress a generated building once its replacement has actually loaded.
 const landmarkModels = new Map();
 const __landmarkT0 = performance.now();
 await loadLandmarks({ scene, campus, models: landmarkModels });
 const __landmarkLoadMs = Math.round(performance.now() - __landmarkT0);
 const __t0 = performance.now(), __heap0 = performance.memory ? performance.memory.usedJSHeapSize : 0;
-const worldInfo = buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel, landmarkModels });
+const worldInfo = buildWorld({ RAPIER, scene, world, renderer, campus, makeLabel, landmarkModels, streetData });
 // Startup cost of the world, for deciding what to stream. ?fp=1 adds a fingerprint of every mesh (same number = same world).
 window.__boot = {
   landmarkLoadMs: __landmarkLoadMs, buildWorldMs: Math.round(performance.now() - __t0), colliders: world.colliders.len(), sceneChildren: scene.children.length, buildings: campus.buildings.length,
@@ -2687,6 +2689,7 @@ frame();
 // Small handle for automated tests and debugging in the console.
 window.__tiu = {
   clearance,
+  street: worldInfo.streetLayer,
   drive: () => drive.debug(),
   get nav() {
     return nav;

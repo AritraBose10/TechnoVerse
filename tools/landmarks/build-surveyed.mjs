@@ -47,13 +47,15 @@ for (const spec of survey.buildings) {
   const front = facing.reduce((a, b) => a.len > b.len ? a : b);
   const H = spec.height;
   const palette = spec.design === "ecocentre" ? ["#9b6256", "#d1c8b7", "#6f9099", "#465456"]
+    : spec.design === "millennium" ? ["#a9adb0", "#d8dde0", "#456775", "#343d43"]
     : spec.design === "monotel" ? ["#cbb393", "#e0ccad", "#8faba5", "#343939"]
     : spec.design === "wipro" ? ["#ddd8c8", "#a94d3f", "#709696", "#4c5959"]
     : ["#e5e4dd", "#d2d0c7", "#537c79", "#465252"];
   const mats = [material("stone", palette[0]), material("accent", palette[1]), material("opaque glazing", palette[2], 0.25, 0.3), material("frames", palette[3], 0.2, 0.55)];
   const G = [[], [], [], []];
   const shellH = spec.design === "iihm" ? 10.2 : H;
-  G[0].push(polyWallPosNor(pts, 0, shellH), polyCapPosNor(pts, shellH));
+  const shellMat = spec.design === "millennium" ? 2 : 0;
+  G[shellMat].push(polyWallPosNor(pts, 0, shellH), polyCapPosNor(pts, shellH));
   // Panels sit a few centimetres outside the shell; they do not enlarge its ground footprint.
   function panel(e, start, width, bottom, height, mat, depth = 0.06, offset = 0.055) {
     if (width <= 0 || height <= 0) return;
@@ -62,7 +64,25 @@ for (const spec of survey.buildings) {
     G[mat].push(boxPosNor(width, height, depth, x, bottom + height / 2, z, 0, Math.atan2(-e.uz, e.ux)));
   }
   const frontEdges = facing.filter((e) => e.nx * front.nx + e.nz * front.nz > 0.9 && e.len > 3);
-  if (spec.design === "wipro") {
+  if (spec.design === "millennium") {
+    // The mapped outline already contains the two wings and their faceted curved corners.
+    // Keep that plan, then reproduce the observed curtain-wall rhythm and striped podium.
+    const visibleEdges = edges.filter((e) => e.nx * -Math.sin(yaw) + e.nz * Math.cos(yaw) > 0.08 && e.len > 2.5);
+    for (const e of visibleEdges) {
+      panel(e, e.len * 0.025, e.len * 0.95, 7.2, H - 8.4, 2, 0.08, 0.09);
+      for (let y = 8.4; y < H - 0.8; y += 3.8) panel(e, e.len * 0.01, e.len * 0.98, y, 0.34, 1, 0.13, 0.14);
+      const bays = Math.max(2, Math.round(e.len / 4.4));
+      for (let i = 0; i <= bays; i++) panel(e, e.len * i / bays, 0.13, 7.2, H - 8.1, 3, 0.09, 0.15);
+      for (let y = 0.35; y < 7.0; y += 0.72) panel(e, e.len * 0.01, e.len * 0.98, y, 0.22, y % 1.44 < 0.4 ? 3 : 1, 0.11, 0.13);
+      panel(e, 0, e.len, H - 0.55, 0.7, 3, 1.25, 0.5);
+    }
+    // The deepest street-facing edge is the central entrance: dark recess, broad canopy and piers.
+    const e = front;
+    panel(e, e.len * 0.25, e.len * 0.5, 0.25, 6.5, 3, 0.5, 0.2);
+    panel(e, e.len * 0.34, e.len * 0.32, 0.3, 5.25, 2, 0.12, 0.55);
+    panel(e, e.len * 0.17, e.len * 0.66, 5.6, 0.58, 1, 3.2, 1.65);
+    for (const t of [0.24, 0.76]) panel(e, e.len * t, 0.48, 0.05, 6.05, 1, 0.7, 0.5);
+  } else if (spec.design === "wipro") {
     // The footprint already carries the stepped/rounded plan; repeat only the visible façade rhythm.
     const visibleEdges = edges.filter((e) => e.nx * -Math.sin(yaw) + e.nz * Math.cos(yaw) > 0.1);
     for (const e of visibleEdges) {
